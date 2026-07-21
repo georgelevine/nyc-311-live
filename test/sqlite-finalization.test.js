@@ -330,7 +330,7 @@ test('finalizes, repairs only map-proven rows, and creates a verified backup man
     crypto.createHash('sha256').update(fs.readFileSync(backupPath)).digest('hex')
   );
   assert.equal(manifest.application_id, APPLICATION_ID);
-  assert.equal(manifest.user_version, 1);
+  assert.equal(manifest.user_version, 2);
   assert.equal(manifest.health.ok, true);
   assert.deepEqual(manifest.tables.live_portal_requests, {
     count: 3,
@@ -355,14 +355,38 @@ test('finalizes, repairs only map-proven rows, and creates a verified backup man
   const backup = inspectDatabase(backupPath);
   try {
     assert.equal(backup.prepare('PRAGMA application_id').get().application_id, APPLICATION_ID);
-    assert.equal(backup.prepare('PRAGMA user_version').get().user_version, 1);
-    const migration = backup.prepare(
-      'SELECT version, name, checksum, applied_at FROM schema_migrations'
-    ).get();
-    assert.equal(migration.version, 1);
-    assert.equal(migration.name, MIGRATIONS[0].name);
-    assert.equal(migration.checksum, migrationChecksum(MIGRATIONS[0]));
-    assert.equal(migration.applied_at, NOW.toISOString());
+    assert.equal(backup.prepare('PRAGMA user_version').get().user_version, 2);
+    const migrations = backup.prepare(
+      'SELECT version, name, checksum, applied_at FROM schema_migrations ORDER BY version'
+    ).all();
+    assert.deepEqual(migrations.map(migration => ({ ...migration })), MIGRATIONS.map(migration => ({
+      version: migration.version,
+      name: migration.name,
+      checksum: migrationChecksum(migration),
+      applied_at: NOW.toISOString()
+    })));
+    assert.equal(
+      migrationChecksum(MIGRATIONS[0]),
+      '1e32eaa262dfe06fdc810ee9a2497db71c9820222ce3f702be10793ebf67a3d8'
+    );
+    assert.deepEqual(
+      backup.prepare('PRAGMA table_info(live_portal_requests)').all()
+        .map(row => row.name)
+        .filter(name => name.startsWith('police_precinct')),
+      [
+        'police_precinct',
+        'police_precinct_boundary_version',
+        'police_precinct_matched_at'
+      ]
+    );
+    assert.deepEqual(
+      backup.prepare(`
+        SELECT name FROM sqlite_master
+        WHERE type='table' AND name LIKE 'police_precinct%'
+        ORDER BY name
+      `).all().map(row => row.name),
+      ['police_precinct_boundary_versions', 'police_precincts']
+    );
     assert.deepEqual(
       backup.prepare('PRAGMA index_info(live_number_queue_audit_due_idx)').all().map(row => row.name),
       ['audit_outcome', 'audit_after', 'suffix']
@@ -397,7 +421,7 @@ test('finalizes, repairs only map-proven rows, and creates a verified backup man
     backupPath: secondBackupPath,
     now: new Date('2026-07-20T22:16:30.000Z')
   });
-  assert.equal(second.migrations_before.pending.length, 1);
+  assert.equal(second.migrations_before.pending.length, 2);
   assert.equal(second.planned.map_seen_repairs, 1);
   assert.equal(second.planned.submitted_at_normalizations, 1);
   assert.equal(second.changes.map_seen_repaired, 1);
@@ -418,7 +442,7 @@ for (const mode of ['dryRun', 'verifyOnly']) {
     assert.equal(result.mode, mode === 'dryRun' ? 'dry-run' : 'verify-only');
     assert.equal(result.planned.map_seen_repairs, 1);
     assert.equal(result.planned.submitted_at_normalizations, 1);
-    assert.equal(result.migrations_before.pending.length, 1);
+    assert.equal(result.migrations_before.pending.length, 2);
     assert.equal(result.backup, null);
     assert.equal(fs.existsSync(backupPath), false);
     assert.equal(fs.existsSync(`${backupPath}.manifest.json`), false);
@@ -470,6 +494,39 @@ test('refuses a tampered migration checksum', async t => {
     finalizeDatabase({ databasePath: fixture.databasePath, dryRun: true, now: NOW }),
     /checksum\/name mismatch/
   );
+});
+
+test('precinct migration tolerates collector-created columns and remains idempotent', t => {
+  const fixture = createFixture(t);
+  const database = new DatabaseSync(fixture.databasePath);
+  try {
+    database.exec(`
+      ALTER TABLE live_portal_requests ADD COLUMN police_precinct INTEGER;
+      ALTER TABLE live_portal_requests ADD COLUMN police_precinct_boundary_version TEXT;
+      ALTER TABLE live_portal_requests ADD COLUMN police_precinct_matched_at TEXT;
+    `);
+    const first = applyMigrations(database, NOW.toISOString());
+    assert.equal(first.user_version, 2);
+    assert.equal(first.pending.length, 0);
+    assert.equal(first.applied.length, 2);
+    assert.equal(
+      database.prepare(`
+        SELECT COUNT(*) AS count FROM pragma_table_info('live_portal_requests')
+        WHERE name LIKE 'police_precinct%'
+      `).get().count,
+      3
+    );
+    assert.equal(
+      database.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE name='police_precincts'").get().count,
+      1
+    );
+    const second = applyMigrations(database, '2026-07-21T00:00:00.000Z');
+    assert.equal(second.user_version, 2);
+    assert.equal(second.pending.length, 0);
+    assert.equal(second.applied.length, 2);
+  } finally {
+    database.close();
+  }
 });
 
 test('revalidates map provenance inside the repair transaction', t => {

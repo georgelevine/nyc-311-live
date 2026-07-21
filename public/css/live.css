@@ -99,8 +99,8 @@ button, input, select { font: inherit; }
 .clock-block strong { display: block; font-size: 13px; font-variant-numeric: tabular-nums; }
 .clock-block span { display: block; margin-top: 2px; color: var(--muted); font-size: 9px; }
 
-.toolbar { display: grid; flex: 0 0 auto; grid-template-columns: minmax(0, 1fr) 112px; gap: 8px; padding: 0 18px 15px; }
-.search-wrap { position: relative; min-width: 0; }
+.toolbar { display: grid; flex: 0 0 auto; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; padding: 0 18px 15px; }
+.search-wrap { position: relative; min-width: 0; grid-column: 1 / -1; }
 .search-wrap span { position: absolute; left: 11px; top: 8px; color: var(--muted); font-size: 19px; }
 .toolbar input, .toolbar select {
   width: 100%; height: 38px; border: 1px solid var(--line); border-radius: 10px;
@@ -283,7 +283,7 @@ button, input, select { font: inherit; }
   .clock-block strong { font-size: 15px; }
   .clock-block span { font-size: 10px; }
 
-  .toolbar { flex: none; grid-template-columns: minmax(0, 1fr) 118px; gap: 7px; padding: 12px 10px 10px; }
+  .toolbar { flex: none; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; padding: 12px 10px 10px; }
   .toolbar input, .toolbar select { height: 44px; border-radius: 12px; font-size: 13px; }
   .search-wrap span { top: 10px; }
   .feed-heading { flex: none; padding: 7px 14px 10px; }

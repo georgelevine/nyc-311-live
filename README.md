@@ -9,6 +9,7 @@ closure, and displays the archive in a macOS dashboard with a live map.
 
 - Public request number, status, problem, address, and Portal timestamps
 - Portal-provided coordinates when they are available
+- A coordinate-derived NYPD precinct and the exact DCP boundary release used
 - Status history, scheduled follow-ups, and closure snapshots
 - Audit-only requests that do not appear in the Portal's map feed
 
@@ -37,6 +38,7 @@ npm run desktop:package
 ## Important scripts
 
 - `npm run live:monitor` — run the local Portal collector
+- `npm run precincts:import` — install the pinned official precinct boundaries and backfill coordinates
 - `npm run db:verify` — verify the SQLite archive without changing it
 - `npm run db:finalize` — create a verified migration-ready SQLite backup
 - `npm run db:backup` — create a non-mutating verified routine SQLite backup
@@ -66,8 +68,20 @@ discoveries without claiming the audit is complete. The response also reports
 collector freshness, archive time coverage, missing submitted times, request
 type and borough distributions, and detail/map-pin coverage.
 
+`GET /api/police-precincts` lists the active precinct release. Add
+`police_precinct=NUMBER` to `/api/live-dashboard`, `/api/live-map`, or
+`/api/live-summary` to scope those results to one precinct.
+
 ## Data-source note
 
 Coordinates are stored only when supplied by the NYC311 Portal. Audit-recovered
 requests without Portal coordinates remain in the archive and incoming feed but
-are not assigned derived or fabricated map positions.
+are not assigned derived or fabricated map positions. Precincts are derived
+locally by matching those coordinates to the versioned official NYC Department
+of City Planning [police-precinct boundary dataset](https://www.nyc.gov/content/planning/pages/resources/datasets/police-precincts);
+the polygons live in related tables while the matched precinct and boundary
+version live on each request.
+
+The collector loads the active boundary release at startup. For a boundary
+update, stop the collector, run `npm run precincts:import`, and then restart the
+collector so newly arriving requests use the activated release.

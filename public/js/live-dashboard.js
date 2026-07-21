@@ -28,6 +28,7 @@
   const mobileViewTabs = document.querySelector('.mobile-view-tabs');
   const search = document.getElementById('request-search');
   const statusFilter = document.getElementById('status-filter');
+  const precinctFilter = document.getElementById('precinct-filter');
   const connection = document.querySelector('.live-state');
   const connectionLabel = document.getElementById('connection-label');
   const pollInterval = document.getElementById('poll-interval');
@@ -69,6 +70,8 @@
   let refreshInFlight = false;
   let mapRefreshInFlight = false;
   let mapRequestSequence = 0;
+  let dashboardRequestSequence = 0;
+  let dashboardAbortController = null;
   let lastMapRefreshStartedAt = 0;
   let currentPollSeconds = 15;
   let lastPortalCheck = null;
@@ -121,6 +124,7 @@
   const suffixOf = record => Number(String(record && record.srnumber || '').replace(/^311-/, '')) || 0;
   const recordSignature = record => JSON.stringify([
     record.srnumber, record.status, record.problem, record.address,
+    record.police_precinct, record.police_precinct_boundary_version,
     record.latitude, record.longitude, record.submitted_at, record.portal_url,
     record.problem_details, record.additional_details, record.next_update,
     record.date_reported, record.updated_on, record.date_closed, record.details_fetched_at,
@@ -198,7 +202,9 @@
   function matchesFilters(record) {
     const query = search.value.trim().toLowerCase();
     const status = statusFilter.value;
+    const precinct = precinctFilter.value;
     if (status && record.status !== status) return false;
+    if (precinct && Number(record.police_precinct) !== Number(precinct)) return false;
     if (!query) return true;
     return [record.srnumber, record.problem, record.problem_details,
       record.additional_details, record.address, record.status,
@@ -364,6 +370,15 @@
     document.getElementById('detail-address').textContent = record.address || 'Location unavailable';
     document.getElementById('detail-number').textContent = record.srnumber;
     document.getElementById('detail-time').textContent = fullTimeLabel(record.submitted_at);
+    const precinctRow = document.getElementById('detail-precinct-row');
+    const precinctValue = document.getElementById('detail-precinct');
+    if (record.police_precinct) {
+      precinctValue.textContent = precinctLabel(record.police_precinct);
+      precinctRow.classList.remove('hidden');
+    } else {
+      precinctValue.textContent = '';
+      precinctRow.classList.add('hidden');
+    }
     document.getElementById('detail-link').href = record.portal_url || '#';
     setDetailBadge(record.public_details_state === 'pending' ? 'pending' : null);
     const archiveRow = document.getElementById('detail-archive-row');
@@ -628,6 +643,36 @@
     return Number.isFinite(number) ? number : fallback;
   }
 
+  function precinctLabel(number) {
+    const value = Number(number);
+    const remainder100 = value % 100;
+    const suffix = remainder100 >= 11 && remainder100 <= 13
+      ? 'th'
+      : value % 10 === 1 ? 'st' : value % 10 === 2 ? 'nd' : value % 10 === 3 ? 'rd' : 'th';
+    return `${value}${suffix} Precinct`;
+  }
+
+  function scopedUrl(pathname, parameters = {}) {
+    const params = new URLSearchParams(parameters);
+    if (precinctFilter.value) params.set('police_precinct', precinctFilter.value);
+    const query = params.toString();
+    return query ? `${pathname}?${query}` : pathname;
+  }
+
+  async function loadPolicePrecincts() {
+    try {
+      const payload = await fetchJson('/api/police-precincts', 'Police precinct service');
+      const precincts = Array.isArray(payload.precincts) ? payload.precincts : [];
+      precinctFilter.innerHTML = '<option value="">All police precincts</option>'
+        + precincts.map(precinct => `<option value="${Number(precinct.precinct_number)}">${esc(precinct.label || precinctLabel(precinct.precinct_number))}</option>`).join('');
+      precinctFilter.disabled = precincts.length === 0;
+    } catch (error) {
+      precinctFilter.innerHTML = '<option value="">Precinct filter unavailable</option>';
+      precinctFilter.disabled = true;
+      console.warn(error);
+    }
+  }
+
   function updateMapRecords(payload, dashboardStats) {
     const incoming = Array.isArray(payload) ? payload : payload.records || [];
     const stats = Array.isArray(payload) ? {} : payload.stats || {};
@@ -648,8 +693,8 @@
     if (selectedNumber && !feedByNumber.has(selectedNumber)) renderDetail(findRecord(selectedNumber));
   }
 
-  async function fetchJson(url, label) {
-    const response = await fetch(url, { cache: 'no-store' });
+  async function fetchJson(url, label, options = {}) {
+    const response = await fetch(url, { cache: 'no-store', ...options });
     if (!response.ok) throw new Error(`${label} returned ${response.status}`);
     return response.json();
   }
@@ -848,7 +893,10 @@
       const asOf = portalDate(summary.as_of);
       const captureState = String(summary.capture.state || 'starting');
 
-      summaryElements.eyebrow.textContent = captureState === 'fresh' ? 'NYC right now' : 'Last captured window';
+      const selectedPrecinct = precinctFilter.value;
+      summaryElements.eyebrow.textContent = selectedPrecinct
+        ? `${precinctLabel(selectedPrecinct)} ${captureState === 'fresh' ? 'right now' : 'last captured'}`
+        : captureState === 'fresh' ? 'NYC right now' : 'Last captured window';
       summaryElements.title.textContent = `Last ${summaryWindowLabel(summary.window_minutes)}`;
       summaryElements.updated.textContent = asOf && !Number.isNaN(asOf.getTime())
         ? `As of ${timeLabel(summary.as_of)}`
@@ -884,14 +932,19 @@
     }
   }
 
-  async function refreshMap(dashboardStats) {
+  async function refreshMap(dashboardStats, force = false) {
     const now = Date.now();
+    if (force) {
+      mapRequestSequence += 1;
+      mapRefreshInFlight = false;
+      lastMapRefreshStartedAt = 0;
+    }
     if (mapRefreshInFlight || now - lastMapRefreshStartedAt < MAP_REFRESH_MS) return;
     mapRefreshInFlight = true;
     lastMapRefreshStartedAt = now;
     const sequence = ++mapRequestSequence;
     try {
-      const payload = await fetchJson('/api/live-map', 'Map service');
+      const payload = await fetchJson(scopedUrl('/api/live-map'), 'Map service');
       if (sequence !== mapRequestSequence) return;
       updateMapRecords(payload, dashboardStats);
     } catch (error) {
@@ -901,15 +954,22 @@
     }
   }
 
-  async function refresh() {
-    if (refreshInFlight) return;
+  async function refresh({ force = false } = {}) {
+    if (refreshInFlight && !force) return;
+    if (force && dashboardAbortController) dashboardAbortController.abort();
+    const controller = new AbortController();
+    dashboardAbortController = controller;
+    const sequence = ++dashboardRequestSequence;
     refreshInFlight = true;
     try {
-      const data = await fetchJson('/api/live-dashboard?limit=750', 'Data service');
+      const data = await fetchJson(scopedUrl('/api/live-dashboard', { limit: 750 }), 'Data service', {
+        signal: controller.signal
+      });
+      if (sequence !== dashboardRequestSequence) return;
       const stats = data.stats || {};
       updateFeedRecords(data.records || []);
       updateMapStatsFromDashboard(stats);
-      refreshMap(stats);
+      refreshMap(stats, force);
       currentPollSeconds = Number(stats.poll_interval_seconds || 15);
       pollInterval.value = String(currentPollSeconds);
       lastPortalCheck = stats.last_seen_at ? new Date(stats.last_seen_at) : null;
@@ -922,12 +982,17 @@
       connection.classList.remove('offline');
       updateConnectionLabel();
     } catch (error) {
+      if (error.name === 'AbortError') return;
+      if (sequence !== dashboardRequestSequence) return;
       showSummaryUnavailable();
       connection.classList.add('offline');
       connectionLabel.textContent = 'Reconnecting…';
       console.warn(error);
     } finally {
-      refreshInFlight = false;
+      if (sequence === dashboardRequestSequence) {
+        refreshInFlight = false;
+        dashboardAbortController = null;
+      }
     }
   }
 
@@ -958,6 +1023,16 @@
   });
   search.addEventListener('input', () => { renderFeed({ resetScroll: true }); renderMap(); });
   statusFilter.addEventListener('change', () => { renderFeed({ resetScroll: true }); renderMap(); });
+  precinctFilter.addEventListener('change', () => {
+    lastGoodSummary = null;
+    highestObservedSuffix = null;
+    detailLoadSequence += 1;
+    selectedNumber = null;
+    setDetailPanelVisible(false);
+    renderFeed({ resetScroll: true });
+    renderMap();
+    refresh({ force: true });
+  });
   mapScopeControl.addEventListener('click', event => {
     const button = event.target.closest('button[data-map-scope]');
     if (!button || !mapScopeControl.contains(button)) return;
@@ -997,6 +1072,7 @@
     if (returnTarget) returnTarget.focus();
   });
 
+  loadPolicePrecincts();
   refresh();
   window.setInterval(refresh, 5000);
   window.setInterval(() => {

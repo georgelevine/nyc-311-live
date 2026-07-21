@@ -11,6 +11,7 @@
     "probe:area": "node probe-311-area.js",
     "archive:scan": "node archive-311.js",
     "live:monitor": "node live-311.js",
+    "precincts:import": "node import-police-precincts.js",
     "db:finalize": "node finalize-sqlite.js",
     "db:verify": "node finalize-sqlite.js --verify-only",
     "db:backup": "node backup-sqlite.js",
@@ -30,7 +31,8 @@
     "cheerio": "^1.0.0-rc.12",
     "express": "^4.18.2",
     "node-fetch": "^2.7.0",
-    "pg": "^8.16.3"
+    "pg": "^8.16.3",
+    "shpjs": "^6.2.0"
   },
   "devDependencies": {
     "@electron/packager": "^20.0.3",

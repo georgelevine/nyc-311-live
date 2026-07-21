@@ -113,6 +113,9 @@
         <select id="status-filter" aria-label="Filter by status">
           <option value="">All statuses</option>
         </select>
+        <select id="precinct-filter" aria-label="Filter by police precinct" disabled>
+          <option value="">Loading precincts…</option>
+        </select>
       </section>
 
       <div class="feed-heading">
@@ -162,6 +165,7 @@
         <dl>
           <div><dt>Request</dt><dd id="detail-number"></dd></div>
           <div><dt>Submitted</dt><dd id="detail-time"></dd></div>
+          <div id="detail-precinct-row" class="detail-row hidden"><dt>Police precinct</dt><dd id="detail-precinct"></dd></div>
           <div id="detail-updated-row" class="detail-row hidden"><dt>Updated</dt><dd id="detail-updated"></dd></div>
           <div id="detail-closed-row" class="detail-row hidden"><dt>Closed</dt><dd id="detail-closed"></dd></div>
           <div id="detail-next-update-row" class="detail-row hidden"><dt>Next update</dt><dd id="detail-next-update"></dd></div>

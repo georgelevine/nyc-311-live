@@ -35,10 +35,13 @@ test('verifies the finalized file, digest, schema version, and table manifest', 
   });
   assert.equal(result.ok, true);
   assert.equal(result.application_id, finalized.backup.manifest.application_id);
+  assert.equal(result.user_version, 2);
   assert.equal(finalized.backup.manifest.journal_mode, 'delete');
   assert.equal(fs.existsSync(`${backup}-wal`), false);
   assert.equal(fs.existsSync(`${backup}-shm`), false);
   assert.deepEqual(result.tables, finalized.backup.manifest.tables);
+  assert.deepEqual(result.tables.police_precinct_boundary_versions, { count: 0 });
+  assert.deepEqual(result.tables.police_precincts, { count: 0 });
 
   fs.chmodSync(directory, 0o500);
   try {
@@ -161,5 +164,41 @@ test('rejects a closure-final index with the wrong partial predicate', async () 
   await assert.rejects(
     verifySnapshot({ databasePath: snapshot.backup, manifestPath: snapshot.manifestPath }),
     /request_closure_snapshots_final_idx predicate expected is_final = 1, found is_final = 0/
+  );
+});
+
+test('rejects a precinct request index with the wrong suffix direction', async () => {
+  const snapshot = await finalizedMutatedSnapshot('nyc311-snapshot-precinct-index-', database => {
+    database.exec(`
+      ALTER TABLE live_portal_requests ADD COLUMN police_precinct INTEGER;
+      CREATE INDEX live_portal_requests_police_precinct_idx
+        ON live_portal_requests(police_precinct, suffix);
+    `);
+  });
+  await assert.rejects(
+    verifySnapshot({ databasePath: snapshot.backup, manifestPath: snapshot.manifestPath }),
+    /live_portal_requests_police_precinct_idx keys expected .*suffix DESC.*found .*suffix ASC/
+  );
+});
+
+test('rejects a precinct polygon table without its boundary-version relationship', async () => {
+  const snapshot = await finalizedMutatedSnapshot('nyc311-snapshot-precinct-foreign-key-', database => {
+    database.exec(`
+      CREATE TABLE police_precincts (
+        boundary_version TEXT NOT NULL,
+        precinct_number INTEGER NOT NULL,
+        label TEXT NOT NULL,
+        geometry_json TEXT NOT NULL CHECK(json_valid(geometry_json)),
+        min_longitude REAL NOT NULL,
+        min_latitude REAL NOT NULL,
+        max_longitude REAL NOT NULL,
+        max_latitude REAL NOT NULL,
+        PRIMARY KEY(boundary_version,precinct_number)
+      );
+    `);
+  });
+  await assert.rejects(
+    verifySnapshot({ databasePath: snapshot.backup, manifestPath: snapshot.manifestPath }),
+    /police_precincts missing FOREIGN KEY \(boundary_version\) REFERENCES police_precinct_boundary_versions\(version\) ON DELETE CASCADE/
   );
 });

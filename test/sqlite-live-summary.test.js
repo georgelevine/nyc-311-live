@@ -21,6 +21,8 @@ function harness(t, { withDetails = true, withState = true } = {}) {
       submitted_at TEXT,
       problem TEXT,
       address TEXT,
+      police_precinct INTEGER,
+      police_precinct_boundary_version TEXT,
       latitude REAL,
       longitude REAL,
       raw_json TEXT NOT NULL
@@ -58,26 +60,60 @@ function insertLive(database, suffix, submittedAt, overrides = {}) {
     address: '1 CENTRE STREET, MANHATTAN (NEW YORK), NY, 10007',
     latitude: 40.7128,
     longitude: -74.006,
+    policePrecinct: null,
+    policePrecinctBoundaryVersion: null,
     rawJson: '{}',
     ...overrides
   };
   const srnumber = `311-${String(suffix).padStart(8, '0')}`;
   database.prepare(`
     INSERT INTO live_portal_requests (
-      srnumber,suffix,submitted_at,problem,address,latitude,longitude,raw_json
-    ) VALUES (?,?,?,?,?,?,?,?)
+      srnumber,suffix,submitted_at,problem,address,police_precinct,
+      police_precinct_boundary_version,latitude,longitude,raw_json
+    ) VALUES (?,?,?,?,?,?,?,?,?,?)
   `).run(
     srnumber,
     suffix,
     submittedAt,
     record.problem,
     record.address,
+    record.policePrecinct,
+    record.policePrecinctBoundaryVersion,
     record.latitude,
     record.longitude,
     record.rawJson
   );
   return srnumber;
 }
+
+test('scopes current, previous, delayed, and archive quality to one police precinct', t => {
+  const database = harness(t, { withState: false });
+  const currentVersion = { policePrecinctBoundaryVersion: '26B' };
+  insertLive(database, 1, '2026-07-21T12:20:00.000Z', { policePrecinct: 1, ...currentVersion });
+  insertLive(database, 2, '2026-07-21T12:21:00.000Z', { policePrecinct: 5, ...currentVersion });
+  insertLive(database, 3, '2026-07-21T12:05:00.000Z', { policePrecinct: 1, ...currentVersion });
+  insertLive(database, 4, '2026-07-21T11:35:00.000Z', { policePrecinct: 1, ...currentVersion });
+  insertLive(database, 5, '2026-07-21T11:36:00.000Z', { policePrecinct: 5, ...currentVersion });
+  insertLive(database, 6, '2026-07-21T12:22:00.000Z', {
+    policePrecinct: 1,
+    policePrecinctBoundaryVersion: '25D'
+  });
+
+  const result = loadSqliteLiveSummary(database, {
+    asOf: '2026-07-21T12:30:00.000Z',
+    policePrecinct: 1,
+    policePrecinctBoundaryVersion: '26B'
+  });
+
+  assert.deepEqual(result.scope, {
+    police_precinct: 1,
+    police_precinct_boundary_version: '26B'
+  });
+  assert.equal(result.current.requests, 1);
+  assert.equal(result.previous.requests, 1);
+  assert.equal(result.delayed.requests, 1);
+  assert.equal(result.data_quality.archive_requests, 3);
+});
 
 function insertDetail(database, srnumber, overrides = {}) {
   const detail = {

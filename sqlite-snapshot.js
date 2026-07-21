@@ -16,7 +16,8 @@ const REQUIRED_ARCHIVE_COLUMNS = Object.freeze({
   live_portal_requests: Object.freeze([
     'srnumber', 'suffix', 'portal_id', 'problem', 'address', 'latitude',
     'longitude', 'submitted_at', 'status', 'portal_url', 'first_seen_at',
-    'last_seen_at', 'raw_json'
+    'last_seen_at', 'raw_json', 'police_precinct',
+    'police_precinct_boundary_version', 'police_precinct_matched_at'
   ]),
   live_number_queue: Object.freeze([
     'suffix', 'srnumber', 'first_detected_at', 'audit_after', 'map_seen',
@@ -48,6 +49,14 @@ const REQUIRED_ARCHIVE_COLUMNS = Object.freeze({
     'closing_attempts', 'closure_cycle', 'last_checked_at', 'last_success_at',
     'last_error', 'finalized_at', 'updated_at'
   ]),
+  police_precinct_boundary_versions: Object.freeze([
+    'version', 'source_url', 'source_sha256', 'source_date', 'imported_at',
+    'feature_count', 'active'
+  ]),
+  police_precincts: Object.freeze([
+    'boundary_version', 'precinct_number', 'label', 'geometry_json',
+    'min_longitude', 'min_latitude', 'max_longitude', 'max_latitude'
+  ]),
   schema_migrations: Object.freeze(['version', 'name', 'checksum', 'applied_at'])
 });
 
@@ -61,6 +70,8 @@ const REQUIRED_ARCHIVE_PRIMARY_KEYS = Object.freeze({
   request_status_history: Object.freeze(['id']),
   request_closure_snapshots: Object.freeze(['id']),
   request_followup_queue: Object.freeze(['srnumber']),
+  police_precinct_boundary_versions: Object.freeze(['version']),
+  police_precincts: Object.freeze(['boundary_version', 'precinct_number']),
   schema_migrations: Object.freeze(['version'])
 });
 
@@ -78,7 +89,21 @@ const REQUIRED_ARCHIVE_UNIQUE_CONSTRAINTS = Object.freeze({
   request_closure_snapshots: Object.freeze([
     Object.freeze(['srnumber', 'closure_cycle', 'content_hash', 'is_final'])
   ]),
+  police_precinct_boundary_versions: Object.freeze([
+    Object.freeze(['source_sha256'])
+  ]),
   schema_migrations: Object.freeze([Object.freeze(['name'])])
+});
+
+const REQUIRED_ARCHIVE_FOREIGN_KEYS = Object.freeze({
+  police_precincts: Object.freeze([
+    Object.freeze({
+      columns: Object.freeze(['boundary_version']),
+      referenced_table: 'police_precinct_boundary_versions',
+      referenced_columns: Object.freeze(['version']),
+      on_delete: 'CASCADE'
+    })
+  ])
 });
 
 function indexKey(name, descending = false) {
@@ -98,11 +123,35 @@ const REQUIRED_ARCHIVE_INDEX_CONTRACTS = Object.freeze({
     keys: Object.freeze([indexKey('audit_outcome'), indexKey('audit_after'), indexKey('suffix')]),
     where: null
   }),
+  live_portal_requests_police_precinct_idx: Object.freeze({
+    table: 'live_portal_requests',
+    unique: false,
+    keys: Object.freeze([indexKey('police_precinct'), indexKey('suffix', true)]),
+    where: null
+  }),
   number_ledger_outcome_idx: Object.freeze({
     table: 'number_ledger',
     unique: false,
     keys: Object.freeze([indexKey('outcome')]),
     where: null
+  }),
+  police_precinct_bbox_idx: Object.freeze({
+    table: 'police_precincts',
+    unique: false,
+    keys: Object.freeze([
+      indexKey('boundary_version'),
+      indexKey('min_longitude'),
+      indexKey('max_longitude'),
+      indexKey('min_latitude'),
+      indexKey('max_latitude')
+    ]),
+    where: null
+  }),
+  police_precinct_one_active_version_idx: Object.freeze({
+    table: 'police_precinct_boundary_versions',
+    unique: true,
+    keys: Object.freeze([indexKey('active')]),
+    where: 'active = 1'
   }),
   request_closure_snapshots_final_idx: Object.freeze({
     table: 'request_closure_snapshots',
@@ -172,6 +221,27 @@ function uniqueConstraintColumns(database, table) {
     .map(index => indexKeys(database, index.name).map(key => key.name));
 }
 
+function foreignKeyConstraints(database, table) {
+  const groups = new Map();
+  for (const row of database.prepare(
+    `PRAGMA foreign_key_list(${quotePragmaIdentifier(table)})`
+  ).all()) {
+    const id = Number(row.id);
+    if (!groups.has(id)) {
+      groups.set(id, {
+        referenced_table: row.table,
+        columns: [],
+        referenced_columns: [],
+        on_delete: String(row.on_delete || '').toUpperCase()
+      });
+    }
+    const group = groups.get(id);
+    group.columns[Number(row.seq)] = row.from;
+    group.referenced_columns[Number(row.seq)] = row.to;
+  }
+  return [...groups.values()];
+}
+
 function normalizePartialPredicate(value) {
   if (value == null || String(value).trim() === '') return null;
   return String(value)
@@ -209,6 +279,18 @@ function validateKeysAndConstraints(database) {
     for (const expected of requiredConstraints) {
       if (!actualConstraints.some(actual => isDeepStrictEqual(actual, expected))) {
         errors.push(`${table} missing UNIQUE constraint ${formatColumns(expected)}`);
+      }
+    }
+  }
+  for (const [table, requiredConstraints] of Object.entries(REQUIRED_ARCHIVE_FOREIGN_KEYS)) {
+    const actualConstraints = foreignKeyConstraints(database, table);
+    for (const expected of requiredConstraints) {
+      if (!actualConstraints.some(actual => isDeepStrictEqual(actual, expected))) {
+        errors.push(
+          `${table} missing FOREIGN KEY ${formatColumns(expected.columns)} `
+          + `REFERENCES ${expected.referenced_table}${formatColumns(expected.referenced_columns)} `
+          + `ON DELETE ${expected.on_delete}`
+        );
       }
     }
   }
@@ -406,6 +488,7 @@ async function verifySnapshot({ databasePath, manifestPath }) {
 
 module.exports = {
   REQUIRED_ARCHIVE_COLUMNS,
+  REQUIRED_ARCHIVE_FOREIGN_KEYS,
   REQUIRED_ARCHIVE_INDEX_CONTRACTS,
   REQUIRED_ARCHIVE_INDEXES,
   REQUIRED_ARCHIVE_PRIMARY_KEYS,

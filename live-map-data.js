@@ -9,6 +9,8 @@ const MAP_RECORD_FIELDS = Object.freeze([
   'address',
   'borough',
   'incident_zip',
+  'police_precinct',
+  'police_precinct_boundary_version',
   'latitude',
   'longitude',
   'submitted_at',
@@ -44,6 +46,11 @@ function suffixValue(value) {
   if (value == null || String(value).trim() === '') return null;
   const number = Number(value);
   return Number.isSafeInteger(number) ? number : null;
+}
+
+function precinctValue(value) {
+  const number = suffixValue(value);
+  return number != null && number > 0 ? number : null;
 }
 
 function coordinateValue(value, minimum, maximum) {
@@ -85,6 +92,8 @@ function projectLiveMapRow(row) {
     address: textValue(row.address, row.detail_address),
     borough: textValue(row.borough),
     incident_zip: textValue(row.incident_zip),
+    police_precinct: precinctValue(row.police_precinct),
+    police_precinct_boundary_version: textValue(row.police_precinct_boundary_version),
     latitude,
     longitude,
     submitted_at: timestampValue(row.submitted_at, row.detail_date_reported),

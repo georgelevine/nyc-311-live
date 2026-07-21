@@ -31,6 +31,38 @@ const ARCHIVE_QUALITY_CACHE_TTL_MS = 5 * 60_000;
 const liveSummaryCache = new Map();
 const archiveQualityCache = new Map();
 
+function tableExists(database, name) {
+  return Boolean(database.prepare(
+    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?"
+  ).get(name));
+}
+
+function policePrecinctFilter(req, database) {
+  const raw = req.query && req.query.police_precinct;
+  if (raw == null || String(raw).trim() === '') return null;
+  if (!/^\d{1,3}$/.test(String(raw).trim())) {
+    const error = new Error('police_precinct must be a valid precinct number');
+    error.statusCode = 400;
+    throw error;
+  }
+  const precinct = Number(raw);
+  const boundary = tableExists(database, 'police_precincts')
+    && tableExists(database, 'police_precinct_boundary_versions')
+    && database.prepare(`
+      SELECT precinct.boundary_version
+      FROM police_precincts AS precinct
+      JOIN police_precinct_boundary_versions AS version
+        ON version.version=precinct.boundary_version AND version.active=1
+      WHERE precinct.precinct_number=?
+    `).get(precinct);
+  if (!boundary) {
+    const error = new Error(`Police precinct ${precinct} is not in the active boundary release`);
+    error.statusCode = 400;
+    throw error;
+  }
+  return { precinct, boundaryVersion: boundary.boundary_version };
+}
+
 function liveSummaryRevision(database) {
   try {
     const row = database.prepare(`
@@ -42,22 +74,27 @@ function liveSummaryRevision(database) {
   }
 }
 
-function cachedLiveSummary(database, databasePath) {
+function cachedLiveSummary(database, databasePath, precinctScope = null) {
   const now = Date.now();
   const revision = liveSummaryRevision(database);
-  const cached = liveSummaryCache.get(databasePath);
+  const cacheKey = precinctScope
+    ? `${databasePath}|precinct:${precinctScope.precinct}|boundary:${precinctScope.boundaryVersion}`
+    : `${databasePath}|precinct:all`;
+  const cached = liveSummaryCache.get(cacheKey);
   if (cached && cached.revision === revision && now - cached.created_at < LIVE_SUMMARY_CACHE_TTL_MS) {
     return cached.summary;
   }
-  const qualityEntry = archiveQualityCache.get(databasePath);
+  const qualityEntry = precinctScope == null ? archiveQualityCache.get(databasePath) : null;
   const archiveQuality = qualityEntry && now - qualityEntry.created_at < ARCHIVE_QUALITY_CACHE_TTL_MS
     ? qualityEntry.quality
     : null;
   const summary = loadSqliteLiveSummary(database, {
     now: new Date(now),
-    archiveQuality
+    archiveQuality,
+    policePrecinct: precinctScope && precinctScope.precinct,
+    policePrecinctBoundaryVersion: precinctScope && precinctScope.boundaryVersion
   });
-  if (!archiveQuality) {
+  if (precinctScope == null && !archiveQuality) {
     archiveQualityCache.set(databasePath, {
       created_at: now,
       quality: {
@@ -68,7 +105,7 @@ function cachedLiveSummary(database, databasePath) {
       }
     });
   }
-  liveSummaryCache.set(databasePath, { created_at: now, revision, summary });
+  liveSummaryCache.set(cacheKey, { created_at: now, revision, summary });
   return summary;
 }
 
@@ -663,6 +700,37 @@ app.get('/api/portal-detail', async (req, res) => {
 
 // Complete, lightweight marker dataset. This is intentionally separate from the
 // bounded dashboard feed so the map does not lose older coordinate-bearing rows.
+app.get('/api/police-precincts', (req, res) => {
+  const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
+  let database;
+  res.setHeader('Cache-Control', 'private, max-age=300');
+  try {
+    if (!require('fs').existsSync(databasePath)) return res.json({ boundary_version: null, precincts: [] });
+    const { DatabaseSync } = require('node:sqlite');
+    database = new DatabaseSync(databasePath, { readOnly: true });
+    if (!tableExists(database, 'police_precincts')
+        || !tableExists(database, 'police_precinct_boundary_versions')) {
+      return res.json({ boundary_version: null, precincts: [] });
+    }
+    const precincts = database.prepare(`
+      SELECT precinct.precinct_number,precinct.label,precinct.boundary_version
+      FROM police_precincts AS precinct
+      JOIN police_precinct_boundary_versions AS version
+        ON version.version=precinct.boundary_version AND version.active=1
+      ORDER BY precinct.precinct_number
+    `).all();
+    return res.json({
+      boundary_version: precincts[0] ? precincts[0].boundary_version : null,
+      precincts
+    });
+  } catch (error) {
+    console.error('Police precinct list error:', error.message);
+    return res.status(503).json({ error: 'Police precincts are temporarily unavailable' });
+  } finally {
+    if (database) database.close();
+  }
+});
+
 app.get('/api/live-map', (req, res) => {
   const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
   let database;
@@ -675,6 +743,7 @@ app.get('/api/live-map', (req, res) => {
       SELECT name FROM sqlite_master WHERE type='table'
     `).all().map(row => row.name));
     if (!tables.has('live_portal_requests')) return res.json(buildLiveMapPayload([]));
+    const precinctScope = policePrecinctFilter(req, database);
 
     const hasDetails = tables.has('portal_requests');
     const hasFollowUps = tables.has('request_followup_queue');
@@ -722,9 +791,13 @@ app.get('/api/live-map', (req, res) => {
                AND snapshot.is_final=1
            )`
       : '';
-    const rows = database.prepare(`
+    const precinctWhere = precinctScope
+      ? 'WHERE live.police_precinct=@precinct AND live.police_precinct_boundary_version=@boundary_version'
+      : '';
+    const statement = database.prepare(`
       SELECT live.srnumber,live.suffix,live.portal_id,live.problem,live.address,
              live.borough,live.incident_zip,
+             live.police_precinct,live.police_precinct_boundary_version,
              live.latitude,live.longitude,live.submitted_at,live.status,
              live.portal_url,live.first_seen_at,live.last_seen_at,
              ${detailColumns},${followUpColumns},${currentClosureColumns}
@@ -732,11 +805,20 @@ app.get('/api/live-map', (req, res) => {
       ${detailJoin}
       ${followUpJoin}
       ${currentClosureJoin}
-    `).all();
+      ${precinctWhere}
+    `);
+    const rows = precinctScope
+      ? statement.all({
+        precinct: precinctScope.precinct,
+        boundary_version: precinctScope.boundaryVersion
+      })
+      : statement.all();
     return res.json(buildLiveMapPayload(rows));
   } catch (error) {
     console.error('Live map data error:', error.message);
-    return res.status(503).json(buildLiveMapPayload([]));
+    return res.status(error.statusCode || 503).json(
+      error.statusCode ? { error: error.message } : buildLiveMapPayload([])
+    );
   } finally {
     if (database) database.close();
   }
@@ -756,10 +838,13 @@ app.get('/api/live-summary', (req, res) => {
     }
     const { DatabaseSync } = require('node:sqlite');
     database = new DatabaseSync(databasePath, { readOnly: true });
-    return res.json(cachedLiveSummary(database, databasePath));
+    const precinctScope = policePrecinctFilter(req, database);
+    return res.json(cachedLiveSummary(database, databasePath, precinctScope));
   } catch (error) {
     console.error('Live summary error:', error.message);
-    return res.status(503).json({ error: 'Live summary is temporarily unavailable' });
+    return res.status(error.statusCode || 503).json({
+      error: error.statusCode ? error.message : 'Live summary is temporarily unavailable'
+    });
   } finally {
     if (database) database.close();
   }
@@ -778,6 +863,7 @@ app.get('/api/live-dashboard', (req, res) => {
     }
     const { DatabaseSync } = require('node:sqlite');
     database = new DatabaseSync(databasePath, { readOnly: true });
+    const precinctScope = policePrecinctFilter(req, database);
     const hasDetails = database.prepare(`
       SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'portal_requests'
     `).get();
@@ -827,9 +913,16 @@ app.get('/api/live-dashboard', (req, res) => {
                AND snapshot.is_final = 1
            )`
       : '';
-    const storedRecords = database.prepare(`
+    const livePrecinctWhere = precinctScope
+      ? 'WHERE live.police_precinct=@precinct AND live.police_precinct_boundary_version=@boundary_version'
+      : '';
+    const precinctParameters = precinctScope
+      ? { precinct: precinctScope.precinct, boundary_version: precinctScope.boundaryVersion }
+      : null;
+    const storedStatement = database.prepare(`
       SELECT live.srnumber, live.suffix, live.portal_id, live.problem, live.address,
              live.borough,live.incident_zip,
+             live.police_precinct,live.police_precinct_boundary_version,
              live.latitude, live.longitude, live.submitted_at, live.status,
              live.portal_url, live.first_seen_at, live.last_seen_at,
              ${detailColumns}, ${followUpColumns}, ${currentClosureColumns}
@@ -837,9 +930,13 @@ app.get('/api/live-dashboard', (req, res) => {
       ${detailJoin}
       ${followUpJoin}
       ${currentClosureJoin}
+      ${livePrecinctWhere}
       ORDER BY live.suffix DESC
-      LIMIT ?
-    `).all(limit);
+      LIMIT @limit
+    `);
+    const storedRecords = precinctScope
+      ? storedStatement.all({ ...precinctParameters, limit })
+      : storedStatement.all({ limit });
     const records = storedRecords.map(stored => {
       const {
         detail_portal_id: detailPortalId,
@@ -868,26 +965,46 @@ app.get('/api/live-dashboard', (req, res) => {
           : null);
       return { ...record, ...assessRecordAvailability(record) };
     });
+    const capturedPrecinctWhere = precinctScope
+      ? 'WHERE captured.police_precinct=@precinct AND captured.police_precinct_boundary_version=@boundary_version'
+      : '';
+    const capturedPrecinctAnd = precinctScope
+      ? 'AND captured.police_precinct=@precinct AND captured.police_precinct_boundary_version=@boundary_version'
+      : '';
     const detailStats = hasDetails
       ? `(SELECT COUNT(*) FROM portal_requests AS stored
-          JOIN live_portal_requests AS captured ON captured.srnumber = stored.srnumber) AS details_loaded,
+          JOIN live_portal_requests AS captured ON captured.srnumber = stored.srnumber
+          ${capturedPrecinctWhere}) AS details_loaded,
          (SELECT COUNT(*) FROM live_portal_requests AS captured
           LEFT JOIN portal_requests AS stored ON stored.srnumber = captured.srnumber
-          WHERE stored.srnumber IS NULL) AS details_pending`
+          WHERE stored.srnumber IS NULL
+            ${capturedPrecinctAnd}) AS details_pending`
       : `0 AS details_loaded,
-         (SELECT COUNT(*) FROM live_portal_requests) AS details_pending`;
+         (SELECT COUNT(*) FROM live_portal_requests AS captured
+          ${capturedPrecinctWhere}) AS details_pending`;
     const closureStats = hasFollowUps
-      ? `(SELECT COUNT(*) FROM request_followup_queue WHERE state = 'closing') AS closure_refreshes_pending,
-         (SELECT COUNT(*) FROM request_followup_queue WHERE state = 'open') AS open_followups_scheduled,
-         (SELECT COUNT(*) FROM request_followup_queue WHERE state = 'closed') AS closures_finalized`
+      ? `(SELECT COUNT(*) FROM request_followup_queue AS followup
+          JOIN live_portal_requests AS captured USING(srnumber)
+          WHERE followup.state='closing'
+            ${capturedPrecinctAnd}) AS closure_refreshes_pending,
+         (SELECT COUNT(*) FROM request_followup_queue AS followup
+          JOIN live_portal_requests AS captured USING(srnumber)
+          WHERE followup.state='open'
+            ${capturedPrecinctAnd}) AS open_followups_scheduled,
+         (SELECT COUNT(*) FROM request_followup_queue AS followup
+          JOIN live_portal_requests AS captured USING(srnumber)
+          WHERE followup.state='closed'
+            ${capturedPrecinctAnd}) AS closures_finalized`
       : `0 AS closure_refreshes_pending,
          0 AS open_followups_scheduled,
          0 AS closures_finalized`;
-    const totals = database.prepare(`
+    const totalsStatement = database.prepare(`
       SELECT
-        (SELECT COUNT(*) FROM live_portal_requests) AS total,
-        (SELECT COUNT(*) FROM live_portal_requests
-          WHERE latitude IS NULL OR longitude IS NULL) AS unmapped_total,
+        (SELECT COUNT(*) FROM live_portal_requests AS captured
+          ${capturedPrecinctWhere}) AS total,
+        (SELECT COUNT(*) FROM live_portal_requests AS captured
+          WHERE (captured.latitude IS NULL OR captured.longitude IS NULL)
+            ${capturedPrecinctAnd}) AS unmapped_total,
         (SELECT COUNT(*) FROM live_number_queue WHERE audit_outcome = 'pending') AS pending,
         (SELECT MAX(suffix) FROM live_number_queue) AS frontier,
         (SELECT MAX(last_seen_at) FROM live_portal_requests) AS last_seen_at,
@@ -897,9 +1014,16 @@ app.get('/api/live-dashboard', (req, res) => {
         ) AS poll_interval_seconds,
         ${detailStats},
         ${closureStats}
-    `).get();
+    `);
+    const totals = precinctScope
+      ? totalsStatement.get(precinctParameters)
+      : totalsStatement.get();
     try {
-      totals.summary = cachedLiveSummary(database, databasePath);
+      totals.summary = cachedLiveSummary(database, databasePath, precinctScope);
+      totals.scope = {
+        police_precinct: precinctScope ? precinctScope.precinct : null,
+        police_precinct_boundary_version: precinctScope ? precinctScope.boundaryVersion : null
+      };
     } catch (summaryError) {
       console.error('Embedded live summary error:', summaryError.message);
       totals.summary = null;
@@ -942,7 +1066,7 @@ app.get('/api/live-dashboard', (req, res) => {
     }
     res.json({ records, stats: totals });
   } catch (error) {
-    res.status(503).json({ error: error.message, records: [], stats: {} });
+    res.status(error.statusCode || 503).json({ error: error.message, records: [], stats: {} });
   } finally {
     if (database) database.close();
   }

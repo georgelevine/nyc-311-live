@@ -12,11 +12,16 @@ const {
 const { promoteAuditDiscoveries } = require('./audit-discovery');
 const { reconcileStoredDetails } = require('./detail-queue');
 const { resolveSynchronousMode } = require('./sqlite-runtime');
+const { applyMigrations } = require('./sqlite-finalization');
 const { normalizePortalTimestamp } = require('./portal-timestamp');
 const {
   ensureSqliteRequestGeography,
   geographyFromPortalAddress
 } = require('./address-geography');
+const {
+  ensureSqlitePolicePrecinctSchema,
+  loadActivePolicePrecinctMatcher
+} = require('./police-precincts');
 
 const PORTAL_URL = 'https://portal.311.nyc.gov/entity-pin-fetch-service-requests/';
 const POLL_INTERVAL_SECONDS = Math.max(5, Number(process.env.POLL_INTERVAL_SECONDS || 15));
@@ -45,6 +50,9 @@ db.exec(`
     address TEXT,
     borough TEXT,
     incident_zip TEXT,
+    police_precinct INTEGER,
+    police_precinct_boundary_version TEXT,
+    police_precinct_matched_at TEXT,
     latitude REAL,
     longitude REAL,
     submitted_at TEXT,
@@ -123,24 +131,41 @@ db.exec(`
 `);
 
 ensureSqliteRequestGeography(db);
+applyMigrations(db);
+ensureSqlitePolicePrecinctSchema(db);
+const policePrecinctMatcher = loadActivePolicePrecinctMatcher(db);
 
 const closureTracker = createClosureTracker(db);
 
 const getLiveRequest = db.prepare(`
-  SELECT srnumber, suffix, portal_id, status, first_seen_at, last_seen_at
+  SELECT srnumber, suffix, portal_id, status, first_seen_at, last_seen_at,
+         latitude,longitude,police_precinct_boundary_version
   FROM live_portal_requests WHERE srnumber = ?
 `);
 const upsertRequest = db.prepare(`
   INSERT INTO live_portal_requests (
-    srnumber, suffix, portal_id, problem, address, borough, incident_zip, latitude, longitude,
+    srnumber, suffix, portal_id, problem, address, borough, incident_zip,
+    police_precinct, police_precinct_boundary_version, police_precinct_matched_at,
+    latitude, longitude,
     submitted_at, status, portal_url, first_seen_at, last_seen_at, raw_json
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(srnumber) DO UPDATE SET
     portal_id = COALESCE(excluded.portal_id, live_portal_requests.portal_id),
     problem = COALESCE(excluded.problem, live_portal_requests.problem),
     address = COALESCE(excluded.address, live_portal_requests.address),
     borough = COALESCE(excluded.borough, live_portal_requests.borough),
     incident_zip = COALESCE(excluded.incident_zip, live_portal_requests.incident_zip),
+    police_precinct = CASE
+      WHEN excluded.police_precinct_boundary_version IS NOT NULL THEN excluded.police_precinct
+      ELSE live_portal_requests.police_precinct END,
+    police_precinct_boundary_version = COALESCE(
+      excluded.police_precinct_boundary_version,
+      live_portal_requests.police_precinct_boundary_version
+    ),
+    police_precinct_matched_at = COALESCE(
+      excluded.police_precinct_matched_at,
+      live_portal_requests.police_precinct_matched_at
+    ),
     latitude = COALESCE(excluded.latitude, live_portal_requests.latitude),
     longitude = COALESCE(excluded.longitude, live_portal_requests.longitude),
     submitted_at = COALESCE(excluded.submitted_at, live_portal_requests.submitted_at),
@@ -825,7 +850,21 @@ function savePoll(records) {
       const number = data.srnumber;
       const address = data.address || pin.sublabel || null;
       const geography = geographyFromPortalAddress(address);
+      const latitude = Number.isFinite(Number(pin.latitude)) ? Number(pin.latitude) : null;
+      const longitude = Number.isFinite(Number(pin.longitude)) ? Number(pin.longitude) : null;
       const existing = getLiveRequest.get(number);
+      const coordinatesChanged = !existing
+        || Number(existing.latitude) !== latitude
+        || Number(existing.longitude) !== longitude;
+      const precinctAttempted = Boolean(
+        policePrecinctMatcher && latitude != null && longitude != null
+        && (!existing
+          || existing.police_precinct_boundary_version !== policePrecinctMatcher.version
+          || coordinatesChanged)
+      );
+      const precinctMatch = precinctAttempted
+        ? policePrecinctMatcher.match(latitude, longitude)
+        : null;
       if (!existing) newMapRecords += 1;
       const statusChanged = data.status
         && (!existing || !statusesMatch(existing.status, data.status));
@@ -856,8 +895,11 @@ function savePoll(records) {
         address,
         geography.borough,
         geography.incident_zip,
-        Number.isFinite(Number(pin.latitude)) ? Number(pin.latitude) : null,
-        Number.isFinite(Number(pin.longitude)) ? Number(pin.longitude) : null,
+        precinctMatch ? precinctMatch.precinctNumber : null,
+        precinctAttempted ? policePrecinctMatcher.version : null,
+        precinctAttempted ? nowIso : null,
+        latitude,
+        longitude,
         normalizePortalTimestamp(data.submitteddate),
         data.status || null,
         pin.id ? `https://portal.311.nyc.gov/sr-details/?id=${pin.id}` : null,

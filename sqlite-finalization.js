@@ -16,6 +16,41 @@ const MIGRATIONS = Object.freeze([
     name: 'add_live_number_queue_audit_due_index',
     sql: `CREATE INDEX IF NOT EXISTS live_number_queue_audit_due_idx
           ON live_number_queue (audit_outcome, audit_after, suffix)`
+  }),
+  Object.freeze({
+    version: 2,
+    name: 'add_police_precinct_geography',
+    sql: `CREATE TABLE IF NOT EXISTS police_precinct_boundary_versions (
+      version TEXT PRIMARY KEY,
+      source_url TEXT NOT NULL,
+      source_sha256 TEXT NOT NULL UNIQUE CHECK(length(source_sha256)=64),
+      source_date TEXT,
+      imported_at TEXT NOT NULL,
+      feature_count INTEGER NOT NULL CHECK(feature_count>0),
+      active INTEGER NOT NULL DEFAULT 0 CHECK(active IN (0,1))
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS police_precinct_one_active_version_idx
+      ON police_precinct_boundary_versions(active) WHERE active=1;
+
+    CREATE TABLE IF NOT EXISTS police_precincts (
+      boundary_version TEXT NOT NULL,
+      precinct_number INTEGER NOT NULL,
+      label TEXT NOT NULL,
+      geometry_json TEXT NOT NULL CHECK(json_valid(geometry_json)),
+      min_longitude REAL NOT NULL,
+      min_latitude REAL NOT NULL,
+      max_longitude REAL NOT NULL,
+      max_latitude REAL NOT NULL,
+      PRIMARY KEY(boundary_version,precinct_number),
+      FOREIGN KEY(boundary_version)
+        REFERENCES police_precinct_boundary_versions(version) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS police_precinct_bbox_idx
+      ON police_precincts(boundary_version,min_longitude,max_longitude,min_latitude,max_latitude);
+    CREATE INDEX IF NOT EXISTS live_portal_requests_police_precinct_idx
+      ON live_portal_requests(police_precinct,suffix DESC);`
   })
 ]);
 
@@ -63,6 +98,25 @@ function tableExists(database, name) {
   return Boolean(database.prepare(
     "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?"
   ).get(name));
+}
+
+function columnExists(database, table, column) {
+  const identifier = `"${String(table).replace(/"/g, '""')}"`;
+  return database.prepare(`PRAGMA table_info(${identifier})`).all()
+    .some(row => row.name === column);
+}
+
+function addPolicePrecinctColumns(database) {
+  const columns = [
+    ['police_precinct', 'INTEGER'],
+    ['police_precinct_boundary_version', 'TEXT'],
+    ['police_precinct_matched_at', 'TEXT']
+  ];
+  for (const [name, type] of columns) {
+    if (!columnExists(database, 'live_portal_requests', name)) {
+      database.exec(`ALTER TABLE live_portal_requests ADD COLUMN ${name} ${type}`);
+    }
+  }
 }
 
 function pragmaNumber(database, name) {
@@ -162,6 +216,9 @@ function applyMigrations(database, appliedAt = new Date().toISOString()) {
         'SELECT version, name, checksum FROM schema_migrations WHERE version=?'
       ).get(migration.version);
       if (exists) continue;
+      // SQLite does not support ADD COLUMN IF NOT EXISTS. Keep this conditional
+      // so databases already initialized by the live collector migrate cleanly.
+      if (migration.version === 2) addPolicePrecinctColumns(database);
       database.exec(migration.sql);
       database.prepare(`
         INSERT INTO schema_migrations (version, name, checksum, applied_at)

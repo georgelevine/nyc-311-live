@@ -16,6 +16,11 @@ function tableExists(database, name) {
   ).get(name));
 }
 
+function columnExists(database, table, column) {
+  return tableExists(database, table)
+    && database.prepare(`PRAGMA table_info(${table})`).all().some(item => item.name === column);
+}
+
 function validDate(value) {
   const normalized = normalizePortalTimestamp(value);
   return normalized ? new Date(normalized) : null;
@@ -86,10 +91,39 @@ function detailSql(hasDetails) {
       };
 }
 
-function archiveTimeQuality(database, sql) {
+function archiveTimeQuality(
+  database,
+  sql,
+  policePrecinct = null,
+  policePrecinctBoundaryVersion = null
+) {
+  if (policePrecinct != null && !columnExists(database, 'live_portal_requests', 'police_precinct')) {
+    return {
+      archive_requests: 0,
+      missing_submitted_time: 0,
+      invalid_submitted_time: 0,
+      oldest_submitted_at: null
+    };
+  }
+  if (policePrecinctBoundaryVersion != null
+      && !columnExists(database, 'live_portal_requests', 'police_precinct_boundary_version')) {
+    return {
+      archive_requests: 0,
+      missing_submitted_time: 0,
+      invalid_submitted_time: 0,
+      oldest_submitted_at: null
+    };
+  }
+  const precinctWhere = policePrecinct == null
+    ? ''
+    : `WHERE live.police_precinct=@police_precinct${
+      policePrecinctBoundaryVersion == null
+        ? ''
+        : ' AND live.police_precinct_boundary_version=@police_precinct_boundary_version'
+    }`;
   const canonical = `LENGTH(submitted_at)=24 AND submitted_at GLOB
     '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'`;
-  const row = database.prepare(`
+  const statement = database.prepare(`
     SELECT COUNT(*) AS archive_requests,
       SUM(CASE WHEN submitted_at IS NULL OR TRIM(submitted_at)='' THEN 1 ELSE 0 END) AS missing,
       SUM(CASE WHEN submitted_at IS NOT NULL AND TRIM(submitted_at)<>''
@@ -99,8 +133,17 @@ function archiveTimeQuality(database, sql) {
       SELECT ${sql.submitted} AS submitted_at
       FROM live_portal_requests AS live
       ${sql.join}
+      ${precinctWhere}
     )
-  `).get();
+  `);
+  const row = policePrecinct == null
+    ? statement.get()
+    : statement.get({
+      police_precinct: policePrecinct,
+      ...(policePrecinctBoundaryVersion == null
+        ? {}
+        : { police_precinct_boundary_version: policePrecinctBoundaryVersion })
+    });
   return {
     archive_requests: Number(row.archive_requests || 0),
     missing_submitted_time: Number(row.missing || 0),
@@ -109,7 +152,11 @@ function archiveTimeQuality(database, sql) {
   };
 }
 
-function summaryRowsQuery(sql) {
+function summaryRowsQuery(sql, scopedToPrecinct = false, scopedToBoundaryVersion = false) {
+  const precinctAnd = scopedToPrecinct ? ' AND live.police_precinct=@police_precinct' : '';
+  const boundaryVersionAnd = scopedToBoundaryVersion
+    ? ' AND live.police_precinct_boundary_version=@police_precinct_boundary_version'
+    : '';
   const select = `SELECT live.srnumber,live.suffix,
       ${sql.submitted} AS submitted_at,
       ${sql.problem} AS problem,
@@ -125,19 +172,44 @@ function summaryRowsQuery(sql) {
   return sql.hasDetails
     ? `SELECT * FROM (
         ${select}
-        WHERE live.submitted_at>=@start AND live.submitted_at<@end
+        WHERE live.submitted_at>=@start AND live.submitted_at<@end${precinctAnd}${boundaryVersionAnd}
         UNION ALL
         ${select}
         WHERE (live.submitted_at IS NULL OR TRIM(live.submitted_at)='')
           AND details.date_reported>=@start AND details.date_reported<@end
+          ${precinctAnd}${boundaryVersionAnd}
       ) ORDER BY suffix`
     : `${select}
        WHERE live.submitted_at>=@start AND live.submitted_at<@end
+       ${precinctAnd}${boundaryVersionAnd}
        ORDER BY live.suffix`;
 }
 
-function summaryRows(database, sql, start, end) {
-  return database.prepare(summaryRowsQuery(sql)).all({ start, end }).map(row => ({
+function summaryRows(
+  database,
+  sql,
+  start,
+  end,
+  policePrecinct = null,
+  policePrecinctBoundaryVersion = null
+) {
+  const scoped = policePrecinct != null;
+  if (scoped && !columnExists(database, 'live_portal_requests', 'police_precinct')) return [];
+  const scopedToBoundaryVersion = policePrecinctBoundaryVersion != null;
+  if (scopedToBoundaryVersion
+      && !columnExists(database, 'live_portal_requests', 'police_precinct_boundary_version')) return [];
+  const statement = database.prepare(summaryRowsQuery(sql, scoped, scopedToBoundaryVersion));
+  const rows = scoped
+    ? statement.all({
+      start,
+      end,
+      police_precinct: policePrecinct,
+      ...(scopedToBoundaryVersion
+        ? { police_precinct_boundary_version: policePrecinctBoundaryVersion }
+        : {})
+    })
+    : statement.all({ start, end });
+  return rows.map(row => ({
     ...row,
     details_loaded: Boolean(row.details_loaded)
   }));
@@ -168,7 +240,9 @@ function loadSqliteLiveSummary(database, {
   maturityBufferMinutes = DEFAULT_MATURITY_BUFFER_MINUTES,
   historyTargetDays = DEFAULT_HISTORY_TARGET_DAYS,
   staleAfterSeconds = DEFAULT_STALE_AFTER_SECONDS,
-  archiveQuality = null
+  archiveQuality = null,
+  policePrecinct = null,
+  policePrecinctBoundaryVersion = null
 } = {}) {
   if (!database || typeof database.prepare !== 'function') {
     throw new TypeError('A readable SQLite database is required');
@@ -185,6 +259,17 @@ function loadSqliteLiveSummary(database, {
   const effectiveAuditDelay = auditDelayMinutes == null
     ? configuredNumber(database, 'audit_delay_minutes', DEFAULT_AUDIT_DELAY_MINUTES)
     : auditDelayMinutes;
+  const precinct = policePrecinct == null || policePrecinct === '' ? null : Number(policePrecinct);
+  if (precinct != null && (!Number.isInteger(precinct) || precinct <= 0)) {
+    throw new TypeError('policePrecinct must be a positive integer');
+  }
+  const boundaryVersion = policePrecinctBoundaryVersion == null
+    || String(policePrecinctBoundaryVersion).trim() === ''
+    ? null
+    : String(policePrecinctBoundaryVersion).trim();
+  if (boundaryVersion != null && precinct == null) {
+    throw new TypeError('policePrecinctBoundaryVersion requires policePrecinct');
+  }
 
   if (!tableExists(database, 'live_portal_requests')) {
     const summary = buildLiveSummary([], {
@@ -212,14 +297,15 @@ function loadSqliteLiveSummary(database, {
 
   const hasDetails = tableExists(database, 'portal_requests');
   const sql = detailSql(hasDetails);
-  const quality = archiveQuality || archiveTimeQuality(database, sql);
+  const quality = (precinct == null ? archiveQuality : null)
+    || archiveTimeQuality(database, sql, precinct, boundaryVersion);
   const lookbackMinutes = Math.max(
     windowMinutes * 2,
     effectiveAuditDelay + maturityBufferMinutes + windowMinutes
   );
   const start = new Date(resolvedAsOf.getTime() - lookbackMinutes * 60_000).toISOString();
   const end = resolvedAsOf.toISOString();
-  const rows = summaryRows(database, sql, start, end);
+  const rows = summaryRows(database, sql, start, end, precinct, boundaryVersion);
   const summary = buildLiveSummary(rows, {
     asOf: resolvedAsOf,
     windowMinutes,
@@ -231,6 +317,10 @@ function loadSqliteLiveSummary(database, {
   summary.delayed.audit_queue = auditQueueStatus(database, resolvedAsOf.toISOString());
   return {
     ...summary,
+    scope: {
+      police_precinct: precinct,
+      police_precinct_boundary_version: boundaryVersion
+    },
     as_of_source: explicitAsOf ? 'explicit' : collectorAnchor ? 'collector' : 'clock',
     capture,
     data_quality: {
