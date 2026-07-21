@@ -99,21 +99,21 @@ button, input, select { font: inherit; }
 .clock-block strong { display: block; font-size: 13px; font-variant-numeric: tabular-nums; }
 .clock-block span { display: block; margin-top: 2px; color: var(--muted); font-size: 9px; }
 
-.toolbar { display: grid; grid-template-columns: 1fr 122px; gap: 8px; padding: 0 18px 15px; }
-.search-wrap { position: relative; }
+.toolbar { display: grid; flex: 0 0 auto; grid-template-columns: minmax(0, 1fr) 112px; gap: 8px; padding: 0 18px 15px; }
+.search-wrap { position: relative; min-width: 0; }
 .search-wrap span { position: absolute; left: 11px; top: 8px; color: var(--muted); font-size: 19px; }
 .toolbar input, .toolbar select {
   width: 100%; height: 38px; border: 1px solid var(--line); border-radius: 10px;
   color: var(--ink); background: white; outline: none;
 }
-.toolbar input { padding: 0 10px 0 34px; }
+.toolbar input { min-width: 0; padding: 0 10px 0 34px; font-size: 12px; }
 .toolbar select { padding: 0 8px; font-size: 12px; }
 .toolbar input:focus, .toolbar select:focus { border-color: #78aaf0; box-shadow: 0 0 0 3px rgba(23,105,224,.1); }
 
-.feed-heading { position: relative; display: flex; align-items: baseline; justify-content: space-between; overflow: hidden; padding: 0 20px 9px; border-bottom: 1px solid var(--line); }
+.feed-heading { position: relative; display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 10px; overflow: hidden; padding: 5px 20px 9px; border-bottom: 1px solid var(--line); }
 .feed-heading span { font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .65px; }
-.feed-heading time { color: var(--muted); font-size: 11px; }
-.feed-heading .incoming-title { display: inline-flex; align-items: center; gap: 8px; }
+.feed-heading time { flex: none; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.feed-heading .incoming-title { display: inline-flex; min-width: 0; align-items: center; gap: 8px; white-space: nowrap; }
 .continuous-spinner {
   display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(23,105,224,.16);
   border-top-color: var(--blue); border-right-color: var(--cyan); border-radius: 50%;
@@ -121,7 +121,7 @@ button, input, select { font: inherit; }
 }
 @keyframes continuous-live-spin { to { transform: rotate(360deg); } }
 .request-feed {
-  position: relative; flex: 1 1 auto; width: 100%; min-height: 0;
+  position: relative; flex: 1 1 0; width: 100%; min-height: 0;
   overflow-x: hidden; overflow-y: auto; padding-bottom: 18px;
   overscroll-behavior-y: contain; touch-action: pan-y; -webkit-overflow-scrolling: touch;
   scrollbar-gutter: stable; scrollbar-width: thin;
