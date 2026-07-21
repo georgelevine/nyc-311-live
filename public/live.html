@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline' https://unpkg.com; script-src 'self' https://unpkg.com; img-src 'self' data: https://*.basemaps.cartocdn.com https://unpkg.com; connect-src 'self'; font-src 'self' data:;">
+  <title>NYC 311 Live</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
+  <link rel="stylesheet" href="/css/live.css">
+</head>
+<body>
+  <main class="app-shell">
+    <aside class="sidebar">
+      <header class="app-header">
+        <div class="brand-mark">311</div>
+        <div>
+          <h1>NYC 311 Live</h1>
+          <div class="live-state"><span class="live-dot"></span><span id="connection-label">Connecting</span></div>
+        </div>
+      </header>
+
+      <section class="metrics" aria-label="Live collection statistics">
+        <article><strong id="total-count">0</strong><span>Captured</span></article>
+        <article><strong id="new-count">0</strong><span>This session</span></article>
+        <article><strong id="details-pending-count">0</strong><span>Details pending</span></article>
+        <article><strong id="pending-count">0</strong><span>Number audit</span></article>
+        <article><strong id="closing-count">0</strong><span>Closing checks</span></article>
+        <article><strong id="closures-count">0</strong><span>Closures saved</span></article>
+      </section>
+
+      <section id="catchup-panel" class="catchup-panel hidden" aria-label="Offline audit catch-up" aria-live="polite">
+        <div class="catchup-heading">
+          <span>Offline catch-up</span>
+          <strong id="catchup-status">Queued</strong>
+        </div>
+        <p id="catchup-time-range" class="catchup-time-range"></p>
+        <p id="catchup-position" class="catchup-position"></p>
+        <div id="catchup-progress" class="catchup-progress" role="progressbar" aria-label="Offline catch-up progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <span id="catchup-progress-bar"></span>
+        </div>
+        <p id="catchup-counts" class="catchup-counts"></p>
+      </section>
+
+      <section class="monitor-strip" aria-label="Live monitor timing">
+        <label>
+          <span>Check Portal every</span>
+          <select id="poll-interval">
+            <option value="5">5 seconds</option>
+            <option value="10">10 seconds</option>
+            <option value="15" selected>15 seconds</option>
+            <option value="30">30 seconds</option>
+            <option value="60">60 seconds</option>
+          </select>
+        </label>
+        <div class="clock-block">
+          <strong id="nyc-clock">—</strong>
+          <span id="next-check">New York time</span>
+        </div>
+      </section>
+
+      <section class="toolbar">
+        <div class="search-wrap">
+          <span aria-hidden="true">⌕</span>
+          <input id="request-search" type="search" placeholder="Search requests or addresses" autocomplete="off">
+        </div>
+        <select id="status-filter" aria-label="Filter by status">
+          <option value="">All statuses</option>
+        </select>
+      </section>
+
+      <div class="feed-heading">
+        <span>Incoming requests</span>
+        <time id="last-updated">Waiting for data</time>
+      </div>
+      <section id="request-feed" class="request-feed" aria-live="polite">
+        <div class="empty-state"><span class="radar"></span><p>Waiting for the live Portal feed…</p></div>
+      </section>
+    </aside>
+
+    <section class="map-panel">
+      <div id="map" aria-label="Map of live NYC 311 requests"></div>
+      <div class="map-overlay top-left map-controls">
+        <div class="map-summary-heading">
+          <div>
+            <span class="eyebrow">Latest frontier</span>
+            <strong id="frontier-number">—</strong>
+          </div>
+          <span class="eyebrow">Map scope</span>
+        </div>
+        <div id="map-scope" class="map-scope" role="group" aria-label="Choose which requests appear on the map">
+          <button type="button" data-map-scope="all" aria-pressed="true">All</button>
+          <button type="button" data-map-scope="24h" aria-pressed="false">24 hours</button>
+          <button type="button" data-map-scope="7d" aria-pressed="false">7 days</button>
+          <button type="button" data-map-scope="open" aria-pressed="false">Open only</button>
+        </div>
+        <p id="map-counts" class="map-counts" aria-live="polite">0 shown · 0 without stored Portal coordinates · 0 captured</p>
+      </div>
+      <div class="map-overlay bottom-right legend">
+        <span><i class="marker-swatch active"></i>In progress</span>
+        <span><i class="marker-swatch closed"></i>Closed</span>
+      </div>
+      <article id="request-detail" class="request-detail hidden" aria-live="polite">
+        <button id="detail-close" type="button" aria-label="Close request details">×</button>
+        <span id="detail-status" class="status-pill"></span>
+        <h2 id="detail-problem"></h2>
+        <p id="detail-address"></p>
+        <section class="detail-submission" aria-label="Submitted request details">
+          <div class="detail-submission-heading">
+            <span>Submitted details</span>
+            <span id="detail-pending-badge" class="detail-pending-badge hidden">Details pending</span>
+          </div>
+          <strong id="detail-problem-details">Loading from NYC311…</strong>
+          <p id="detail-additional-details"></p>
+        </section>
+        <p id="detail-data-warning" class="detail-data-warning hidden" role="status"></p>
+        <dl>
+          <div><dt>Request</dt><dd id="detail-number"></dd></div>
+          <div><dt>Submitted</dt><dd id="detail-time"></dd></div>
+          <div id="detail-updated-row" class="detail-row hidden"><dt>Updated</dt><dd id="detail-updated"></dd></div>
+          <div id="detail-closed-row" class="detail-row hidden"><dt>Closed</dt><dd id="detail-closed"></dd></div>
+          <div id="detail-next-update-row" class="detail-row hidden"><dt>Next update</dt><dd id="detail-next-update"></dd></div>
+          <div id="detail-archive-row" class="detail-row hidden"><dt>Archive</dt><dd id="detail-archive"></dd></div>
+        </dl>
+        <a id="detail-link" href="#" target="_blank" rel="noopener">Open in NYC311 Portal ↗</a>
+      </article>
+    </section>
+  </main>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+  <script src="/js/live-dashboard.js"></script>
+</body>
+</html>

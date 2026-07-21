@@ -1,18 +1,36 @@
 {
-  "name": "nyc-bid-311",
+  "name": "nyc-311-live",
   "version": "1.0.0",
-  "description": "NYC Business Improvement District 311 Complaint Explorer",
-  "main": "server.js",
+  "description": "Live NYC311 request collection, monitoring, mapping, and archival",
+  "main": "electron-main.js",
   "scripts": {
+    "test": "node --test",
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "collect:trial": "node collect-311.js",
+    "probe:area": "node probe-311-area.js",
+    "archive:scan": "node archive-311.js",
+    "live:monitor": "node live-311.js",
+    "db:finalize": "node finalize-sqlite.js",
+    "db:verify": "node finalize-sqlite.js --verify-only",
+    "desktop": "electron .",
+    "desktop:package": "electron-packager . \"NYC 311 Live\" --platform=darwin --arch=arm64 --out=dist --overwrite --prune=true --ignore='^/data' --ignore='^/dist'",
+    "cloud:migrate": "node cloud/migrate.js",
+    "cloud:import": "node cloud/import-sqlite.js",
+    "cloud:web": "node cloud/server.js",
+    "cloud:worker": "node cloud/worker.js"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=22.0.0 <23"
   },
   "dependencies": {
     "cheerio": "^1.0.0-rc.12",
     "express": "^4.18.2",
-    "node-fetch": "^2.7.0"
+    "node-fetch": "^2.7.0",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@electron/packager": "^20.0.3",
+    "electron": "^43.1.1"
   }
 }

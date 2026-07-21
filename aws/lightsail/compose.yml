@@ -1,0 +1,198 @@
+name: ${COMPOSE_PROJECT_NAME:-nyc311}
+
+x-app-image: &app-image
+  image: nyc-311-cloud:${IMAGE_TAG:-local}
+  build:
+    context: ../..
+    dockerfile: Dockerfile.cloud
+    args:
+      APP_VERSION: ${IMAGE_TAG:-local}
+
+x-app-environment: &app-environment
+  NODE_ENV: production
+  DATABASE_URL: "postgresql://${POSTGRES_USER:-nyc311_app}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in aws/lightsail/.env}@${DB_HOST:-db}:${DB_PORT:-5432}/${POSTGRES_DB:-nyc311}"
+  PGSSLMODE: ${PGSSLMODE:-disable}
+
+x-app-runtime: &app-runtime
+  init: true
+  read_only: true
+  tmpfs:
+    - /tmp:size=64m,mode=1777
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "5"
+
+services:
+  db:
+    image: postgis/postgis:16-3.5
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-nyc311_app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in aws/lightsail/.env}
+      POSTGRES_DB: ${POSTGRES_DB:-nyc311}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256 --data-checksums"
+      PGDATA: /var/lib/postgresql/data/pgdata
+    expose:
+      - "5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - database
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    stop_grace_period: 60s
+    security_opt:
+      - no-new-privileges:true
+    logging: *default-logging
+
+  migrate:
+    <<: [*app-image, *app-runtime]
+    profiles: [tools]
+    command: ["node", "cloud/migrate.js"]
+    restart: "no"
+    environment:
+      <<: *app-environment
+      PG_POOL_SIZE: "2"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - database
+    logging: *default-logging
+
+  web:
+    <<: [*app-image, *app-runtime]
+    command: ["node", "cloud/server.js"]
+    restart: unless-stopped
+    environment:
+      <<: *app-environment
+      HOST: 0.0.0.0
+      PORT: "10000"
+      PG_POOL_SIZE: "5"
+      DASHBOARD_USERNAME: ${DASHBOARD_USERNAME:-admin}
+      DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:?Set DASHBOARD_PASSWORD in aws/lightsail/.env}
+    expose:
+      - "10000"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - database
+      - app
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:10000/api/health',{signal:AbortSignal.timeout(5000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+    stop_grace_period: 45s
+    logging: *default-logging
+
+  worker:
+    <<: [*app-image, *app-runtime]
+    command: ["node", "cloud/worker.js"]
+    restart: unless-stopped
+    environment:
+      <<: *app-environment
+      PG_POOL_SIZE: "5"
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-15}
+      AUDIT_DELAY_MINUTES: ${AUDIT_DELAY_MINUTES:-35}
+      DETAIL_REQUEST_DELAY_MS: ${DETAIL_REQUEST_DELAY_MS:-750}
+      AUDIT_REQUEST_DELAY_MS: ${AUDIT_REQUEST_DELAY_MS:-750}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - database
+      - app
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "const db=require('./cloud/db');db.query('SELECT 1').then(()=>db.close()).then(()=>process.exit(0)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 45s
+    stop_grace_period: 75s
+    logging: *default-logging
+
+  import:
+    <<: [*app-image, *app-runtime]
+    profiles: [tools]
+    command: ["node", "cloud/import-sqlite.js"]
+    restart: "no"
+    environment:
+      <<: *app-environment
+      PG_POOL_SIZE: "2"
+      SQLITE_PATH: /imports/${SQLITE_IMPORT_FILE:-portal-archive.sqlite}
+    volumes:
+      - ./imports:/imports:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - database
+    logging: *default-logging
+
+  proxy:
+    image: caddy:2.11.4-alpine
+    restart: unless-stopped
+    environment:
+      SITE_ADDRESS: ${SITE_ADDRESS:?Set SITE_ADDRESS in aws/lightsail/.env}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in aws/lightsail/.env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - app
+    depends_on:
+      web:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    logging: *default-logging
+
+networks:
+  database:
+    internal: true
+  app:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

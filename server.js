@@ -2,9 +2,25 @@ const express = require('express');
 const fetch = require('node-fetch');
 const path = require('path');
 const cheerio = require('cheerio');
+const {
+  createClosureTracker,
+  isClosedStatus,
+  statusesMatch
+} = require('./closure-tracking');
+const {
+  assessRecordAvailability,
+  currentLifecycleProjection,
+  hasText
+} = require('./record-availability');
+const { buildLiveMapPayload } = require('./live-map-data');
+const { buildCatchupStatus, parseState } = require('./catchup-status');
+const { reconcileStoredDetails } = require('./detail-queue');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const HOST = process.env.HOST || null;
+
+app.use(express.json({ limit: '16kb' }));
 
 // Always revalidate the app shell so mobile browsers pick up versioned assets.
 app.use(express.static(path.join(__dirname, 'public'), {
@@ -420,8 +436,143 @@ function parsePortalDetail(html) {
     nextUpdate: fields['Time To Next Update'] || null,
     dateReported: scriptDate('srdatereported'),
     updatedOn: scriptDate('srupdatedon'),
-    dateClosed: scriptDate('srdateclosed')
+    dateClosed: scriptDate('srdateclosed'),
+    fields
   };
+}
+
+function persistLivePortalDetail(portalId, detail) {
+  if (!detail || !detail.srnumber) return;
+  const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
+  if (!require('fs').existsSync(databasePath)) return;
+  const suffixMatch = String(detail.srnumber).match(/^311-(\d{8})$/);
+  if (!suffixMatch) return;
+
+  let database;
+  try {
+    const { DatabaseSync } = require('node:sqlite');
+    database = new DatabaseSync(databasePath);
+    database.exec(`
+      PRAGMA busy_timeout = 500;
+      CREATE TABLE IF NOT EXISTS portal_requests (
+        srnumber TEXT PRIMARY KEY,
+        suffix INTEGER NOT NULL UNIQUE,
+        portal_id TEXT UNIQUE,
+        status TEXT,
+        problem TEXT,
+        problem_details TEXT,
+        additional_details TEXT,
+        address TEXT,
+        next_update TEXT,
+        date_reported TEXT,
+        updated_on TEXT,
+        date_closed TEXT,
+        fields_json TEXT NOT NULL,
+        portal_url TEXT NOT NULL,
+        archived_at TEXT NOT NULL
+      );
+    `);
+    const closureTracker = createClosureTracker(database);
+    const hasDetailQueue = database.prepare(`
+      SELECT 1 FROM sqlite_master
+      WHERE type = 'table' AND name = 'live_detail_queue'
+    `).get();
+    const now = new Date().toISOString();
+    const archivalStatus = detail.dateClosed && !isClosedStatus(detail.status)
+      ? 'Closed'
+      : detail.status;
+    database.exec('BEGIN');
+    try {
+      database.prepare(`
+        INSERT INTO portal_requests (
+          srnumber, suffix, portal_id, status, problem, problem_details,
+          additional_details, address, next_update, date_reported, updated_on,
+          date_closed, fields_json, portal_url, archived_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(srnumber) DO UPDATE SET
+          portal_id = COALESCE(excluded.portal_id, portal_requests.portal_id),
+          status = CASE
+            WHEN portal_requests.date_closed IS NOT NULL AND excluded.date_closed IS NULL
+              THEN portal_requests.status
+            ELSE COALESCE(excluded.status, portal_requests.status)
+          END,
+          problem = COALESCE(excluded.problem, portal_requests.problem),
+          problem_details = COALESCE(excluded.problem_details, portal_requests.problem_details),
+          additional_details = COALESCE(excluded.additional_details, portal_requests.additional_details),
+          address = COALESCE(excluded.address, portal_requests.address),
+          next_update = COALESCE(excluded.next_update, portal_requests.next_update),
+          date_reported = COALESCE(excluded.date_reported, portal_requests.date_reported),
+          updated_on = COALESCE(excluded.updated_on, portal_requests.updated_on),
+          date_closed = COALESCE(excluded.date_closed, portal_requests.date_closed),
+          fields_json = json_patch(
+            COALESCE(portal_requests.fields_json, '{}'),
+            COALESCE(excluded.fields_json, '{}')
+          ),
+          portal_url = COALESCE(excluded.portal_url, portal_requests.portal_url),
+          archived_at = excluded.archived_at
+      `).run(
+        detail.srnumber,
+        Number(suffixMatch[1]),
+        portalId,
+        archivalStatus,
+        detail.problem,
+        detail.problemDetails,
+        detail.additionalDetails,
+        detail.address,
+        detail.nextUpdate,
+        detail.dateReported,
+        detail.updatedOn,
+        detail.dateClosed,
+        JSON.stringify(detail.fields || {}),
+        `https://portal.311.nyc.gov/sr-details/?id=${portalId}`,
+        now
+      );
+
+      if (hasDetailQueue) {
+        reconcileStoredDetails(database, {
+          srnumber: detail.srnumber,
+          updatedAt: now
+        });
+      }
+
+      // A fresh UI fetch may notice a closure before the next map poll. Record
+      // that transition and wake the monitor, but leave retries/finalization to
+      // the background collector. Cached UI reads never enter this function.
+      const current = database.prepare(`
+        SELECT status, portal_id FROM live_portal_requests WHERE srnumber = ?
+      `).get(detail.srnumber);
+      if (current && archivalStatus && isClosedStatus(archivalStatus)
+          && !statusesMatch(current.status, archivalStatus)) {
+        closureTracker.observeStatus({
+          srnumber: detail.srnumber,
+          previousStatus: current.status,
+          status: archivalStatus,
+          source: 'manual_detail',
+          effectiveAt: detail.dateClosed || detail.updatedOn,
+          observedAt: now,
+          snapshot: detail
+        });
+        database.prepare(`
+          UPDATE live_portal_requests SET status = ? WHERE srnumber = ?
+        `).run(archivalStatus, detail.srnumber);
+        closureTracker.queueMapStatusChange({
+          srnumber: detail.srnumber,
+          portalId: portalId || current.portal_id,
+          previousStatus: current.status,
+          status: archivalStatus,
+          observedAt: now
+        });
+      }
+      database.exec('COMMIT');
+    } catch (error) {
+      database.exec('ROLLBACK');
+      throw error;
+    }
+  } catch (error) {
+    console.warn('Could not persist Portal detail:', error.message);
+  } finally {
+    if (database) database.close();
+  }
 }
 
 // Enrich a map pin only when its popup is opened.
@@ -446,6 +597,7 @@ app.get('/api/portal-detail', async (req, res) => {
 
     const detail = parsePortalDetail(await response.text());
     setCache(ck, detail);
+    persistLivePortalDetail(id, detail);
     res.json(detail);
   } catch (err) {
     console.error('Portal detail proxy error:', err.message);
@@ -455,11 +607,348 @@ app.get('/api/portal-detail', async (req, res) => {
   }
 });
 
+// Complete, lightweight marker dataset. This is intentionally separate from the
+// bounded dashboard feed so the map does not lose older coordinate-bearing rows.
+app.get('/api/live-map', (req, res) => {
+  const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
+  let database;
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    if (!require('fs').existsSync(databasePath)) return res.json(buildLiveMapPayload([]));
+    const { DatabaseSync } = require('node:sqlite');
+    database = new DatabaseSync(databasePath, { readOnly: true });
+    const tables = new Set(database.prepare(`
+      SELECT name FROM sqlite_master WHERE type='table'
+    `).all().map(row => row.name));
+    if (!tables.has('live_portal_requests')) return res.json(buildLiveMapPayload([]));
+
+    const hasDetails = tables.has('portal_requests');
+    const hasFollowUps = tables.has('request_followup_queue');
+    const hasClosureSnapshots = tables.has('request_closure_snapshots');
+    const detailColumns = hasDetails
+      ? `details.portal_id AS detail_portal_id,
+         details.problem AS detail_problem,
+         details.address AS detail_address,
+         details.status AS detail_status,
+         details.portal_url AS detail_portal_url,
+         details.date_reported AS detail_date_reported,
+         details.date_closed AS detail_date_closed`
+      : `NULL AS detail_portal_id,
+         NULL AS detail_problem,
+         NULL AS detail_address,
+         NULL AS detail_status,
+         NULL AS detail_portal_url,
+         NULL AS detail_date_reported,
+         NULL AS detail_date_closed`;
+    const detailJoin = hasDetails
+      ? 'LEFT JOIN portal_requests AS details ON details.srnumber=live.srnumber'
+      : '';
+    const followUpColumns = hasFollowUps
+      ? `followup.state AS followup_state,
+         followup.next_check_at AS next_check_at,
+         followup.finalized_at AS finalized_at`
+      : `NULL AS followup_state,
+         NULL AS next_check_at,
+         NULL AS finalized_at`;
+    const followUpJoin = hasFollowUps
+      ? 'LEFT JOIN request_followup_queue AS followup ON followup.srnumber=live.srnumber'
+      : '';
+    const currentClosureColumns = hasFollowUps && hasClosureSnapshots
+      ? `current_final.date_closed AS current_cycle_date_closed,
+         1 AS closure_cycle_tracking`
+      : `NULL AS current_cycle_date_closed,
+         0 AS closure_cycle_tracking`;
+    const currentClosureJoin = hasFollowUps && hasClosureSnapshots
+      ? `LEFT JOIN request_closure_snapshots AS current_final
+           ON current_final.id=(
+             SELECT MAX(snapshot.id)
+             FROM request_closure_snapshots AS snapshot
+             WHERE snapshot.srnumber=followup.srnumber
+               AND snapshot.closure_cycle=followup.closure_cycle
+               AND snapshot.is_final=1
+           )`
+      : '';
+    const rows = database.prepare(`
+      SELECT live.srnumber,live.suffix,live.portal_id,live.problem,live.address,
+             live.latitude,live.longitude,live.submitted_at,live.status,
+             live.portal_url,live.first_seen_at,live.last_seen_at,
+             ${detailColumns},${followUpColumns},${currentClosureColumns}
+      FROM live_portal_requests AS live
+      ${detailJoin}
+      ${followUpJoin}
+      ${currentClosureJoin}
+    `).all();
+    return res.json(buildLiveMapPayload(rows));
+  } catch (error) {
+    console.error('Live map data error:', error.message);
+    return res.status(503).json(buildLiveMapPayload([]));
+  } finally {
+    if (database) database.close();
+  }
+});
+
+// Read-only feed for the macOS live monitor dashboard. The SQLite module is
+// loaded lazily so the existing web deployment remains compatible with older
+// Node runtimes that do not include node:sqlite.
+app.get('/api/live-dashboard', (req, res) => {
+  const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
+  const limit = Math.max(1, Math.min(1000, Number(req.query.limit || 500)));
+  let database;
+  try {
+    if (!require('fs').existsSync(databasePath)) {
+      return res.json({ records: [], stats: { total: 0, pending: 0, frontier: null, last_seen_at: null } });
+    }
+    const { DatabaseSync } = require('node:sqlite');
+    database = new DatabaseSync(databasePath, { readOnly: true });
+    const hasDetails = database.prepare(`
+      SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'portal_requests'
+    `).get();
+    const hasFollowUps = database.prepare(`
+      SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'request_followup_queue'
+    `).get();
+    const hasClosureSnapshots = database.prepare(`
+      SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'request_closure_snapshots'
+    `).get();
+    const detailColumns = hasDetails
+      ? `details.portal_id AS detail_portal_id, details.status AS detail_status,
+         details.problem AS detail_problem, details.address AS detail_address,
+         details.portal_url AS detail_portal_url,
+         details.problem_details, details.additional_details, details.next_update,
+         details.date_reported, details.updated_on, details.date_closed,
+         details.archived_at AS details_fetched_at`
+      : `NULL AS detail_portal_id, NULL AS detail_status,
+         NULL AS detail_problem, NULL AS detail_address, NULL AS detail_portal_url,
+         NULL AS problem_details, NULL AS additional_details, NULL AS next_update,
+         NULL AS date_reported, NULL AS updated_on, NULL AS date_closed,
+         NULL AS details_fetched_at`;
+    const detailJoin = hasDetails
+      ? 'LEFT JOIN portal_requests AS details ON details.srnumber = live.srnumber'
+      : '';
+    const followUpColumns = hasFollowUps
+      ? `followup.state AS followup_state, followup.next_check_at,
+         followup.closure_cycle, followup.finalized_at`
+      : `NULL AS followup_state, NULL AS next_check_at,
+         0 AS closure_cycle, NULL AS finalized_at`;
+    const followUpJoin = hasFollowUps
+      ? 'LEFT JOIN request_followup_queue AS followup ON followup.srnumber = live.srnumber'
+      : '';
+    const currentClosureColumns = hasFollowUps && hasClosureSnapshots
+      ? `current_final.date_closed AS current_cycle_date_closed,
+         current_final.final_state AS current_cycle_final_state,
+         1 AS closure_cycle_tracking`
+      : `NULL AS current_cycle_date_closed,
+         NULL AS current_cycle_final_state,
+         0 AS closure_cycle_tracking`;
+    const currentClosureJoin = hasFollowUps && hasClosureSnapshots
+      ? `LEFT JOIN request_closure_snapshots AS current_final
+           ON current_final.id = (
+             SELECT MAX(snapshot.id)
+             FROM request_closure_snapshots AS snapshot
+             WHERE snapshot.srnumber = followup.srnumber
+               AND snapshot.closure_cycle = followup.closure_cycle
+               AND snapshot.is_final = 1
+           )`
+      : '';
+    const storedRecords = database.prepare(`
+      SELECT live.srnumber, live.suffix, live.portal_id, live.problem, live.address,
+             live.latitude, live.longitude, live.submitted_at, live.status,
+             live.portal_url, live.first_seen_at, live.last_seen_at,
+             ${detailColumns}, ${followUpColumns}, ${currentClosureColumns}
+      FROM live_portal_requests AS live
+      ${detailJoin}
+      ${followUpJoin}
+      ${currentClosureJoin}
+      ORDER BY live.suffix DESC
+      LIMIT ?
+    `).all(limit);
+    const records = storedRecords.map(stored => {
+      const {
+        detail_portal_id: detailPortalId,
+        detail_status: detailStatus,
+        detail_problem: detailProblem,
+        detail_address: detailAddress,
+        detail_portal_url: detailPortalUrl,
+        ...record
+      } = stored;
+      record.portal_id = hasText(record.portal_id) ? record.portal_id : detailPortalId;
+      record.status = hasText(record.status) ? record.status : detailStatus;
+      record.problem = hasText(record.problem) ? record.problem : detailProblem;
+      record.address = hasText(record.address) ? record.address : detailAddress;
+      record.submitted_at = hasText(record.submitted_at)
+        ? record.submitted_at
+        : record.date_reported;
+      // Detail rows intentionally retain an older closure date for history.
+      // Do not present that date as the current cycle after a reopen, or while
+      // a newly observed closure is still being verified.
+      record.closure_cycle_tracking = Boolean(record.closure_cycle_tracking);
+      Object.assign(record, currentLifecycleProjection(record));
+      record.portal_url = hasText(record.portal_url)
+        ? record.portal_url
+        : detailPortalUrl || (record.portal_id
+          ? `https://portal.311.nyc.gov/sr-details/?id=${record.portal_id}`
+          : null);
+      return { ...record, ...assessRecordAvailability(record) };
+    });
+    const detailStats = hasDetails
+      ? `(SELECT COUNT(*) FROM portal_requests AS stored
+          JOIN live_portal_requests AS captured ON captured.srnumber = stored.srnumber) AS details_loaded,
+         (SELECT COUNT(*) FROM live_portal_requests AS captured
+          LEFT JOIN portal_requests AS stored ON stored.srnumber = captured.srnumber
+          WHERE stored.srnumber IS NULL) AS details_pending`
+      : `0 AS details_loaded,
+         (SELECT COUNT(*) FROM live_portal_requests) AS details_pending`;
+    const closureStats = hasFollowUps
+      ? `(SELECT COUNT(*) FROM request_followup_queue WHERE state = 'closing') AS closure_refreshes_pending,
+         (SELECT COUNT(*) FROM request_followup_queue WHERE state = 'open') AS open_followups_scheduled,
+         (SELECT COUNT(*) FROM request_followup_queue WHERE state = 'closed') AS closures_finalized`
+      : `0 AS closure_refreshes_pending,
+         0 AS open_followups_scheduled,
+         0 AS closures_finalized`;
+    const totals = database.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM live_portal_requests) AS total,
+        (SELECT COUNT(*) FROM live_portal_requests
+          WHERE latitude IS NULL OR longitude IS NULL) AS unmapped_total,
+        (SELECT COUNT(*) FROM live_number_queue WHERE audit_outcome = 'pending') AS pending,
+        (SELECT MAX(suffix) FROM live_number_queue) AS frontier,
+        (SELECT MAX(last_seen_at) FROM live_portal_requests) AS last_seen_at,
+        COALESCE(
+          (SELECT CAST(value AS INTEGER) FROM live_monitor_state WHERE key = 'poll_interval_seconds'),
+          15
+        ) AS poll_interval_seconds,
+        ${detailStats},
+        ${closureStats}
+    `).get();
+    const catchupWindowRow = database.prepare(`
+      SELECT value FROM live_monitor_state WHERE key = 'catchup_window'
+    `).get();
+    const auditRunRow = database.prepare(`
+      SELECT value FROM live_monitor_state WHERE key = 'audit_run'
+    `).get();
+    const catchupWindow = parseState(catchupWindowRow && catchupWindowRow.value);
+    if (catchupWindow && Number.isInteger(Number(catchupWindow.low_suffix)) &&
+        Number.isInteger(Number(catchupWindow.high_suffix))) {
+      const low = Number(catchupWindow.low_suffix);
+      const high = Number(catchupWindow.high_suffix);
+      const coverage = database.prepare(`
+        SELECT
+          SUM(CASE WHEN outcome IN ('found', 'not_found') THEN 1 ELSE 0 END) AS completed,
+          SUM(CASE WHEN outcome = 'found' THEN 1 ELSE 0 END) AS found,
+          SUM(CASE WHEN outcome = 'not_found' THEN 1 ELSE 0 END) AS not_found,
+          SUM(CASE WHEN outcome = 'retry' THEN 1 ELSE 0 END) AS retry
+        FROM number_ledger
+        WHERE suffix BETWEEN ? AND ?
+      `).get(low, high);
+      const current = database.prepare(`
+        SELECT MAX(queue.suffix) AS suffix
+        FROM live_number_queue AS queue
+        LEFT JOIN number_ledger AS ledger ON ledger.suffix = queue.suffix
+        WHERE queue.suffix BETWEEN ? AND ?
+          AND (ledger.suffix IS NULL OR ledger.outcome = 'retry')
+      `).get(low, high);
+      totals.catchup = buildCatchupStatus({
+        windowState: catchupWindow,
+        runState: auditRunRow && auditRunRow.value,
+        coverage,
+        currentSuffix: current && current.suffix
+      });
+    } else {
+      totals.catchup = null;
+    }
+    res.json({ records, stats: totals });
+  } catch (error) {
+    res.status(503).json({ error: error.message, records: [], stats: {} });
+  } finally {
+    if (database) database.close();
+  }
+});
+
+app.get('/api/status-history/:srnumber', (req, res) => {
+  const srnumber = String(req.params.srnumber || '').trim();
+  if (!/^311-\d{8}$/.test(srnumber)) {
+    return res.status(400).json({ error: 'valid 311 request number required' });
+  }
+  const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
+  let database;
+  try {
+    if (!require('fs').existsSync(databasePath)) {
+      return res.json({ srnumber, history: [], closure_snapshots: [], followup: null });
+    }
+    const { DatabaseSync } = require('node:sqlite');
+    database = new DatabaseSync(databasePath, { readOnly: true });
+    const tableNames = new Set(database.prepare(`
+      SELECT name FROM sqlite_master WHERE type = 'table'
+    `).all().map(row => row.name));
+    const history = tableNames.has('request_status_history')
+      ? database.prepare(`
+          SELECT id, previous_status, status, source, effective_at, observed_at
+          FROM request_status_history
+          WHERE srnumber = ? ORDER BY id
+        `).all(srnumber)
+      : [];
+    const closureSnapshots = tableNames.has('request_closure_snapshots')
+      ? database.prepare(`
+          SELECT id, closure_cycle, status, date_closed, source, fetched_at,
+                 is_final, final_state, content_hash, snapshot_json
+          FROM request_closure_snapshots
+          WHERE srnumber = ? ORDER BY id
+        `).all(srnumber).map(row => {
+          try {
+            return { ...row, snapshot: JSON.parse(row.snapshot_json), snapshot_json: undefined };
+          } catch (_) {
+            return row;
+          }
+        })
+      : [];
+    const followup = tableNames.has('request_followup_queue')
+      ? database.prepare(`
+          SELECT state, next_check_at, attempts, closing_attempts, closure_cycle,
+                 last_checked_at, last_error, finalized_at, updated_at
+          FROM request_followup_queue WHERE srnumber = ?
+        `).get(srnumber) || null
+      : null;
+    res.json({ srnumber, history, closure_snapshots: closureSnapshots, followup });
+  } catch (error) {
+    res.status(503).json({ error: error.message });
+  } finally {
+    if (database) database.close();
+  }
+});
+
+app.post('/api/live-settings', (req, res) => {
+  const interval = Number(
+    (req.body && req.body.poll_interval_seconds) ?? req.query.poll_interval_seconds
+  );
+  if (![5, 10, 15, 30, 60].includes(interval)) {
+    return res.status(400).json({ error: 'poll_interval_seconds must be 5, 10, 15, 30, or 60' });
+  }
+  const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
+  let database;
+  try {
+    const { DatabaseSync } = require('node:sqlite');
+    database = new DatabaseSync(databasePath);
+    database.exec('PRAGMA busy_timeout = 1000');
+    database.prepare(`
+      INSERT INTO live_monitor_state (key, value, updated_at)
+      VALUES ('poll_interval_seconds', ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+    `).run(String(interval), new Date().toISOString());
+    res.json({ poll_interval_seconds: interval });
+  } catch (error) {
+    res.status(503).json({ error: error.message });
+  } finally {
+    if (database) database.close();
+  }
+});
+
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-app.listen(PORT, () => {
+const onListen = () => {
   console.log(`NYC BID 311 Explorer running at http://localhost:${PORT}`);
-});
+};
+
+if (HOST) app.listen(PORT, HOST, onListen);
+else app.listen(PORT, onListen);
