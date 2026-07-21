@@ -30,7 +30,6 @@
   const statusFilter = document.getElementById('status-filter');
   const connection = document.querySelector('.live-state');
   const connectionLabel = document.getElementById('connection-label');
-  const feedActivity = document.getElementById('feed-activity');
   const pollInterval = document.getElementById('poll-interval');
   const detail = document.getElementById('request-detail');
   const mapScopeControl = document.getElementById('map-scope');
@@ -66,7 +65,6 @@
   let detailLoadSequence = 0;
   let highestObservedSuffix = null;
   let arrivingNumbers = new Set();
-  let feedActivityTimer = null;
 
   const esc = value => String(value || '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
   const isClosed = status => /\b(?:closed|resolved|cancel(?:led|ed)?)\b/i.test(status || '');
@@ -302,14 +300,6 @@
     }
     arrivingNumbers.clear();
     restoreFeedScroll(scrollSnapshot);
-  }
-
-  function showFeedActivity() {
-    window.clearTimeout(feedActivityTimer);
-    feedActivity.classList.remove('active');
-    void feedActivity.offsetWidth;
-    feedActivity.classList.add('active');
-    feedActivityTimer = window.setTimeout(() => feedActivity.classList.remove('active'), 1300);
   }
 
   function markerClass(record) {
@@ -592,7 +582,6 @@
         .filter(record => suffixOf(record) > highestObservedSuffix)
         .map(record => record.srnumber));
       highestObservedSuffix = newestSuffix;
-      if (arrivingNumbers.size) showFeedActivity();
     }
     for (const record of nextRecords) {
       const previous = feedByNumber.get(record.srnumber);

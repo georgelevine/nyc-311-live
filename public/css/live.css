@@ -95,15 +95,13 @@ button, input, select { font: inherit; }
 .feed-heading { position: relative; display: flex; align-items: baseline; justify-content: space-between; overflow: hidden; padding: 0 20px 9px; border-bottom: 1px solid var(--line); }
 .feed-heading span { font-size: 12px; font-weight: 800; text-transform: uppercase; letter-spacing: .65px; }
 .feed-heading time { color: var(--muted); font-size: 11px; }
-.feed-activity { position: absolute; right: 0; bottom: 0; left: 0; height: 3px; pointer-events: none; opacity: 0; transition: opacity .16s ease; }
-.feed-activity i {
-  position: absolute; top: 0; left: 0; width: 42%; height: 100%; border-radius: 99px;
-  background: linear-gradient(90deg, transparent, var(--cyan) 38%, var(--blue) 72%, transparent);
-  filter: drop-shadow(0 0 5px rgba(23,105,224,.5)); transform: translateX(-120%);
+.feed-heading .incoming-title { display: inline-flex; align-items: center; gap: 8px; }
+.continuous-spinner {
+  display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(23,105,224,.16);
+  border-top-color: var(--blue); border-right-color: var(--cyan); border-radius: 50%;
+  box-shadow: 0 0 0 3px rgba(23,105,224,.05); animation: continuous-live-spin 1.9s linear infinite;
 }
-.feed-activity.active { opacity: 1; }
-.feed-activity.active i { animation: feed-signal-sweep 1.15s cubic-bezier(.22,.72,.2,1) both; }
-@keyframes feed-signal-sweep { to { transform: translateX(340%); } }
+@keyframes continuous-live-spin { to { transform: rotate(360deg); } }
 .request-feed {
   position: relative; flex: 1 1 auto; width: 100%; min-height: 0;
   overflow-x: hidden; overflow-y: auto; padding-bottom: 18px;
@@ -297,6 +295,5 @@ button, input, select { font: inherit; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .feed-activity.active i, .request-card.arriving { animation: none; }
-  .feed-activity.active { opacity: .75; }
+  .continuous-spinner, .request-card.arriving { animation: none; }
 }
