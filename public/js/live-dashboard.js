@@ -47,6 +47,7 @@
     categories: document.getElementById('summary-categories'),
     otherCategories: document.getElementById('summary-other-categories'),
     boroughs: document.getElementById('summary-boroughs'),
+    otherBoroughs: document.getElementById('summary-other-boroughs'),
     coverage: document.getElementById('summary-coverage'),
     history: document.getElementById('summary-history-note'),
     status: document.getElementById('city-summary-status')
@@ -648,32 +649,47 @@
     return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`;
   }
 
-  function rankedSummary(items, order) {
-    if (!Array.isArray(items)) return '';
-    return items.map(item => {
+  function renderRankedSummary(element, items, order, emptyText) {
+    const validItems = (Array.isArray(items) ? items : []).map(item => {
       const name = String(item && item.name || '').trim();
       const count = summaryCount(item && item.count);
       if (!name || count === 0) return null;
-      return order === 'name-first'
-        ? `${name} ${count.toLocaleString()}`
-        : `${count.toLocaleString()} ${name}`;
-    }).filter(Boolean).join(' · ');
+      return { name, count };
+    }).filter(Boolean);
+    element.replaceChildren();
+    if (!validItems.length) {
+      element.textContent = emptyText;
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    for (const item of validItems) {
+      const entry = document.createElement('span');
+      const count = document.createElement('strong');
+      count.textContent = item.count.toLocaleString();
+      if (order === 'name-first') {
+        entry.append(document.createTextNode(`${item.name}\u00a0`), count);
+      } else {
+        entry.append(count, document.createTextNode(`\u00a0${item.name}`));
+      }
+      fragment.append(entry);
+    }
+    element.append(fragment);
   }
 
   function currentComparison(summary) {
     const current = summaryCount(summary.current && summary.current.requests);
     const previous = summaryCount(summary.previous && summary.previous.requests);
     const minutes = summaryCount(summary.window_minutes) || 15;
-    const priorWindow = `previous ${minutes} min`;
+    const priorWindow = `prior ${minutes} min`;
     const difference = current - previous;
-    if (difference === 0) return `Same as ${priorWindow} (${previous.toLocaleString()})`;
-    if (previous === 0) return `${difference.toLocaleString()} more than ${priorWindow} (0)`;
+    if (difference === 0) return `No change vs ${priorWindow} · ${previous.toLocaleString()}`;
+    if (previous === 0) return `Up from 0 in ${priorWindow}`;
     const providedPercent = Number(summary.change && summary.change.percent);
     const percent = Number.isFinite(providedPercent)
       ? Math.abs(providedPercent)
       : Math.abs((difference / previous) * 100);
     const formattedPercent = percent.toLocaleString(undefined, { maximumFractionDigits: 1 });
-    return `${formattedPercent}% ${difference > 0 ? 'above' : 'below'} ${priorWindow} (${previous.toLocaleString()})`;
+    return `${difference > 0 ? 'Up' : 'Down'} ${formattedPercent}% vs ${priorWindow} · ${previous.toLocaleString()}`;
   }
 
   function categoryLongTail(distribution) {
@@ -688,24 +704,23 @@
     return parts.join(' · ');
   }
 
-  function boroughSummary(distribution) {
-    const leading = rankedSummary(distribution && distribution.top, 'name-first');
+  function boroughRemainder(distribution) {
     const otherRequests = summaryCount(distribution && distribution.other && distribution.other.requests);
     const otherBoroughs = summaryCount(distribution && distribution.other && distribution.other.categories);
     const unknown = summaryCount(distribution && distribution.unknown);
-    const parts = leading ? [leading] : [];
+    const parts = [];
     if (otherRequests) {
       parts.push(`${otherRequests.toLocaleString()} more across ${otherBoroughs.toLocaleString()} other ${otherBoroughs === 1 ? 'borough' : 'boroughs'}`);
     }
     if (unknown) parts.push(`${unknown.toLocaleString()} unknown location`);
-    return parts.join(' · ') || 'No published locations in this window';
+    return parts.join(' · ');
   }
 
   function coverageSummary(summary) {
     const total = summaryCount(summary.current && summary.current.requests);
     const detailsLoaded = summaryCount(summary.coverage && summary.coverage.details && summary.coverage.details.loaded);
     const mapped = summaryCount(summary.coverage && summary.coverage.map && summary.coverage.map.mapped);
-    return `Provisional map feed · ${detailsLoaded.toLocaleString()}/${total.toLocaleString()} details · ${mapped.toLocaleString()}/${total.toLocaleString()} pins`;
+    return `Live map feed · provisional · details ${detailsLoaded.toLocaleString()}/${total.toLocaleString()} · pins ${mapped.toLocaleString()}/${total.toLocaleString()}`;
   }
 
   function historySummary(summary) {
@@ -714,9 +729,9 @@
     const spanDays = summaryCount(summary.history && summary.history.span_days);
     const targetDays = summaryCount(summary.history && summary.history.target_days);
     const history = summary.history && summary.history.target_reached
-      ? `${spanDays.toLocaleString()}d archive span`
-      : `${spanDays.toLocaleString()}/${targetDays.toLocaleString()}d archive span`;
-    return `Map + number audit ${minutes}m (delayed): ${delayedRequests.toLocaleString()} · ${history}`;
+      ? `archive ${spanDays.toLocaleString()} days`
+      : `archive ${spanDays.toLocaleString()}/${targetDays.toLocaleString()} days`;
+    return `Delayed map + audit · ${delayedRequests.toLocaleString()} requests / ${minutes}m · ${history}`;
   }
 
   function durationSummary(totalSeconds) {
@@ -740,7 +755,11 @@
     }
     const excluded = summaryCount(summary.data_quality && summary.data_quality.excluded_from_time_statistics);
     if (excluded) {
-      warnings.push(`${excluded.toLocaleString()} archived ${excluded === 1 ? 'request lacks' : 'requests lack'} a usable submitted time and ${excluded === 1 ? 'is' : 'are'} excluded from time windows.`);
+      const archiveTotal = summaryCount(summary.data_quality && summary.data_quality.archive_requests);
+      const coverage = archiveTotal
+        ? ((Math.max(0, archiveTotal - excluded) / archiveTotal) * 100).toLocaleString(undefined, { maximumFractionDigits: 1 })
+        : null;
+      warnings.push(`${coverage ? `Time-window coverage ${coverage}% · ` : ''}${excluded.toLocaleString()} ${excluded === 1 ? 'record lacks' : 'records lack'} a usable submitted time.`);
     }
     return warnings.join(' ');
   }
@@ -774,7 +793,6 @@
         return false;
       }
       const currentRequests = summaryCount(summary.current.requests);
-      const categories = rankedSummary(summary.categories.top, 'count-first');
       const asOf = portalDate(summary.as_of);
       const captureState = String(summary.capture.state || 'starting');
 
@@ -785,9 +803,20 @@
         : 'Current window';
       summaryElements.requestCount.textContent = currentRequests.toLocaleString();
       summaryElements.comparison.textContent = currentComparison(summary);
-      summaryElements.categories.textContent = categories || 'No published request types in this window';
+      renderRankedSummary(
+        summaryElements.categories,
+        summary.categories.top,
+        'count-first',
+        'No published request types in this window'
+      );
       summaryElements.otherCategories.textContent = categoryLongTail(summary.categories);
-      summaryElements.boroughs.textContent = boroughSummary(summary.boroughs);
+      renderRankedSummary(
+        summaryElements.boroughs,
+        summary.boroughs.top,
+        'name-first',
+        'No published locations in this window'
+      );
+      summaryElements.otherBoroughs.textContent = boroughRemainder(summary.boroughs);
       summaryElements.coverage.textContent = coverageSummary(summary);
       summaryElements.history.textContent = historySummary(summary);
       summaryElements.status.textContent = summaryWarnings(summary);
