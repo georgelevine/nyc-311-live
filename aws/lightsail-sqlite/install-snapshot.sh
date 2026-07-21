@@ -228,7 +228,11 @@ else
     echo "Refusing to overwrite immutable image ${image_name}; use --skip-build or deploy a new commit." >&2
     exit 1
   fi
-  docker compose build --pull
+  # Both runtime services share one immutable image. Building the entire
+  # Compose project can make newer BuildKit versions publish that same tag
+  # concurrently and fail with "image already exists". Build one service;
+  # the resulting tagged image is used by both web and collector.
+  docker compose build --pull web
 fi
 image_version="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "${image_name}")"
 if [[ "${image_version}" != "${IMAGE_TAG}" ]]; then
