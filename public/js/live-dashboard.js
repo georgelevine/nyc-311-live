@@ -80,6 +80,10 @@
   let highestObservedSuffix = null;
   let arrivingNumbers = new Set();
   let lastGoodSummary = null;
+  let archiveSearchRecord = null;
+  let archiveSearchState = 'idle';
+  let archiveSearchSequence = 0;
+  let archiveSearchTimer = null;
 
   const esc = value => String(value || '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
   const isClosed = status => /\b(?:closed|resolved|cancel(?:led|ed)?)\b/i.test(status || '');
@@ -122,6 +126,12 @@
     return date && !Number.isNaN(date.getTime()) ? date.getTime() : null;
   };
   const suffixOf = record => Number(String(record && record.srnumber || '').replace(/^311-/, '')) || 0;
+  function exactSrnumberQuery() {
+    const value = search.value.trim().toUpperCase().replace(/\s+/g, '');
+    if (/^\d{8}$/.test(value)) return `311-${value}`;
+    const match = value.match(/^311-?(\d{8})$/);
+    return match ? `311-${match[1]}` : null;
+  }
   const recordSignature = record => JSON.stringify([
     record.srnumber, record.status, record.problem, record.address,
     record.police_precinct, record.police_precinct_boundary_version,
@@ -178,7 +188,10 @@
   }
 
   function findRecord(number) {
-    return feedByNumber.get(number) || mapByNumber.get(number) || null;
+    return feedByNumber.get(number)
+      || (archiveSearchRecord && archiveSearchRecord.srnumber === number ? archiveSearchRecord : null)
+      || mapByNumber.get(number)
+      || null;
   }
 
   function portalIdFor(record) {
@@ -201,11 +214,13 @@
 
   function matchesFilters(record) {
     const query = search.value.trim().toLowerCase();
+    const exact = exactSrnumberQuery();
     const status = statusFilter.value;
     const precinct = precinctFilter.value;
     if (status && record.status !== status) return false;
     if (precinct && Number(record.police_precinct) !== Number(precinct)) return false;
     if (!query) return true;
+    if (exact && record.srnumber === exact) return true;
     return [record.srnumber, record.problem, record.problem_details,
       record.additional_details, record.address, record.status,
       ...missingFieldLabels(record.missing_public_fields)]
@@ -213,7 +228,17 @@
   }
 
   function filteredRecords() {
-    return records.filter(matchesFilters);
+    const visible = records.filter(matchesFilters);
+    const exact = exactSrnumberQuery();
+    if (!exact) return visible;
+    const archived = archiveSearchRecord && archiveSearchRecord.srnumber === exact
+      ? archiveSearchRecord
+      : mapByNumber.get(exact);
+    if (archived && matchesFilters(archived)
+        && !visible.some(record => record.srnumber === archived.srnumber)) {
+      visible.unshift(archived);
+    }
+    return visible;
   }
 
   function captureFeedScroll() {
@@ -248,7 +273,15 @@
     const scrollSnapshot = resetScroll ? null : captureFeedScroll();
     const visible = filteredRecords();
     if (!visible.length) {
-      feed.innerHTML = '<div class="empty-state"><p>No requests match the current filters.</p></div>';
+      const exact = exactSrnumberQuery();
+      const message = exact && archiveSearchState === 'loading'
+        ? `Searching the full archive for ${exact}…`
+        : exact && archiveSearchState === 'not_found'
+          ? `${exact} is not in the captured archive.`
+          : exact && archiveSearchState === 'error'
+            ? 'The full archive search is temporarily unavailable.'
+            : 'No requests match the current filters.';
+      feed.innerHTML = `<div class="empty-state"><p>${esc(message)}</p></div>`;
       feed.scrollTop = 0;
       return;
     }
@@ -323,8 +356,15 @@
     mapRenderFrame = null;
     const desired = new Map();
     const now = Date.now();
-    for (const mapRecord of mapRecords) {
-      const record = feedByNumber.get(mapRecord.srnumber) || mapRecord;
+    const mapCandidates = archiveSearchRecord && recordCoordinates(archiveSearchRecord)
+      && !mapByNumber.has(archiveSearchRecord.srnumber)
+      ? [...mapRecords, archiveSearchRecord]
+      : mapRecords;
+    for (const mapRecord of mapCandidates) {
+      const record = feedByNumber.get(mapRecord.srnumber)
+        || (archiveSearchRecord && archiveSearchRecord.srnumber === mapRecord.srnumber
+          ? archiveSearchRecord
+          : mapRecord);
       const coordinates = recordCoordinates(record);
       if (!coordinates || !matchesFilters(record) || !matchesMapScope(record, now)) continue;
       desired.set(record.srnumber, {
@@ -588,7 +628,8 @@
   function syncStatuses() {
     const current = statusFilter.value;
     const statuses = [...new Set(
-      [...records, ...mapRecords].map(record => record.status).filter(Boolean)
+      [...records, ...mapRecords, ...(archiveSearchRecord ? [archiveSearchRecord] : [])]
+        .map(record => record.status).filter(Boolean)
     )].sort();
     statusFilter.innerHTML = '<option value="">All statuses</option>' + statuses.map(status => `<option value="${esc(status)}">${esc(status)}</option>`).join('');
     if (statuses.includes(current)) statusFilter.value = current;
@@ -657,6 +698,60 @@
     if (precinctFilter.value) params.set('police_precinct', precinctFilter.value);
     const query = params.toString();
     return query ? `${pathname}?${query}` : pathname;
+  }
+
+  async function loadArchivedRequest(srnumber, sequence) {
+    try {
+      const payload = await fetchJson(scopedUrl('/api/live-dashboard', {
+        limit: 1,
+        srnumber
+      }), 'Archive search');
+      if (sequence !== archiveSearchSequence || exactSrnumberQuery() !== srnumber) return;
+      const found = Array.isArray(payload.records) ? payload.records[0] : null;
+      archiveSearchRecord = found || feedByNumber.get(srnumber) || mapByNumber.get(srnumber) || null;
+      archiveSearchState = archiveSearchRecord ? 'found' : 'not_found';
+      syncStatuses();
+      renderFeed({ resetScroll: true });
+      renderMap();
+    } catch (error) {
+      if (sequence !== archiveSearchSequence || exactSrnumberQuery() !== srnumber) return;
+      archiveSearchRecord = feedByNumber.get(srnumber) || mapByNumber.get(srnumber) || null;
+      archiveSearchState = archiveSearchRecord ? 'found' : 'error';
+      renderFeed({ resetScroll: true });
+      renderMap();
+      console.warn(error);
+    }
+  }
+
+  function scheduleArchiveSearch() {
+    if (archiveSearchTimer !== null) {
+      window.clearTimeout(archiveSearchTimer);
+      archiveSearchTimer = null;
+    }
+    const srnumber = exactSrnumberQuery();
+    const sequence = ++archiveSearchSequence;
+    if (!srnumber) {
+      const clearedRecord = archiveSearchRecord;
+      archiveSearchRecord = null;
+      archiveSearchState = 'idle';
+      syncStatuses();
+      if (clearedRecord && selectedNumber === clearedRecord.srnumber
+          && !feedByNumber.has(selectedNumber) && !mapByNumber.has(selectedNumber)) {
+        selectedNumber = null;
+        setDetailPanelVisible(false);
+      }
+      renderFeed({ resetScroll: true });
+      renderMap();
+      return;
+    }
+    archiveSearchRecord = feedByNumber.get(srnumber) || mapByNumber.get(srnumber) || null;
+    archiveSearchState = archiveSearchRecord ? 'found' : 'loading';
+    renderFeed({ resetScroll: true });
+    renderMap();
+    archiveSearchTimer = window.setTimeout(() => {
+      archiveSearchTimer = null;
+      loadArchivedRequest(srnumber, sequence);
+    }, 150);
   }
 
   async function loadPolicePrecincts() {
@@ -968,6 +1063,12 @@
       if (sequence !== dashboardRequestSequence) return;
       const stats = data.stats || {};
       updateFeedRecords(data.records || []);
+      const exact = exactSrnumberQuery();
+      if (exact) {
+        const archiveSequence = ++archiveSearchSequence;
+        archiveSearchState = archiveSearchRecord ? 'found' : 'loading';
+        loadArchivedRequest(exact, archiveSequence);
+      }
       updateMapStatsFromDashboard(stats);
       refreshMap(stats, force);
       currentPollSeconds = Number(stats.poll_interval_seconds || 15);
@@ -1021,17 +1122,25 @@
     const button = event.target.closest('button[data-mobile-view]');
     if (button) setMobileView(button.dataset.mobileView);
   });
-  search.addEventListener('input', () => { renderFeed({ resetScroll: true }); renderMap(); });
+  search.addEventListener('input', scheduleArchiveSearch);
   statusFilter.addEventListener('change', () => { renderFeed({ resetScroll: true }); renderMap(); });
   precinctFilter.addEventListener('change', () => {
     lastGoodSummary = null;
     highestObservedSuffix = null;
     detailLoadSequence += 1;
+    archiveSearchSequence += 1;
+    archiveSearchRecord = null;
+    archiveSearchState = 'idle';
+    if (archiveSearchTimer !== null) {
+      window.clearTimeout(archiveSearchTimer);
+      archiveSearchTimer = null;
+    }
     selectedNumber = null;
     setDetailPanelVisible(false);
     renderFeed({ resetScroll: true });
     renderMap();
     refresh({ force: true });
+    scheduleArchiveSearch();
   });
   mapScopeControl.addEventListener('click', event => {
     const button = event.target.closest('button[data-map-scope]');

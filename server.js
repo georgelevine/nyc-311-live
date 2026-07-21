@@ -856,6 +856,16 @@ app.get('/api/live-summary', (req, res) => {
 app.get('/api/live-dashboard', (req, res) => {
   const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
   const limit = Math.max(1, Math.min(1000, Number(req.query.limit || 500)));
+  const requestedSrnumber = req.query.srnumber == null || String(req.query.srnumber).trim() === ''
+    ? null
+    : String(req.query.srnumber).trim().toUpperCase();
+  if (requestedSrnumber && !/^311-\d{8}$/.test(requestedSrnumber)) {
+    return res.status(400).json({
+      error: 'srnumber must use the format 311-12345678',
+      records: [],
+      stats: {}
+    });
+  }
   let database;
   try {
     if (!require('fs').existsSync(databasePath)) {
@@ -913,9 +923,21 @@ app.get('/api/live-dashboard', (req, res) => {
                AND snapshot.is_final = 1
            )`
       : '';
-    const livePrecinctWhere = precinctScope
-      ? 'WHERE live.police_precinct=@precinct AND live.police_precinct_boundary_version=@boundary_version'
-      : '';
+    const livePredicates = [];
+    const recordParameters = { limit };
+    if (precinctScope) {
+      livePredicates.push(
+        'live.police_precinct=@precinct',
+        'live.police_precinct_boundary_version=@boundary_version'
+      );
+      recordParameters.precinct = precinctScope.precinct;
+      recordParameters.boundary_version = precinctScope.boundaryVersion;
+    }
+    if (requestedSrnumber) {
+      livePredicates.push('live.srnumber=@srnumber');
+      recordParameters.srnumber = requestedSrnumber;
+    }
+    const liveWhere = livePredicates.length ? `WHERE ${livePredicates.join(' AND ')}` : '';
     const precinctParameters = precinctScope
       ? { precinct: precinctScope.precinct, boundary_version: precinctScope.boundaryVersion }
       : null;
@@ -930,13 +952,11 @@ app.get('/api/live-dashboard', (req, res) => {
       ${detailJoin}
       ${followUpJoin}
       ${currentClosureJoin}
-      ${livePrecinctWhere}
+      ${liveWhere}
       ORDER BY live.suffix DESC
       LIMIT @limit
     `);
-    const storedRecords = precinctScope
-      ? storedStatement.all({ ...precinctParameters, limit })
-      : storedStatement.all({ limit });
+    const storedRecords = storedStatement.all(recordParameters);
     const records = storedRecords.map(stored => {
       const {
         detail_portal_id: detailPortalId,
