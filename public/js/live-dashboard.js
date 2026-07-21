@@ -30,6 +30,7 @@
   const statusFilter = document.getElementById('status-filter');
   const connection = document.querySelector('.live-state');
   const connectionLabel = document.getElementById('connection-label');
+  const feedActivity = document.getElementById('feed-activity');
   const pollInterval = document.getElementById('poll-interval');
   const detail = document.getElementById('request-detail');
   const mapScopeControl = document.getElementById('map-scope');
@@ -63,6 +64,9 @@
   let lastPortalCheck = null;
   let portalDetailByNumber = new Map();
   let detailLoadSequence = 0;
+  let highestObservedSuffix = null;
+  let arrivingNumbers = new Set();
+  let feedActivityTimer = null;
 
   const esc = value => String(value || '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
   const isClosed = status => /\b(?:closed|resolved|cancel(?:led|ed)?)\b/i.test(status || '');
@@ -274,13 +278,16 @@
       feed.scrollTop = 0;
       return;
     }
+    let arrivalIndex = 0;
     feed.innerHTML = visible.map(record => {
       const hasMapPin = recordHasMapPin(record);
       const unavailableBadge = missingBadge(record);
+      const arriving = arrivingNumbers.has(record.srnumber);
+      const arrivalStyle = arriving ? ` style="--arrival-index:${Math.min(arrivalIndex++, 8)}"` : '';
       const headline = record.problem_details
         ? `${record.problem || 'Service Request'}: ${record.problem_details}`
         : record.problem || 'Service Request';
-      return `<article class="request-card${selectedNumber === record.srnumber ? ' selected' : ''}" data-number="${esc(record.srnumber)}" tabindex="0">
+      return `<article class="request-card${selectedNumber === record.srnumber ? ' selected' : ''}${arriving ? ' arriving' : ''}"${arrivalStyle} data-number="${esc(record.srnumber)}" tabindex="0">
         <span class="request-dot${isClosed(record.status) ? ' closed' : ''}"></span>
         <div class="request-copy">
           <div class="request-topline"><strong>${esc(headline)}</strong><time>${esc(timeLabel(record.submitted_at))}</time></div>
@@ -289,7 +296,20 @@
         </div>
       </article>`;
     }).join('');
+    const animatedCards = [...feed.querySelectorAll('.request-card.arriving')];
+    if (animatedCards.length) {
+      window.setTimeout(() => animatedCards.forEach(card => card.classList.remove('arriving')), 1300);
+    }
+    arrivingNumbers.clear();
     restoreFeedScroll(scrollSnapshot);
+  }
+
+  function showFeedActivity() {
+    window.clearTimeout(feedActivityTimer);
+    feedActivity.classList.remove('active');
+    void feedActivity.offsetWidth;
+    feedActivity.classList.add('active');
+    feedActivityTimer = window.setTimeout(() => feedActivity.classList.remove('active'), 1300);
   }
 
   function markerClass(record) {
@@ -564,6 +584,16 @@
       .filter(record => record && record.srnumber)
       .slice(0, MAX_VISIBLE_RECORDS)
       .sort((a, b) => suffixOf(b) - suffixOf(a));
+    const newestSuffix = nextRecords.reduce((maximum, record) => Math.max(maximum, suffixOf(record)), 0);
+    if (highestObservedSuffix === null) {
+      highestObservedSuffix = newestSuffix;
+    } else if (newestSuffix > highestObservedSuffix) {
+      arrivingNumbers = new Set(nextRecords
+        .filter(record => suffixOf(record) > highestObservedSuffix)
+        .map(record => record.srnumber));
+      highestObservedSuffix = newestSuffix;
+      if (arrivingNumbers.size) showFeedActivity();
+    }
     for (const record of nextRecords) {
       const previous = feedByNumber.get(record.srnumber);
       if (previous && previous.details_fetched_at !== record.details_fetched_at) {
