@@ -3,6 +3,7 @@ const path = require('path');
 const fetch = require('node-fetch');
 const cheerio = require('cheerio');
 const { DatabaseSync } = require('node:sqlite');
+const { resolveSynchronousMode } = require('./sqlite-runtime');
 
 const LOW_SUFFIX = Number(process.env.LOW_SUFFIX);
 const HIGH_SUFFIX = Number(process.env.HIGH_SUFFIX);
@@ -13,6 +14,7 @@ const MAX_ATTEMPTS = Math.max(1, Number(process.env.MAX_ATTEMPTS || 3));
 const DATABASE_PATH = process.env.DATABASE_PATH
   ? path.resolve(process.env.DATABASE_PATH)
   : path.join(__dirname, 'data', 'portal-archive.sqlite');
+const SQLITE_SYNCHRONOUS = resolveSynchronousMode(process.env.SQLITE_SYNCHRONOUS);
 
 if (!Number.isInteger(LOW_SUFFIX) || !Number.isInteger(HIGH_SUFFIX) ||
     LOW_SUFFIX < 0 || HIGH_SUFFIX < LOW_SUFFIX || HIGH_SUFFIX > 99999999) {
@@ -24,7 +26,7 @@ fs.mkdirSync(path.dirname(DATABASE_PATH), { recursive: true });
 const db = new DatabaseSync(DATABASE_PATH);
 db.exec(`
   PRAGMA journal_mode = WAL;
-  PRAGMA synchronous = NORMAL;
+  PRAGMA synchronous = ${SQLITE_SYNCHRONOUS};
   PRAGMA busy_timeout = 3000;
 
   CREATE TABLE IF NOT EXISTS portal_requests (

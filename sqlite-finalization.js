@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { DatabaseSync } = require('node:sqlite');
+const { DatabaseSync, backup: sqliteBackup } = require('node:sqlite');
 
 const APPLICATION_ID = 0x4e594333; // "NYC3"
 const BUSY_TIMEOUT_MS = 5000;
@@ -332,10 +332,6 @@ function tableManifest(database) {
   return manifest;
 }
 
-function sqlString(value) {
-  return `'${String(value).replace(/'/g, "''")}'`;
-}
-
 function sha256File(filePath) {
   return new Promise((resolve, reject) => {
     const hash = crypto.createHash('sha256');
@@ -346,53 +342,148 @@ function sha256File(filePath) {
   });
 }
 
+function pathExists(filePath) {
+  try {
+    fs.lstatSync(filePath);
+    return true;
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function removeFileIfPresent(filePath) {
+  try {
+    fs.unlinkSync(filePath);
+  } catch (error) {
+    if (!error || error.code !== 'ENOENT') throw error;
+  }
+}
+
+function linkFileWithoutOverwrite(partialPath, finalPath) {
+  // A same-directory hard link is an atomic, no-overwrite promotion. Unlike
+  // rename(), link() fails if finalPath appeared after our initial validation.
+  fs.linkSync(partialPath, finalPath);
+}
+
 function validateBackupDestination(sourcePath, backupPath) {
   const resolvedBackup = path.resolve(backupPath);
   const manifestPath = `${resolvedBackup}.manifest.json`;
+  const partialBackupPath = `${resolvedBackup}.partial`;
+  const partialManifestPath = `${manifestPath}.partial`;
   if (resolvedBackup === path.resolve(sourcePath)) {
     throw new Error('Backup path must differ from source database');
   }
-  if (fs.existsSync(resolvedBackup) || fs.existsSync(manifestPath)) {
-    throw new Error(`Refusing to overwrite existing backup or manifest: ${resolvedBackup}`);
+  const occupied = [resolvedBackup, manifestPath, partialBackupPath, partialManifestPath]
+    .find(pathExists);
+  if (occupied) {
+    throw new Error(`Refusing to overwrite existing backup artifact: ${occupied}`);
   }
-  return { resolvedBackup, manifestPath };
+  return {
+    resolvedBackup,
+    manifestPath,
+    partialBackupPath,
+    partialManifestPath
+  };
 }
 
-async function createBackup(database, sourcePath, backupPath, createdAt = new Date().toISOString()) {
-  const { resolvedBackup, manifestPath } = validateBackupDestination(sourcePath, backupPath);
-  fs.mkdirSync(path.dirname(resolvedBackup), { recursive: true });
-  database.exec(`VACUUM INTO ${sqlString(resolvedBackup)}`);
-  fs.chmodSync(resolvedBackup, 0o600);
-
-  const backup = openDatabase(resolvedBackup, { readOnly: true });
-  let backupHealth;
-  let tables;
-  let applicationId;
-  let userVersion;
-  try {
-    backupHealth = healthCheck(backup);
-    tables = tableManifest(backup);
-    applicationId = pragmaNumber(backup, 'application_id');
-    userVersion = pragmaNumber(backup, 'user_version');
-  } finally {
-    backup.close();
+async function createBackup(
+  database,
+  sourcePath,
+  backupPath,
+  createdAt = new Date().toISOString(),
+  { prepareDatabase = null } = {}
+) {
+  if (prepareDatabase != null && typeof prepareDatabase !== 'function') {
+    throw new TypeError('prepareDatabase must be a function');
   }
-  if (!backupHealth.ok) throw new Error('Backup failed SQLite health verification');
-  const stat = fs.statSync(resolvedBackup);
-  const manifest = {
-    format: 'nyc-311-sqlite-backup-manifest-v1',
-    created_at: createdAt,
-    source_database: path.resolve(sourcePath),
-    backup_database: resolvedBackup,
-    bytes: stat.size,
-    sha256: await sha256File(resolvedBackup),
-    application_id: applicationId,
-    user_version: userVersion,
-    health: backupHealth,
-    tables
-  };
-  fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
-  return { path: resolvedBackup, manifest_path: manifestPath, manifest };
+  const {
+    resolvedBackup,
+    manifestPath,
+    partialBackupPath,
+    partialManifestPath
+  } = validateBackupDestination(sourcePath, backupPath);
+  fs.mkdirSync(path.dirname(resolvedBackup), { recursive: true });
+  let promotedBackup = false;
+  let promotedManifest = false;
+  let preparation = null;
+  try {
+    const backupStartedAt = Date.now();
+    // A larger page batch reduces restart/starvation risk while the collector is
+    // writing. Routine duration remains visible in every verified manifest.
+    await sqliteBackup(database, partialBackupPath, { rate: 10000 });
+    const backupDurationMs = Date.now() - backupStartedAt;
+    fs.chmodSync(partialBackupPath, 0o600);
+
+    const backup = openDatabase(partialBackupPath);
+    let backupHealth;
+    let tables;
+    let applicationId;
+    let userVersion;
+    let journalMode;
+    try {
+      if (prepareDatabase) preparation = await prepareDatabase(backup);
+      const journalRow = backup.prepare('PRAGMA journal_mode = DELETE').get();
+      journalMode = String(journalRow && Object.values(journalRow)[0] || '').toLowerCase();
+      if (journalMode !== 'delete') {
+        throw new Error(`Could not make backup self-contained; journal_mode is ${journalMode || 'unknown'}`);
+      }
+      backupHealth = healthCheck(backup);
+      tables = tableManifest(backup);
+      applicationId = pragmaNumber(backup, 'application_id');
+      userVersion = pragmaNumber(backup, 'user_version');
+    } finally {
+      backup.close();
+    }
+    for (const suffix of ['-wal', '-shm', '-journal']) {
+      if (pathExists(`${partialBackupPath}${suffix}`)) {
+        throw new Error(`Self-contained backup unexpectedly retained ${suffix}`);
+      }
+    }
+    if (!backupHealth.ok) throw new Error('Backup failed SQLite health verification');
+    const stat = fs.statSync(partialBackupPath);
+    const manifest = {
+      format: 'nyc-311-sqlite-backup-manifest-v1',
+      created_at: createdAt,
+      source_database: path.resolve(sourcePath),
+      backup_database: resolvedBackup,
+      backup_duration_ms: backupDurationMs,
+      bytes: stat.size,
+      sha256: await sha256File(partialBackupPath),
+      application_id: applicationId,
+      user_version: userVersion,
+      journal_mode: journalMode,
+      health: backupHealth,
+      tables
+    };
+    fs.writeFileSync(partialManifestPath, `${JSON.stringify(manifest, null, 2)}\n`, {
+      flag: 'wx',
+      mode: 0o600
+    });
+    linkFileWithoutOverwrite(partialBackupPath, resolvedBackup);
+    promotedBackup = true;
+    removeFileIfPresent(partialBackupPath);
+    linkFileWithoutOverwrite(partialManifestPath, manifestPath);
+    promotedManifest = true;
+    removeFileIfPresent(partialManifestPath);
+    const result = {
+      path: resolvedBackup,
+      manifest_path: manifestPath,
+      backup_duration_ms: backupDurationMs,
+      manifest
+    };
+    if (prepareDatabase) result.preparation = preparation;
+    return result;
+  } catch (error) {
+    removeFileIfPresent(partialManifestPath);
+    removeFileIfPresent(partialBackupPath);
+    for (const suffix of ['-wal', '-shm', '-journal']) {
+      removeFileIfPresent(`${partialBackupPath}${suffix}`);
+    }
+    if (promotedManifest) removeFileIfPresent(manifestPath);
+    if (promotedBackup) removeFileIfPresent(resolvedBackup);
+    throw error;
+  }
 }
 
 async function finalizeDatabase({
@@ -409,9 +500,11 @@ async function finalizeDatabase({
   if (!stat.isFile()) throw new Error(`SQLite path is not a regular file: ${resolvedPath}`);
   const readOnly = verifyOnly || dryRun;
   const proposedBackupPath = path.resolve(backupPath || timestampedBackupPath(resolvedPath, now));
-  // Fail on deterministic destination problems before changing the source.
+  // Fail on deterministic destination problems before copying the source.
   if (!readOnly) validateBackupDestination(resolvedPath, proposedBackupPath);
-  const database = openDatabase(resolvedPath, { readOnly, busyTimeoutMs });
+  // The supplied database is never opened writable. Mutating work is performed
+  // on a private partial copy and promoted only after it passes verification.
+  const database = openDatabase(resolvedPath, { readOnly: true, busyTimeoutMs });
   try {
     const before = healthCheck(database);
     if (!before.ok) throw new Error('Source database failed pre-finalization health checks');
@@ -423,14 +516,11 @@ async function finalizeDatabase({
       submitted_at_normalized: 0,
       submitted_at_unparseable: inspected.submitted_at_unparseable
     };
-    if (!readOnly) {
-      migrationsAfter = applyMigrations(database, now.toISOString());
-      changes = applyDataChanges(database, inspected);
-    }
-    const after = healthCheck(database);
-    if (!after.ok) throw new Error('Source database failed post-finalization health checks');
+    let after = before;
     const result = {
       database: resolvedPath,
+      source_database: resolvedPath,
+      finalized_database: null,
       mode: verifyOnly ? 'verify-only' : dryRun ? 'dry-run' : 'finalize',
       health_before: before,
       health_after: after,
@@ -446,7 +536,49 @@ async function finalizeDatabase({
       backup: null
     };
     if (!readOnly) {
-      result.backup = await createBackup(database, resolvedPath, proposedBackupPath, now.toISOString());
+      const created = await createBackup(
+        database,
+        resolvedPath,
+        proposedBackupPath,
+        now.toISOString(),
+        {
+          prepareDatabase(copy) {
+            const copyBefore = healthCheck(copy);
+            if (!copyBefore.ok) throw new Error('Copied database failed pre-finalization health checks');
+            const copyMigrationsBefore = inspectMigrationState(copy);
+            const copyInspected = inspectDataChanges(copy);
+            const copyMigrationsAfter = applyMigrations(copy, now.toISOString());
+            const copyChanges = applyDataChanges(copy, copyInspected);
+            const copyAfter = healthCheck(copy);
+            if (!copyAfter.ok) throw new Error('Finalized copy failed post-finalization health checks');
+            return {
+              health_before: copyBefore,
+              health_after: copyAfter,
+              migrations_before: copyMigrationsBefore,
+              migrations_after: copyMigrationsAfter,
+              inspected: copyInspected,
+              changes: copyChanges
+            };
+          }
+        }
+      );
+      const preparation = created.preparation;
+      after = preparation.health_after;
+      migrationsAfter = preparation.migrations_after;
+      changes = preparation.changes;
+      result.health_after = after;
+      result.migrations_before = preparation.migrations_before;
+      result.migrations_after = migrationsAfter;
+      result.planned = {
+        map_seen_repairs: preparation.inspected.stale_map_seen_candidates.length,
+        submitted_at_normalizations: preparation.inspected.submitted_at_changes.length,
+        submitted_at_unparseable: preparation.inspected.submitted_at_unparseable,
+        backup_path: proposedBackupPath
+      };
+      result.changes = changes;
+      result.finalized_database = created.path;
+      const { preparation: _privatePreparation, ...publicBackup } = created;
+      result.backup = publicBackup;
     }
     return result;
   } finally {
@@ -470,6 +602,7 @@ module.exports = {
   normalizeSubmittedTimestamp,
   openDatabase,
   resolveDatabasePath,
+  sha256File,
   tableManifest,
   timestampedBackupPath,
   validateBackupDestination

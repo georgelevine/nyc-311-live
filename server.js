@@ -15,12 +15,17 @@ const {
 const { buildLiveMapPayload } = require('./live-map-data');
 const { buildCatchupStatus, parseState } = require('./catchup-status');
 const { reconcileStoredDetails } = require('./detail-queue');
+const { createDashboardAuth, dashboardAuthConfig } = require('./dashboard-auth');
+const { inspectSqliteHealth } = require('./sqlite-health');
+const { originMatchesHost } = require('./request-security');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || null;
+const dashboardAuth = dashboardAuthConfig();
 
 app.use(express.json({ limit: '16kb' }));
+app.use(createDashboardAuth(dashboardAuth));
 
 // Always revalidate the app shell so mobile browsers pick up versioned assets.
 app.use(express.static(path.join(__dirname, 'public'), {
@@ -916,9 +921,14 @@ app.get('/api/status-history/:srnumber', (req, res) => {
 });
 
 app.post('/api/live-settings', (req, res) => {
-  const interval = Number(
-    (req.body && req.body.poll_interval_seconds) ?? req.query.poll_interval_seconds
-  );
+  if (!req.is('application/json')) {
+    return res.status(415).json({ error: 'application/json is required' });
+  }
+  const requestProtocol = req.get('x-forwarded-proto') || req.protocol;
+  if (!originMatchesHost(req.get('origin'), req.get('host'), requestProtocol)) {
+    return res.status(403).json({ error: 'cross-origin settings changes are not allowed' });
+  }
+  const interval = Number(req.body && req.body.poll_interval_seconds);
   if (![5, 10, 15, 30, 60].includes(interval)) {
     return res.status(400).json({ error: 'poll_interval_seconds must be 5, 10, 15, 30, or 60' });
   }
@@ -941,9 +951,33 @@ app.post('/api/live-settings', (req, res) => {
   }
 });
 
-// Health check
+function currentHealth() {
+  const now = new Date();
+  const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
+  const health = inspectSqliteHealth(databasePath, { now });
+  if (health.error) console.error('Health check failed:', health.error);
+  const { error: _privateError, ...publicHealth } = health;
+  return { now, health, publicHealth };
+}
+
+// Web/database liveness stays available during a Portal outage so the archive
+// remains readable. Collector readiness is a separate monitored endpoint.
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  const { now, health, publicHealth } = currentHealth();
+  res.status(health.ok ? 200 : 503).json({
+    ...publicHealth,
+    timestamp: now.toISOString()
+  });
+});
+
+app.get('/api/health/collector', (req, res) => {
+  const { now, health, publicHealth } = currentHealth();
+  const ready = health.ok && health.collector === 'fresh';
+  res.status(ready ? 200 : 503).json({
+    ...publicHealth,
+    ready,
+    timestamp: now.toISOString()
+  });
 });
 
 const onListen = () => {

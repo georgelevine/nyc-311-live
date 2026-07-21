@@ -1,4 +1,9 @@
-# AWS deployment: low-cost Lightsail first
+# Advanced AWS deployment: PostgreSQL/PostGIS
+
+> **Not the recommended first deployment.** The current low-cost path keeps the
+> verified SQLite archive on one Lightsail instance. See
+> [LIGHTSAIL_SQLITE_DEPLOYMENT.md](LIGHTSAIL_SQLITE_DEPLOYMENT.md). This document
+> remains as the later PostgreSQL/PostGIS migration path.
 
 > **Preparation status, not a cutover approval:** these files package the existing
 > cloud code, but they do not fix its data-parity or importer guarantees. Do not

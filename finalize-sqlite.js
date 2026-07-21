@@ -13,15 +13,17 @@ function usage() {
 
 Options:
   --db PATH          Explicit source database (overrides SQLITE_PATH)
-  --backup PATH      Backup destination; must not already exist
+  --backup PATH      Finalized-copy destination; must not already exist
   --busy-timeout MS  SQLite lock wait (default ${BUSY_TIMEOUT_MS})
   --verify-only      Run health, migration, and repair-candidate checks only
   --dry-run          Show migrations/repairs/backup that would run, without writes
   --help             Show this help
 
-With no path, SQLITE_PATH is used; on macOS the safe fallback is the app's
-Application Support database. The tool refuses a missing file or unknown
-SQLite application_id and never overwrites a backup.`;
+With no path, SQLITE_PATH is used; on macOS the fallback is the app's Application
+Support database. Finalization opens the supplied database read-only, performs
+all mutations on a private copy, and atomically publishes the verified destination.
+The tool refuses a missing file or unknown SQLite application_id and never
+overwrites an existing destination or partial artifact.`;
 }
 
 function parseArguments(argv) {

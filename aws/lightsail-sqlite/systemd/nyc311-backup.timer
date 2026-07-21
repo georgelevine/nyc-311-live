@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly NYC 311 Live SQLite backup
+
+[Timer]
+OnCalendar=*-*-* 04:15:00 UTC
+RandomizedDelaySec=15m
+Persistent=true
+Unit=nyc311-backup.service
+
+[Install]
+WantedBy=timers.target

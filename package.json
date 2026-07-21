@@ -13,6 +13,8 @@
     "live:monitor": "node live-311.js",
     "db:finalize": "node finalize-sqlite.js",
     "db:verify": "node finalize-sqlite.js --verify-only",
+    "db:backup": "node backup-sqlite.js",
+    "db:verify-snapshot": "node verify-sqlite-snapshot.js",
     "desktop": "electron .",
     "desktop:package": "electron-packager . \"NYC 311 Live\" --platform=darwin --arch=arm64 --out=dist --overwrite --prune=true --ignore='^/data' --ignore='^/dist'",
     "cloud:migrate": "node cloud/migrate.js",
@@ -21,7 +23,7 @@
     "cloud:worker": "node cloud/worker.js"
   },
   "engines": {
-    "node": ">=22.0.0 <23"
+    "node": ">=22.16.0 <23"
   },
   "dependencies": {
     "cheerio": "^1.0.0-rc.12",

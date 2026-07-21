@@ -39,6 +39,8 @@ npm run desktop:package
 - `npm run live:monitor` — run the local Portal collector
 - `npm run db:verify` — verify the SQLite archive without changing it
 - `npm run db:finalize` — create a verified migration-ready SQLite backup
+- `npm run db:backup` — create a non-mutating verified routine SQLite backup
+- `npm run db:verify-snapshot` — verify a transferred snapshot and its manifest
 - `npm run cloud:migrate` — apply the PostgreSQL/PostGIS cloud schema
 - `npm run cloud:import` — import the finalized SQLite archive
 - `npm run cloud:web` — run the cloud dashboard service
@@ -46,10 +48,10 @@ npm run desktop:package
 
 ## Cloud deployment
 
-The repository includes PostgreSQL/PostGIS deployment support and separate web
-and worker processes. See [AWS_DEPLOYMENT.md](AWS_DEPLOYMENT.md) for the
-Lightsail deployment path and [CLOUD_DEPLOYMENT.md](CLOUD_DEPLOYMENT.md) for the
-managed PostgreSQL/Render alternative.
+The recommended first deployment keeps SQLite on a single inexpensive Lightsail
+instance. See [LIGHTSAIL_SQLITE_DEPLOYMENT.md](LIGHTSAIL_SQLITE_DEPLOYMENT.md).
+The later PostgreSQL/PostGIS path remains in [AWS_DEPLOYMENT.md](AWS_DEPLOYMENT.md),
+and [CLOUD_DEPLOYMENT.md](CLOUD_DEPLOYMENT.md) covers managed PostgreSQL/Render.
 
 Copy an example environment file and supply real credentials outside Git. Never
 commit `.env` files, database files, passwords, private keys, or cloud secrets.

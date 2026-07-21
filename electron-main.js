@@ -77,4 +77,9 @@ async function createWindow() {
 
 app.whenReady().then(createWindow);
 app.on('activate', () => { if (!mainWindow) createWindow(); });
+app.on('before-quit', () => {
+  if (liveMonitor && typeof liveMonitor.stop === 'function') {
+    liveMonitor.stop('electron-before-quit');
+  }
+});
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });

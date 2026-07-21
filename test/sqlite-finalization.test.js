@@ -272,6 +272,8 @@ test('CLI parsing keeps the database precedence and rejects unsafe ambiguity', (
 test('finalizes, repairs only map-proven rows, and creates a verified backup manifest', async t => {
   const fixture = createFixture(t);
   const backupPath = path.join(fixture.directory, 'backups', 'first.sqlite');
+  const sourceDigestBefore = crypto.createHash('sha256')
+    .update(fs.readFileSync(fixture.databasePath)).digest('hex');
   const result = await finalizeDatabase({
     databasePath: fixture.databasePath,
     backupPath,
@@ -279,6 +281,8 @@ test('finalizes, repairs only map-proven rows, and creates a verified backup man
   });
 
   assert.equal(result.mode, 'finalize');
+  assert.equal(result.source_database, fixture.databasePath);
+  assert.equal(result.finalized_database, backupPath);
   assert.equal(result.health_before.ok, true);
   assert.equal(result.health_after.ok, true);
   assert.equal(result.planned.map_seen_repairs, 1);
@@ -289,36 +293,34 @@ test('finalizes, repairs only map-proven rows, and creates a verified backup man
     submitted_at_normalized: 1,
     submitted_at_unparseable: 1
   });
-
-  const database = inspectDatabase(fixture.databasePath);
-  t.after(() => database.close());
-  assert.equal(database.prepare('PRAGMA application_id').get().application_id, APPLICATION_ID);
-  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 1);
-  const migration = database.prepare(
-    'SELECT version, name, checksum, applied_at FROM schema_migrations'
-  ).get();
-  assert.equal(migration.version, 1);
-  assert.equal(migration.name, MIGRATIONS[0].name);
-  assert.equal(migration.checksum, migrationChecksum(MIGRATIONS[0]));
-  assert.equal(migration.applied_at, NOW.toISOString());
-  assert.deepEqual(
-    database.prepare('PRAGMA index_info(live_number_queue_audit_due_idx)').all().map(row => row.name),
-    ['audit_outcome', 'audit_after', 'suffix']
+  assert.equal(
+    crypto.createHash('sha256').update(fs.readFileSync(fixture.databasePath)).digest('hex'),
+    sourceDigestBefore
   );
 
-  const queueRows = database.prepare(
-    'SELECT suffix, map_seen FROM live_number_queue ORDER BY suffix'
-  ).all();
-  assert.deepEqual(queueRows.map(row => [Number(row.suffix), Number(row.map_seen)]), [
-    [fixture.mapSuffix, 1],
-    [fixture.auditSuffix, 0],
-    [fixture.mismatchedSuffix, 0]
-  ]);
-  const normalized = database.prepare(
-    'SELECT submitted_at, raw_json FROM live_portal_requests WHERE srnumber=?'
-  ).get(fixture.mapSrnumber);
-  assert.equal(normalized.submitted_at, '2026-07-20T20:43:46.000Z');
-  assert.equal(normalized.raw_json, fixture.mapRawText);
+  const source = inspectDatabase(fixture.databasePath);
+  try {
+    assert.equal(source.prepare('PRAGMA application_id').get().application_id, 0);
+    assert.equal(source.prepare('PRAGMA user_version').get().user_version, 0);
+    assert.equal(
+      source.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE name='schema_migrations'").get().count,
+      0
+    );
+    assert.equal(
+      source.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE name='live_number_queue_audit_due_idx'").get().count,
+      0
+    );
+    assert.equal(
+      source.prepare('SELECT map_seen FROM live_number_queue WHERE suffix=?').get(fixture.mapSuffix).map_seen,
+      0
+    );
+    assert.equal(
+      source.prepare('SELECT submitted_at FROM live_portal_requests WHERE srnumber=?').get(fixture.mapSrnumber).submitted_at,
+      '7/20/2026 8:43:46 PM'
+    );
+  } finally {
+    source.close();
+  }
 
   assert.equal(fs.existsSync(backupPath), true);
   assert.equal(fs.existsSync(`${backupPath}.manifest.json`), true);
@@ -347,9 +349,32 @@ test('finalizes, repairs only map-proven rows, and creates a verified backup man
   });
   assert.equal(fs.statSync(backupPath).mode & 0o777, 0o600);
   assert.equal(fs.statSync(`${backupPath}.manifest.json`).mode & 0o777, 0o600);
+  assert.equal(fs.existsSync(`${backupPath}.partial`), false);
+  assert.equal(fs.existsSync(`${backupPath}.manifest.json.partial`), false);
 
   const backup = inspectDatabase(backupPath);
   try {
+    assert.equal(backup.prepare('PRAGMA application_id').get().application_id, APPLICATION_ID);
+    assert.equal(backup.prepare('PRAGMA user_version').get().user_version, 1);
+    const migration = backup.prepare(
+      'SELECT version, name, checksum, applied_at FROM schema_migrations'
+    ).get();
+    assert.equal(migration.version, 1);
+    assert.equal(migration.name, MIGRATIONS[0].name);
+    assert.equal(migration.checksum, migrationChecksum(MIGRATIONS[0]));
+    assert.equal(migration.applied_at, NOW.toISOString());
+    assert.deepEqual(
+      backup.prepare('PRAGMA index_info(live_number_queue_audit_due_idx)').all().map(row => row.name),
+      ['audit_outcome', 'audit_after', 'suffix']
+    );
+    const queueRows = backup.prepare(
+      'SELECT suffix, map_seen FROM live_number_queue ORDER BY suffix'
+    ).all();
+    assert.deepEqual(queueRows.map(row => [Number(row.suffix), Number(row.map_seen)]), [
+      [fixture.mapSuffix, 1],
+      [fixture.auditSuffix, 0],
+      [fixture.mismatchedSuffix, 0]
+    ]);
     assert.equal(
       backup.prepare('SELECT map_seen FROM live_number_queue WHERE suffix=?').get(fixture.mapSuffix).map_seen,
       1
@@ -357,6 +382,10 @@ test('finalizes, repairs only map-proven rows, and creates a verified backup man
     assert.equal(
       backup.prepare('SELECT submitted_at FROM live_portal_requests WHERE srnumber=?').get(fixture.mapSrnumber).submitted_at,
       '2026-07-20T20:43:46.000Z'
+    );
+    assert.equal(
+      backup.prepare('SELECT raw_json FROM live_portal_requests WHERE srnumber=?').get(fixture.mapSrnumber).raw_json,
+      fixture.mapRawText
     );
   } finally {
     backup.close();
@@ -368,11 +397,11 @@ test('finalizes, repairs only map-proven rows, and creates a verified backup man
     backupPath: secondBackupPath,
     now: new Date('2026-07-20T22:16:30.000Z')
   });
-  assert.equal(second.migrations_before.pending.length, 0);
-  assert.equal(second.planned.map_seen_repairs, 0);
-  assert.equal(second.planned.submitted_at_normalizations, 0);
-  assert.equal(second.changes.map_seen_repaired, 0);
-  assert.equal(second.changes.submitted_at_normalized, 0);
+  assert.equal(second.migrations_before.pending.length, 1);
+  assert.equal(second.planned.map_seen_repairs, 1);
+  assert.equal(second.planned.submitted_at_normalizations, 1);
+  assert.equal(second.changes.map_seen_repaired, 1);
+  assert.equal(second.changes.submitted_at_normalized, 1);
   assert.equal(fs.existsSync(secondBackupPath), true);
 });
 
@@ -491,5 +520,45 @@ test('rejects an occupied backup destination before mutating the source', async 
     );
   } finally {
     database.close();
+  }
+});
+
+test('a failed copy finalization removes partial artifacts and preserves the source', async t => {
+  const fixture = createFixture(t);
+  const database = new DatabaseSync(fixture.databasePath);
+  database.prepare(`
+    UPDATE live_portal_requests SET submitted_at = ? WHERE suffix = ?
+  `).run('2026-07-20T20:43:46.000Z', fixture.auditSuffix);
+  database.exec('CREATE UNIQUE INDEX live_submitted_unique ON live_portal_requests(submitted_at)');
+  database.close();
+
+  const backupPath = path.join(fixture.directory, 'copy-failure.sqlite');
+  await assert.rejects(
+    finalizeDatabase({ databasePath: fixture.databasePath, backupPath, now: NOW }),
+    /UNIQUE constraint failed/
+  );
+  for (const artifact of [
+    backupPath,
+    `${backupPath}.partial`,
+    `${backupPath}.manifest.json`,
+    `${backupPath}.manifest.json.partial`
+  ]) {
+    assert.equal(fs.existsSync(artifact), false, `${artifact} should have been cleaned up`);
+  }
+
+  const source = inspectDatabase(fixture.databasePath);
+  try {
+    assert.equal(source.prepare('PRAGMA application_id').get().application_id, 0);
+    assert.equal(source.prepare('PRAGMA user_version').get().user_version, 0);
+    assert.equal(
+      source.prepare('SELECT map_seen FROM live_number_queue WHERE suffix=?').get(fixture.mapSuffix).map_seen,
+      0
+    );
+    assert.equal(
+      source.prepare('SELECT submitted_at FROM live_portal_requests WHERE srnumber=?').get(fixture.mapSrnumber).submitted_at,
+      '7/20/2026 8:43:46 PM'
+    );
+  } finally {
+    source.close();
   }
 });

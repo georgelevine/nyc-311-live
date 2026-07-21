@@ -11,6 +11,7 @@ const {
 } = require('./closure-tracking');
 const { promoteAuditDiscoveries } = require('./audit-discovery');
 const { reconcileStoredDetails } = require('./detail-queue');
+const { resolveSynchronousMode } = require('./sqlite-runtime');
 
 const PORTAL_URL = 'https://portal.311.nyc.gov/entity-pin-fetch-service-requests/';
 const POLL_INTERVAL_SECONDS = Math.max(5, Number(process.env.POLL_INTERVAL_SECONDS || 15));
@@ -19,6 +20,7 @@ const AUDIT_DELAY_MINUTES = Math.max(30, Number(process.env.AUDIT_DELAY_MINUTES 
 // One detail request every 2.5 seconds leaves room for the four map polls per
 // minute while keeping total routine Portal traffic below about 30/minute.
 const DETAIL_REQUEST_DELAY_MS = Math.max(500, Number(process.env.DETAIL_REQUEST_DELAY_MS || 2500));
+const SQLITE_SYNCHRONOUS = resolveSynchronousMode(process.env.SQLITE_SYNCHRONOUS);
 const DATABASE_PATH = process.env.DATABASE_PATH
   ? path.resolve(process.env.DATABASE_PATH)
   : path.join(__dirname, 'data', 'portal-archive.sqlite');
@@ -27,7 +29,7 @@ fs.mkdirSync(path.dirname(DATABASE_PATH), { recursive: true });
 const db = new DatabaseSync(DATABASE_PATH);
 db.exec(`
   PRAGMA journal_mode = WAL;
-  PRAGMA synchronous = NORMAL;
+  PRAGMA synchronous = ${SQLITE_SYNCHRONOUS};
   PRAGMA busy_timeout = 3000;
 
   CREATE TABLE IF NOT EXISTS live_portal_requests (
@@ -310,8 +312,42 @@ const syncCompletedAudits = db.prepare(`
     )
 `);
 
+let stopRequested = false;
+let stopReason = null;
+let activeArchiveChild = null;
+let detailHydrationStopping = false;
+const pendingSleeps = new Set();
+
 function sleep(milliseconds) {
-  return new Promise(resolve => setTimeout(resolve, milliseconds));
+  return new Promise(resolve => {
+    const pending = {
+      timer: null,
+      resolve() {
+        if (!pendingSleeps.delete(pending)) return;
+        clearTimeout(pending.timer);
+        resolve();
+      }
+    };
+    pending.timer = setTimeout(pending.resolve, milliseconds);
+    pendingSleeps.add(pending);
+  });
+}
+
+function terminateArchiveChild() {
+  const child = activeArchiveChild;
+  if (child && child.exitCode == null && child.signalCode == null) {
+    child.kill('SIGTERM');
+  }
+}
+
+function requestStop(reason = 'requested') {
+  if (stopRequested) return;
+  stopRequested = true;
+  stopReason = reason;
+  detailHydrationStopping = true;
+  for (const pending of [...pendingSleeps]) pending.resolve();
+  terminateArchiveChild();
+  console.log(JSON.stringify({ stopping: true, reason }));
 }
 
 function suffixOf(number) {
@@ -584,7 +620,6 @@ function nextDetailWork(now) {
 }
 
 let detailHydrationPromise = null;
-let detailHydrationStopping = false;
 let detailHydrationPaused = false;
 
 function startDetailHydration() {
@@ -845,6 +880,10 @@ function savePoll(records) {
 
 function runArchiveRange(low, high) {
   return new Promise((resolve, reject) => {
+    if (stopRequested) {
+      reject(new Error(`Delayed audit was not started because shutdown was requested (${stopReason})`));
+      return;
+    }
     const child = spawn(process.execPath, [path.join(__dirname, 'archive-311.js')], {
       cwd: path.dirname(DATABASE_PATH),
       env: {
@@ -858,10 +897,22 @@ function runArchiveRange(low, high) {
       },
       stdio: 'inherit'
     });
-    child.on('error', reject);
-    child.on('exit', code => {
+    activeArchiveChild = child;
+    const clearActiveChild = () => {
+      if (activeArchiveChild === child) activeArchiveChild = null;
+    };
+    child.once('error', error => {
+      clearActiveChild();
+      reject(error);
+    });
+    child.once('exit', (code, signal) => {
+      clearActiveChild();
       if (code === 0) resolve();
-      else reject(new Error(`Delayed audit exited with code ${code}`));
+      else reject(new Error(
+        signal
+          ? `Delayed audit was terminated by ${signal}`
+          : `Delayed audit exited with code ${code}`
+      ));
     });
   });
 }
@@ -869,6 +920,7 @@ function runArchiveRange(low, high) {
 let auditPromise = null;
 
 function startEligibleAudit() {
+  if (stopRequested) return { started: false, reason: 'stopping' };
   if (auditPromise) return { started: false, reason: 'already_running' };
   const nowIso = new Date().toISOString();
   const range = eligibleAuditRange.get(nowIso);
@@ -985,6 +1037,7 @@ async function main() {
     duration_seconds: LIVE_DURATION_SECONDS || null,
     delayed_audit_minutes: AUDIT_DELAY_MINUTES,
     detail_request_delay_ms: DETAIL_REQUEST_DELAY_MS,
+    sqlite_synchronous: SQLITE_SYNCHRONOUS,
     audit_discoveries_reconciled: startupPromotion.promoted,
     audit_promotion_conflicts: startupPromotion.conflicts,
     audit_promotion_invalid: startupPromotion.invalid,
@@ -996,7 +1049,8 @@ async function main() {
   }));
   startDetailHydration();
 
-  while (LIVE_DURATION_SECONDS === 0 || Date.now() - started < LIVE_DURATION_SECONDS * 1000) {
+  while (!stopRequested
+      && (LIVE_DURATION_SECONDS === 0 || Date.now() - started < LIVE_DURATION_SECONDS * 1000)) {
     try {
       const records = await fetchLatest();
       const result = savePoll(records);
@@ -1022,7 +1076,8 @@ async function main() {
       console.error(JSON.stringify({ poll: polls + 1, error: error.message }));
     }
 
-    if (LIVE_DURATION_SECONDS > 0 && Date.now() - started >= LIVE_DURATION_SECONDS * 1000) break;
+    if (stopRequested
+        || (LIVE_DURATION_SECONDS > 0 && Date.now() - started >= LIVE_DURATION_SECONDS * 1000)) break;
     await sleep(currentPollIntervalSeconds() * 1000);
   }
 
@@ -1039,6 +1094,10 @@ async function main() {
   console.log(JSON.stringify({ finished: true, polls, ...totals }));
 }
 
+process.once('SIGINT', () => requestStop('SIGINT'));
+process.once('SIGTERM', () => requestStop('SIGTERM'));
+process.once('exit', terminateArchiveChild);
+
 const monitor = main()
   .catch(error => {
     console.error(error.stack || error.message);
@@ -1046,4 +1105,4 @@ const monitor = main()
   })
   .finally(() => db.close());
 
-module.exports = { firstPoll, monitor };
+module.exports = { firstPoll, monitor, stop: requestStop };

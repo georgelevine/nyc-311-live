@@ -695,7 +695,11 @@
   pollInterval.addEventListener('change', async () => {
     pollInterval.disabled = true;
     try {
-      const response = await fetch(`/api/live-settings?poll_interval_seconds=${encodeURIComponent(pollInterval.value)}`, { method: 'POST' });
+      const response = await fetch('/api/live-settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ poll_interval_seconds: Number(pollInterval.value) })
+      });
       if (!response.ok) throw new Error(`Could not change interval (${response.status})`);
       currentPollSeconds = Number(pollInterval.value);
     } catch (error) {
