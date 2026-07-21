@@ -129,7 +129,8 @@ test('the checked-in migrations contain closure parity and import-run audit sche
   assert.deepEqual(migrations.map(migration => migration.filename), [
     '001_initial_cloud_schema.sql',
     '002_closure_tracking_parity.sql',
-    '003_sqlite_import_runs.sql'
+    '003_sqlite_import_runs.sql',
+    '004_request_borough_zip.sql'
   ]);
   const closureSql = migrations[1].sql;
   for (const token of [
@@ -144,6 +145,11 @@ test('the checked-in migrations contain closure parity and import-run audit sche
     'run_id', 'source_sha256', 'source_name', 'source_manifest',
     'target_manifest', 'started_at', 'completed_at', 'status', 'error'
   ]) assert.match(auditSql, new RegExp(`\\b${token}\\b`));
+
+  const geographySql = migrations[3].sql;
+  for (const token of ['borough', 'incident_zip']) {
+    assert.match(geographySql, new RegExp(`\\b${token}\\b`));
+  }
 
   const canonicalSchema = fs.readFileSync(
     path.join(__dirname, '..', 'cloud', 'schema.sql'),

@@ -13,6 +13,10 @@ const { promoteAuditDiscoveries } = require('./audit-discovery');
 const { reconcileStoredDetails } = require('./detail-queue');
 const { resolveSynchronousMode } = require('./sqlite-runtime');
 const { normalizePortalTimestamp } = require('./portal-timestamp');
+const {
+  ensureSqliteRequestGeography,
+  geographyFromPortalAddress
+} = require('./address-geography');
 
 const PORTAL_URL = 'https://portal.311.nyc.gov/entity-pin-fetch-service-requests/';
 const POLL_INTERVAL_SECONDS = Math.max(5, Number(process.env.POLL_INTERVAL_SECONDS || 15));
@@ -39,6 +43,8 @@ db.exec(`
     portal_id TEXT UNIQUE,
     problem TEXT,
     address TEXT,
+    borough TEXT,
+    incident_zip TEXT,
     latitude REAL,
     longitude REAL,
     submitted_at TEXT,
@@ -116,6 +122,8 @@ db.exec(`
   );
 `);
 
+ensureSqliteRequestGeography(db);
+
 const closureTracker = createClosureTracker(db);
 
 const getLiveRequest = db.prepare(`
@@ -124,13 +132,15 @@ const getLiveRequest = db.prepare(`
 `);
 const upsertRequest = db.prepare(`
   INSERT INTO live_portal_requests (
-    srnumber, suffix, portal_id, problem, address, latitude, longitude,
+    srnumber, suffix, portal_id, problem, address, borough, incident_zip, latitude, longitude,
     submitted_at, status, portal_url, first_seen_at, last_seen_at, raw_json
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(srnumber) DO UPDATE SET
     portal_id = COALESCE(excluded.portal_id, live_portal_requests.portal_id),
     problem = COALESCE(excluded.problem, live_portal_requests.problem),
     address = COALESCE(excluded.address, live_portal_requests.address),
+    borough = COALESCE(excluded.borough, live_portal_requests.borough),
+    incident_zip = COALESCE(excluded.incident_zip, live_portal_requests.incident_zip),
     latitude = COALESCE(excluded.latitude, live_portal_requests.latitude),
     longitude = COALESCE(excluded.longitude, live_portal_requests.longitude),
     submitted_at = COALESCE(excluded.submitted_at, live_portal_requests.submitted_at),
@@ -813,6 +823,8 @@ function savePoll(records) {
     for (const { pin, suffix } of numbered) {
       const data = pin.data || {};
       const number = data.srnumber;
+      const address = data.address || pin.sublabel || null;
+      const geography = geographyFromPortalAddress(address);
       const existing = getLiveRequest.get(number);
       if (!existing) newMapRecords += 1;
       const statusChanged = data.status
@@ -841,7 +853,9 @@ function savePoll(records) {
         suffix,
         pin.id || null,
         data.problem || pin.label || null,
-        data.address || pin.sublabel || null,
+        address,
+        geography.borough,
+        geography.incident_zip,
         Number.isFinite(Number(pin.latitude)) ? Number(pin.latitude) : null,
         Number.isFinite(Number(pin.longitude)) ? Number(pin.longitude) : null,
         normalizePortalTimestamp(data.submitteddate),

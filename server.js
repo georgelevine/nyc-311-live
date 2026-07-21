@@ -724,6 +724,7 @@ app.get('/api/live-map', (req, res) => {
       : '';
     const rows = database.prepare(`
       SELECT live.srnumber,live.suffix,live.portal_id,live.problem,live.address,
+             live.borough,live.incident_zip,
              live.latitude,live.longitude,live.submitted_at,live.status,
              live.portal_url,live.first_seen_at,live.last_seen_at,
              ${detailColumns},${followUpColumns},${currentClosureColumns}
@@ -828,6 +829,7 @@ app.get('/api/live-dashboard', (req, res) => {
       : '';
     const storedRecords = database.prepare(`
       SELECT live.srnumber, live.suffix, live.portal_id, live.problem, live.address,
+             live.borough,live.incident_zip,
              live.latitude, live.longitude, live.submitted_at, live.status,
              live.portal_url, live.first_seen_at, live.last_seen_at,
              ${detailColumns}, ${followUpColumns}, ${currentClosureColumns}

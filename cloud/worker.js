@@ -6,6 +6,7 @@ const {
   fetchDetailByNumber
 } = require('./portal');
 const { isClosedStatus, statusesMatch } = require('../closure-tracking');
+const { geographyFromPortalAddress } = require('../address-geography');
 const {
   getFollowUp,
   markFollowUpError,
@@ -74,25 +75,30 @@ async function savePoll(pins) {
       if (!previous.rowCount) newMapRecords += 1;
       const latitude = finiteCoordinate(pin.latitude);
       const longitude = finiteCoordinate(pin.longitude);
+      const address = data.address || pin.sublabel || null;
+      const geography = geographyFromPortalAddress(address);
       const statusChanged = Boolean(
         data.status && (!previous.rowCount || !statusesMatch(previousStatus, data.status))
       );
 
       await client.query(`
         INSERT INTO live_portal_requests (
-          srnumber, suffix, portal_id, problem, address, latitude, longitude, location,
+          srnumber, suffix, portal_id, problem, address, borough, incident_zip,
+          latitude, longitude, location,
           submitted_at, status, portal_url, source, first_seen_at, last_seen_at, raw_json
         ) VALUES (
-          $1, $2, $3, $4, $5, $6, $7,
-          CASE WHEN $6::double precision IS NOT NULL AND $7::double precision IS NOT NULL
-            THEN ST_SetSRID(ST_MakePoint($7, $6), 4326)::geography ELSE NULL END,
-          $8, $9, $10, 'map', $11, $11, $12::jsonb
+          $1, $2, $3, $4, $5, $6, $7, $8, $9,
+          CASE WHEN $8::double precision IS NOT NULL AND $9::double precision IS NOT NULL
+            THEN ST_SetSRID(ST_MakePoint($9, $8), 4326)::geography ELSE NULL END,
+          $10, $11, $12, 'map', $13, $13, $14::jsonb
         )
         ON CONFLICT (srnumber) DO UPDATE SET
           suffix = EXCLUDED.suffix,
           portal_id = COALESCE(EXCLUDED.portal_id, live_portal_requests.portal_id),
           problem = COALESCE(EXCLUDED.problem, live_portal_requests.problem),
           address = COALESCE(EXCLUDED.address, live_portal_requests.address),
+          borough = COALESCE(EXCLUDED.borough, live_portal_requests.borough),
+          incident_zip = COALESCE(EXCLUDED.incident_zip, live_portal_requests.incident_zip),
           latitude = COALESCE(EXCLUDED.latitude,live_portal_requests.latitude),
           longitude = COALESCE(EXCLUDED.longitude,live_portal_requests.longitude),
           location = COALESCE(EXCLUDED.location,live_portal_requests.location),
@@ -104,7 +110,7 @@ async function savePoll(pins) {
           raw_json = EXCLUDED.raw_json
       `, [
         srnumber, suffix, pin.id || null, data.problem || pin.label || null,
-        data.address || pin.sublabel || null, latitude, longitude,
+        address, geography.borough, geography.incident_zip, latitude, longitude,
         normalizePortalTimestamp(data.submitteddate), data.status || null,
         pin.id ? `https://portal.311.nyc.gov/sr-details/?id=${pin.id}` : null,
         observedAt, JSON.stringify(pin)
@@ -429,15 +435,18 @@ async function persistAudit(row, result) {
       const portalUrl = detail.portalId
         ? `https://portal.311.nyc.gov/sr-details/?id=${detail.portalId}`
         : `https://portal.311.nyc.gov/sr-details/?srnum=${detail.srnumber}`;
+      const geography = geographyFromPortalAddress(detail.address);
       await client.query(`
         INSERT INTO live_portal_requests (
-          srnumber, suffix, portal_id, problem, address, submitted_at, status,
+          srnumber, suffix, portal_id, problem, address, borough, incident_zip, submitted_at, status,
           portal_url, source, first_seen_at, last_seen_at, raw_json
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'number_audit',$9,$9,$10::jsonb)
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'number_audit',$11,$11,$12::jsonb)
         ON CONFLICT (srnumber) DO UPDATE SET
           portal_id = COALESCE(EXCLUDED.portal_id, live_portal_requests.portal_id),
           problem = COALESCE(EXCLUDED.problem, live_portal_requests.problem),
           address = COALESCE(EXCLUDED.address, live_portal_requests.address),
+          borough = COALESCE(EXCLUDED.borough, live_portal_requests.borough),
+          incident_zip = COALESCE(EXCLUDED.incident_zip, live_portal_requests.incident_zip),
           submitted_at = COALESCE(EXCLUDED.submitted_at, live_portal_requests.submitted_at),
           status = CASE
             WHEN live_portal_requests.status IS NOT NULL AND EXCLUDED.status IS NULL
@@ -447,7 +456,7 @@ async function persistAudit(row, result) {
           last_seen_at = EXCLUDED.last_seen_at
       `, [
         detail.srnumber, row.suffix, detail.portalId, detail.problem, detail.address,
-        detail.dateReported, detail.status, portalUrl,
+        geography.borough, geography.incident_zip, detail.dateReported, detail.status, portalUrl,
         now, JSON.stringify({ source: 'number_audit' })
       ]);
       await client.query(`

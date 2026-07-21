@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
+const { geographyFromPortalAddress } = require('../address-geography');
 const { query, transaction, migrate, close } = require('./db');
 const { normalizePortalTimestamp } = require('./portal');
 
@@ -152,14 +153,15 @@ async function importLiveRequests(database, client) {
     const raw = jsonObject(row.raw_json, `${row.srnumber}.raw_json`);
     const firstSeen = timestamp(row.first_seen_at, `${row.srnumber}.first_seen_at`, true);
     const lastSeen = timestamp(row.last_seen_at, `${row.srnumber}.last_seen_at`, true);
+    const geography = geographyFromPortalAddress(row.address);
     await db.query(`
       INSERT INTO live_portal_requests (
-        srnumber,suffix,portal_id,problem,address,latitude,longitude,location,
+        srnumber,suffix,portal_id,problem,address,borough,incident_zip,latitude,longitude,location,
         submitted_at,status,portal_url,source,first_seen_at,last_seen_at,raw_json
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,
-        CASE WHEN $6::double precision IS NOT NULL AND $7::double precision IS NOT NULL
-          THEN ST_SetSRID(ST_MakePoint($7,$6),4326)::geography ELSE NULL END,
-        $8,$9,$10,$11,$12,$13,$14::jsonb)
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,
+        CASE WHEN $8::double precision IS NOT NULL AND $9::double precision IS NOT NULL
+          THEN ST_SetSRID(ST_MakePoint($9,$8),4326)::geography ELSE NULL END,
+        $10,$11,$12,$13,$14,$15,$16::jsonb)
       ON CONFLICT (srnumber) DO UPDATE SET
         suffix = EXCLUDED.suffix,
         portal_id = COALESCE(live_portal_requests.portal_id, EXCLUDED.portal_id),
@@ -169,6 +171,8 @@ async function importLiveRequests(database, client) {
         address = CASE WHEN EXCLUDED.last_seen_at >= live_portal_requests.last_seen_at
           THEN COALESCE(EXCLUDED.address,live_portal_requests.address)
           ELSE COALESCE(live_portal_requests.address,EXCLUDED.address) END,
+        borough = COALESCE(live_portal_requests.borough,EXCLUDED.borough),
+        incident_zip = COALESCE(live_portal_requests.incident_zip,EXCLUDED.incident_zip),
         latitude = CASE WHEN EXCLUDED.last_seen_at >= live_portal_requests.last_seen_at
           THEN COALESCE(EXCLUDED.latitude,live_portal_requests.latitude)
           ELSE COALESCE(live_portal_requests.latitude,EXCLUDED.latitude) END,
@@ -190,7 +194,8 @@ async function importLiveRequests(database, client) {
           THEN EXCLUDED.raw_json ELSE live_portal_requests.raw_json END
     `, [
       row.srnumber, row.suffix, row.portal_id, row.problem, row.address,
-      row.latitude, row.longitude, timestamp(row.submitted_at, `${row.srnumber}.submitted_at`),
+      geography.borough, geography.incident_zip, row.latitude, row.longitude,
+      timestamp(row.submitted_at, `${row.srnumber}.submitted_at`),
       row.status, row.portal_url, liveSource(row, raw), firstSeen, lastSeen, JSON.stringify(raw)
     ]);
   });
@@ -255,6 +260,25 @@ async function importPortalRequests(database, client) {
     LEFT JOIN live_portal_requests AS live USING (srnumber)
     WHERE live.srnumber IS NULL
     ON CONFLICT (srnumber) DO NOTHING
+  `);
+
+  await client.query(`
+    UPDATE live_portal_requests
+    SET borough = CASE UPPER(SUBSTRING(address FROM
+          ',[[:space:]]*(BRONX|BROOKLYN|MANHATTAN|QUEENS|STATEN IS|STATEN ISLAND)([[:space:]]*\\([^)]*\\))?,[[:space:]]*NY,'))
+        WHEN 'BRONX' THEN 'Bronx'
+        WHEN 'BROOKLYN' THEN 'Brooklyn'
+        WHEN 'MANHATTAN' THEN 'Manhattan'
+        WHEN 'QUEENS' THEN 'Queens'
+        WHEN 'STATEN IS' THEN 'Staten Island'
+        WHEN 'STATEN ISLAND' THEN 'Staten Island'
+        ELSE borough
+      END,
+      incident_zip = COALESCE(
+        SUBSTRING(address FROM ',[[:space:]]*NY,[[:space:]]*([0-9]{5})(-[0-9]{4})?[[:space:]]*$'),
+        incident_zip
+      )
+    WHERE address IS NOT NULL AND (borough IS NULL OR incident_zip IS NULL)
   `);
 }
 

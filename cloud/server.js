@@ -85,6 +85,7 @@ app.get('/api/live-map', async (_req, res) => {
   try {
     const result = await query(`
       SELECT live.srnumber,live.suffix,live.portal_id,live.problem,live.address,
+             live.borough,live.incident_zip,
              live.latitude,live.longitude,live.submitted_at,live.status,
              live.portal_url,live.first_seen_at,live.last_seen_at,
              details.portal_id AS detail_portal_id,
@@ -124,6 +125,7 @@ app.get('/api/live-dashboard', async (req, res) => {
     const [recordsResult, statsResult, summaryResult] = await Promise.all([
       query(`
         SELECT live.srnumber, live.suffix, live.portal_id, live.problem, live.address,
+               live.borough,live.incident_zip,
                live.latitude, live.longitude, live.submitted_at, live.status,
                live.portal_url, live.source, live.first_seen_at, live.last_seen_at,
                details.portal_id AS detail_portal_id,details.status AS detail_status,

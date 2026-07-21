@@ -1,6 +1,10 @@
 'use strict';
 
 const { createClosureTracker } = require('./closure-tracking');
+const {
+  ensureSqliteRequestGeography,
+  geographyFromPortalAddress
+} = require('./address-geography');
 
 function parseFields(value) {
   try {
@@ -20,6 +24,7 @@ function promoteAuditDiscoveries({
   highSuffix = null
 } = {}) {
   if (!db) throw new TypeError('db is required');
+  ensureSqliteRequestGeography(db);
   const tracker = closureTracker || createClosureTracker(db);
   const low = Number.isInteger(lowSuffix) ? lowSuffix : null;
   const high = Number.isInteger(highSuffix) ? highSuffix : null;
@@ -48,9 +53,9 @@ function promoteAuditDiscoveries({
   `);
   const insertLive = db.prepare(`
     INSERT INTO live_portal_requests (
-      srnumber, suffix, portal_id, problem, address, latitude, longitude,
+      srnumber, suffix, portal_id, problem, address, borough, incident_zip, latitude, longitude,
       submitted_at, status, portal_url, first_seen_at, last_seen_at, raw_json
-    ) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?)
     ON CONFLICT DO NOTHING
   `);
   const markDetailFound = db.prepare(`
@@ -113,12 +118,15 @@ function promoteAuditDiscoveries({
           status
         }
       });
+      const geography = geographyFromPortalAddress(row.address);
       const inserted = insertLive.run(
         row.srnumber,
         row.suffix,
         row.portal_id,
         row.problem,
         row.address,
+        geography.borough,
+        geography.incident_zip,
         row.date_reported,
         status,
         row.portal_url,

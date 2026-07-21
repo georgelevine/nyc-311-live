@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS live_portal_requests (
   portal_id TEXT UNIQUE,
   problem TEXT,
   address TEXT,
+  borough TEXT,
+  incident_zip TEXT,
   latitude DOUBLE PRECISION,
   longitude DOUBLE PRECISION,
   location GEOGRAPHY(POINT, 4326),
@@ -31,6 +33,10 @@ CREATE INDEX IF NOT EXISTS live_portal_requests_submitted_idx
   ON live_portal_requests (submitted_at DESC);
 CREATE INDEX IF NOT EXISTS live_portal_requests_status_idx
   ON live_portal_requests (status);
+CREATE INDEX IF NOT EXISTS live_portal_requests_borough_idx
+  ON live_portal_requests (borough);
+CREATE INDEX IF NOT EXISTS live_portal_requests_incident_zip_idx
+  ON live_portal_requests (incident_zip);
 CREATE INDEX IF NOT EXISTS live_portal_requests_location_idx
   ON live_portal_requests USING GIST (location);
 
