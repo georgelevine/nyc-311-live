@@ -27,6 +27,39 @@
         <button type="button" data-mobile-view="overview" aria-pressed="false">Overview</button>
       </nav>
 
+      <section id="city-summary" class="city-summary" aria-labelledby="city-summary-title" aria-busy="true">
+        <header class="city-summary-header">
+          <div>
+            <span id="city-summary-eyebrow" class="eyebrow">NYC right now</span>
+            <h2 id="city-summary-title">Last 15 minutes</h2>
+          </div>
+          <time id="city-summary-updated">Updating…</time>
+        </header>
+        <div id="city-summary-loading" class="city-summary-loading" aria-hidden="true">
+          <span></span><span></span><span></span>
+        </div>
+        <div id="city-summary-content" class="city-summary-content" hidden>
+          <div class="city-summary-lead">
+            <p><strong id="summary-request-count">0</strong> requests in the live map feed</p>
+            <span id="summary-comparison">Building comparison…</span>
+          </div>
+          <div class="city-summary-row">
+            <span>Leading request types</span>
+            <p id="summary-categories">—</p>
+            <small id="summary-other-categories"></small>
+          </div>
+          <div class="city-summary-row">
+            <span>Boroughs</span>
+            <p id="summary-boroughs">—</p>
+          </div>
+          <footer>
+            <span id="summary-coverage">Checking data coverage…</span>
+            <span id="summary-history-note">Measuring archive history…</span>
+          </footer>
+        </div>
+        <p id="city-summary-status" class="city-summary-status" role="status"></p>
+      </section>
+
       <section class="metrics" aria-label="Live collection statistics">
         <article>
           <strong id="total-count">0</strong><span>Captured</span>

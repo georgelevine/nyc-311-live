@@ -19,11 +19,57 @@ const { createDashboardAuth, dashboardAuthConfig } = require('./dashboard-auth')
 const { inspectSqliteHealth } = require('./sqlite-health');
 const { originMatchesHost } = require('./request-security');
 const { normalizePortalTimestamp } = require('./portal-timestamp');
+const { loadSqliteLiveSummary } = require('./sqlite-live-summary');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || null;
 const dashboardAuth = dashboardAuthConfig();
+const LIVE_SUMMARY_CACHE_TTL_MS = 15_000;
+const ARCHIVE_QUALITY_CACHE_TTL_MS = 5 * 60_000;
+const liveSummaryCache = new Map();
+const archiveQualityCache = new Map();
+
+function liveSummaryRevision(database) {
+  try {
+    const row = database.prepare(`
+      SELECT value FROM live_monitor_state WHERE key='last_successful_poll_at'
+    `).get();
+    return row && row.value ? String(row.value) : 'starting';
+  } catch (_) {
+    return 'starting';
+  }
+}
+
+function cachedLiveSummary(database, databasePath) {
+  const now = Date.now();
+  const revision = liveSummaryRevision(database);
+  const cached = liveSummaryCache.get(databasePath);
+  if (cached && cached.revision === revision && now - cached.created_at < LIVE_SUMMARY_CACHE_TTL_MS) {
+    return cached.summary;
+  }
+  const qualityEntry = archiveQualityCache.get(databasePath);
+  const archiveQuality = qualityEntry && now - qualityEntry.created_at < ARCHIVE_QUALITY_CACHE_TTL_MS
+    ? qualityEntry.quality
+    : null;
+  const summary = loadSqliteLiveSummary(database, {
+    now: new Date(now),
+    archiveQuality
+  });
+  if (!archiveQuality) {
+    archiveQualityCache.set(databasePath, {
+      created_at: now,
+      quality: {
+        archive_requests: summary.data_quality.archive_requests,
+        missing_submitted_time: summary.data_quality.missing_submitted_time,
+        invalid_submitted_time: summary.data_quality.invalid_submitted_time,
+        oldest_submitted_at: summary.data_quality.oldest_submitted_at
+      }
+    });
+  }
+  liveSummaryCache.set(databasePath, { created_at: now, revision, summary });
+  return summary;
+}
 
 app.use(express.json({ limit: '16kb' }));
 app.use(createDashboardAuth(dashboardAuth));
@@ -673,6 +719,29 @@ app.get('/api/live-map', (req, res) => {
   }
 });
 
+// Deterministic summary contract for the dashboard and future API clients.
+// The live windows are map-feed-only because the delayed number audit cannot
+// complete the newest submissions yet. A separate older map-plus-audit window
+// is returned without claiming that backlog-free continuity has been proven.
+app.get('/api/live-summary', (req, res) => {
+  const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
+  let database;
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    if (!require('fs').existsSync(databasePath)) {
+      return res.status(503).json({ error: 'Live archive is not available yet' });
+    }
+    const { DatabaseSync } = require('node:sqlite');
+    database = new DatabaseSync(databasePath, { readOnly: true });
+    return res.json(cachedLiveSummary(database, databasePath));
+  } catch (error) {
+    console.error('Live summary error:', error.message);
+    return res.status(503).json({ error: 'Live summary is temporarily unavailable' });
+  } finally {
+    if (database) database.close();
+  }
+});
+
 // Read-only feed for the macOS live monitor dashboard. The SQLite module is
 // loaded lazily so the existing web deployment remains compatible with older
 // Node runtimes that do not include node:sqlite.
@@ -805,6 +874,12 @@ app.get('/api/live-dashboard', (req, res) => {
         ${detailStats},
         ${closureStats}
     `).get();
+    try {
+      totals.summary = cachedLiveSummary(database, databasePath);
+    } catch (summaryError) {
+      console.error('Embedded live summary error:', summaryError.message);
+      totals.summary = null;
+    }
     const catchupWindowRow = database.prepare(`
       SELECT value FROM live_monitor_state WHERE key = 'catchup_window'
     `).get();

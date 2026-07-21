@@ -49,6 +49,9 @@ db.exec(`
     raw_json TEXT NOT NULL
   );
 
+  CREATE INDEX IF NOT EXISTS live_portal_requests_submitted_at_idx
+    ON live_portal_requests(submitted_at) WHERE submitted_at IS NOT NULL;
+
   CREATE TABLE IF NOT EXISTS live_number_queue (
     suffix INTEGER PRIMARY KEY,
     srnumber TEXT NOT NULL UNIQUE,
@@ -58,6 +61,9 @@ db.exec(`
     audit_outcome TEXT NOT NULL DEFAULT 'pending',
     audited_at TEXT
   );
+
+  CREATE INDEX IF NOT EXISTS live_number_queue_pending_audit_idx
+    ON live_number_queue(audit_after, suffix) WHERE audit_outcome = 'pending';
 
   CREATE TABLE IF NOT EXISTS live_monitor_state (
     key TEXT PRIMARY KEY,
@@ -82,6 +88,9 @@ db.exec(`
     portal_url TEXT NOT NULL,
     archived_at TEXT NOT NULL
   );
+
+  CREATE INDEX IF NOT EXISTS portal_requests_date_reported_idx
+    ON portal_requests(date_reported) WHERE date_reported IS NOT NULL;
 
   CREATE TABLE IF NOT EXISTS live_detail_queue (
     srnumber TEXT PRIMARY KEY,
@@ -259,6 +268,8 @@ const setState = db.prepare(`
     value = excluded.value,
     updated_at = excluded.updated_at
 `);
+const collectorStartedAt = new Date().toISOString();
+setState.run('audit_delay_minutes', String(AUDIT_DELAY_MINUTES), collectorStartedAt);
 const countResolvedInRange = db.prepare(`
   SELECT COUNT(*) AS count
   FROM number_ledger

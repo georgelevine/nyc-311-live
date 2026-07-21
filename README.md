@@ -56,6 +56,16 @@ and [CLOUD_DEPLOYMENT.md](CLOUD_DEPLOYMENT.md) covers managed PostgreSQL/Render.
 Copy an example environment file and supply real credentials outside Git. Never
 commit `.env` files, database files, passwords, private keys, or cloud secrets.
 
+## Read-only live statistics
+
+`GET /api/live-summary` returns the same deterministic statistics shown in the
+dashboard. It does not call an AI service. The newest and preceding 15-minute
+windows use Portal map-feed discoveries only and are explicitly marked
+provisional. A separate delayed window combines map and request-number-audit
+discoveries without claiming the audit is complete. The response also reports
+collector freshness, archive time coverage, missing submitted times, request
+type and borough distributions, and detail/map-pin coverage.
+
 ## Data-source note
 
 Coordinates are stored only when supplied by the NYC311 Portal. Audit-recovered

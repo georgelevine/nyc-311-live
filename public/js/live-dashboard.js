@@ -35,6 +35,23 @@
   const mapScopeControl = document.getElementById('map-scope');
   const mapCounts = document.getElementById('map-counts');
   const detailPendingBadge = document.getElementById('detail-pending-badge');
+  const summaryElements = {
+    root: document.getElementById('city-summary'),
+    eyebrow: document.getElementById('city-summary-eyebrow'),
+    title: document.getElementById('city-summary-title'),
+    updated: document.getElementById('city-summary-updated'),
+    loading: document.getElementById('city-summary-loading'),
+    content: document.getElementById('city-summary-content'),
+    requestCount: document.getElementById('summary-request-count'),
+    comparison: document.getElementById('summary-comparison'),
+    categories: document.getElementById('summary-categories'),
+    otherCategories: document.getElementById('summary-other-categories'),
+    boroughs: document.getElementById('summary-boroughs'),
+    coverage: document.getElementById('summary-coverage'),
+    history: document.getElementById('summary-history-note'),
+    status: document.getElementById('city-summary-status')
+  };
+  const hasSummaryElements = Object.values(summaryElements).every(Boolean);
   const MAX_VISIBLE_RECORDS = 750;
   const MAP_REFRESH_MS = 15_000;
   let records = [];
@@ -58,6 +75,7 @@
   let detailLoadSequence = 0;
   let highestObservedSuffix = null;
   let arrivingNumbers = new Set();
+  let lastGoodSummary = null;
 
   const esc = value => String(value || '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
   const isClosed = status => /\b(?:closed|resolved|cancel(?:led|ed)?)\b/i.test(status || '');
@@ -620,6 +638,171 @@
     document.getElementById('closures-note').textContent = `${closing.toLocaleString()} ${closing === 1 ? 'check' : 'checks'} in progress`;
   }
 
+  function summaryCount(value) {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? Math.round(number) : 0;
+  }
+
+  function summaryWindowLabel(value) {
+    const minutes = summaryCount(value) || 15;
+    return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'}`;
+  }
+
+  function rankedSummary(items, order) {
+    if (!Array.isArray(items)) return '';
+    return items.map(item => {
+      const name = String(item && item.name || '').trim();
+      const count = summaryCount(item && item.count);
+      if (!name || count === 0) return null;
+      return order === 'name-first'
+        ? `${name} ${count.toLocaleString()}`
+        : `${count.toLocaleString()} ${name}`;
+    }).filter(Boolean).join(' · ');
+  }
+
+  function currentComparison(summary) {
+    const current = summaryCount(summary.current && summary.current.requests);
+    const previous = summaryCount(summary.previous && summary.previous.requests);
+    const minutes = summaryCount(summary.window_minutes) || 15;
+    const priorWindow = `previous ${minutes} min`;
+    const difference = current - previous;
+    if (difference === 0) return `Same as ${priorWindow} (${previous.toLocaleString()})`;
+    if (previous === 0) return `${difference.toLocaleString()} more than ${priorWindow} (0)`;
+    const providedPercent = Number(summary.change && summary.change.percent);
+    const percent = Number.isFinite(providedPercent)
+      ? Math.abs(providedPercent)
+      : Math.abs((difference / previous) * 100);
+    const formattedPercent = percent.toLocaleString(undefined, { maximumFractionDigits: 1 });
+    return `${formattedPercent}% ${difference > 0 ? 'above' : 'below'} ${priorWindow} (${previous.toLocaleString()})`;
+  }
+
+  function categoryLongTail(distribution) {
+    const otherRequests = summaryCount(distribution && distribution.other && distribution.other.requests);
+    const otherTypes = summaryCount(distribution && distribution.other && distribution.other.categories);
+    const unknown = summaryCount(distribution && distribution.unknown);
+    const parts = [];
+    if (otherRequests) {
+      parts.push(`${otherRequests.toLocaleString()} more across ${otherTypes.toLocaleString()} other request ${otherTypes === 1 ? 'type' : 'types'}`);
+    }
+    if (unknown) parts.push(`${unknown.toLocaleString()} uncategorized`);
+    return parts.join(' · ');
+  }
+
+  function boroughSummary(distribution) {
+    const leading = rankedSummary(distribution && distribution.top, 'name-first');
+    const otherRequests = summaryCount(distribution && distribution.other && distribution.other.requests);
+    const otherBoroughs = summaryCount(distribution && distribution.other && distribution.other.categories);
+    const unknown = summaryCount(distribution && distribution.unknown);
+    const parts = leading ? [leading] : [];
+    if (otherRequests) {
+      parts.push(`${otherRequests.toLocaleString()} more across ${otherBoroughs.toLocaleString()} other ${otherBoroughs === 1 ? 'borough' : 'boroughs'}`);
+    }
+    if (unknown) parts.push(`${unknown.toLocaleString()} unknown location`);
+    return parts.join(' · ') || 'No published locations in this window';
+  }
+
+  function coverageSummary(summary) {
+    const total = summaryCount(summary.current && summary.current.requests);
+    const detailsLoaded = summaryCount(summary.coverage && summary.coverage.details && summary.coverage.details.loaded);
+    const mapped = summaryCount(summary.coverage && summary.coverage.map && summary.coverage.map.mapped);
+    return `Provisional map feed · ${detailsLoaded.toLocaleString()}/${total.toLocaleString()} details · ${mapped.toLocaleString()}/${total.toLocaleString()} pins`;
+  }
+
+  function historySummary(summary) {
+    const minutes = summaryCount(summary.window_minutes) || 15;
+    const delayedRequests = summaryCount(summary.delayed && summary.delayed.requests);
+    const spanDays = summaryCount(summary.history && summary.history.span_days);
+    const targetDays = summaryCount(summary.history && summary.history.target_days);
+    const history = summary.history && summary.history.target_reached
+      ? `${spanDays.toLocaleString()}d archive span`
+      : `${spanDays.toLocaleString()}/${targetDays.toLocaleString()}d archive span`;
+    return `Map + number audit ${minutes}m (delayed): ${delayedRequests.toLocaleString()} · ${history}`;
+  }
+
+  function durationSummary(totalSeconds) {
+    const seconds = summaryCount(totalSeconds);
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    if (minutes < 60) return `${minutes}m`;
+    const hours = Math.floor(minutes / 60);
+    return `${hours}h ${minutes % 60}m`;
+  }
+
+  function summaryWarnings(summary) {
+    const warnings = [];
+    const captureState = String(summary.capture && summary.capture.state || 'starting');
+    if (captureState === 'stale') {
+      warnings.push(`Collector last updated ${durationSummary(summary.capture.poll_age_seconds)} ago; this is the last captured window.`);
+    } else if (captureState === 'invalid') {
+      warnings.push('Collector timing is invalid; current-window statistics are unavailable.');
+    } else if (captureState === 'starting') {
+      warnings.push('Collector is starting; current-window statistics may be empty.');
+    }
+    const excluded = summaryCount(summary.data_quality && summary.data_quality.excluded_from_time_statistics);
+    if (excluded) {
+      warnings.push(`${excluded.toLocaleString()} archived ${excluded === 1 ? 'request lacks' : 'requests lack'} a usable submitted time and ${excluded === 1 ? 'is' : 'are'} excluded from time windows.`);
+    }
+    return warnings.join(' ');
+  }
+
+  function validSummary(summary) {
+    return Boolean(summary && typeof summary === 'object'
+      && summary.current && summary.previous && summary.categories && summary.boroughs
+      && summary.coverage && summary.delayed && summary.history
+      && summary.capture && summary.data_quality);
+  }
+
+  function showSummaryUnavailable() {
+    if (!hasSummaryElements) return;
+    summaryElements.root.setAttribute('aria-busy', 'false');
+    summaryElements.loading.hidden = true;
+    if (lastGoodSummary) {
+      summaryElements.content.hidden = false;
+      summaryElements.status.textContent = 'Summary refresh delayed. Showing the last successful summary refresh.';
+      return;
+    }
+    summaryElements.content.hidden = true;
+    summaryElements.updated.textContent = 'Unavailable';
+    summaryElements.status.textContent = 'Live summary temporarily unavailable. Incoming requests are still updating.';
+  }
+
+  function renderCitySummary(summary) {
+    if (!hasSummaryElements) return false;
+    try {
+      if (!validSummary(summary)) {
+        showSummaryUnavailable();
+        return false;
+      }
+      const currentRequests = summaryCount(summary.current.requests);
+      const categories = rankedSummary(summary.categories.top, 'count-first');
+      const asOf = portalDate(summary.as_of);
+      const captureState = String(summary.capture.state || 'starting');
+
+      summaryElements.eyebrow.textContent = captureState === 'fresh' ? 'NYC right now' : 'Last captured window';
+      summaryElements.title.textContent = `Last ${summaryWindowLabel(summary.window_minutes)}`;
+      summaryElements.updated.textContent = asOf && !Number.isNaN(asOf.getTime())
+        ? `As of ${timeLabel(summary.as_of)}`
+        : 'Current window';
+      summaryElements.requestCount.textContent = currentRequests.toLocaleString();
+      summaryElements.comparison.textContent = currentComparison(summary);
+      summaryElements.categories.textContent = categories || 'No published request types in this window';
+      summaryElements.otherCategories.textContent = categoryLongTail(summary.categories);
+      summaryElements.boroughs.textContent = boroughSummary(summary.boroughs);
+      summaryElements.coverage.textContent = coverageSummary(summary);
+      summaryElements.history.textContent = historySummary(summary);
+      summaryElements.status.textContent = summaryWarnings(summary);
+      summaryElements.loading.hidden = true;
+      summaryElements.content.hidden = false;
+      summaryElements.root.setAttribute('aria-busy', 'false');
+      lastGoodSummary = summary;
+      return true;
+    } catch (error) {
+      console.warn('Could not render live summary:', error);
+      showSummaryUnavailable();
+      return false;
+    }
+  }
+
   async function refreshMap(dashboardStats) {
     const now = Date.now();
     if (mapRefreshInFlight || now - lastMapRefreshStartedAt < MAP_REFRESH_MS) return;
@@ -650,6 +833,7 @@
       pollInterval.value = String(currentPollSeconds);
       lastPortalCheck = stats.last_seen_at ? new Date(stats.last_seen_at) : null;
       renderOverviewStats(stats);
+      renderCitySummary(stats.summary);
       document.getElementById('frontier-number').textContent = stats.frontier ? `311-${String(stats.frontier).padStart(8, '0')}` : '—';
       document.getElementById('last-updated').textContent = lastPortalCheck
         ? `Portal ${lastPortalCheck.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}`
@@ -657,6 +841,7 @@
       connection.classList.remove('offline');
       updateConnectionLabel();
     } catch (error) {
+      showSummaryUnavailable();
       connection.classList.add('offline');
       connectionLabel.textContent = 'Reconnecting…';
       console.warn(error);
