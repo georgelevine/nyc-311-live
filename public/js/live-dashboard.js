@@ -33,7 +33,6 @@
   const pollInterval = document.getElementById('poll-interval');
   const detail = document.getElementById('request-detail');
   const mapScopeControl = document.getElementById('map-scope');
-  const mapClosedToggle = document.getElementById('map-closed-toggle');
   const mapCounts = document.getElementById('map-counts');
   const detailPendingBadge = document.getElementById('detail-pending-badge');
   const MAX_VISIBLE_RECORDS = 750;
@@ -46,7 +45,6 @@
   let markerByNumber = new Map();
   let markerSignatureByNumber = new Map();
   let mapScope = 'all';
-  let includeClosed = true;
   let mapStats = { total: 0, mapped_total: 0, unmapped_total: 0 };
   let mapShownCount = 0;
   let mapRenderFrame = null;
@@ -172,7 +170,6 @@
   }
 
   function matchesMapScope(record, now = Date.now()) {
-    if (!includeClosed && isClosed(record.status)) return false;
     if (mapScope === 'all') return true;
     const timestamp = mapRecordTime(record);
     if (timestamp === null) return false;
@@ -703,11 +700,6 @@
     mapScopeControl.querySelectorAll('button[data-map-scope]').forEach(scopeButton => {
       scopeButton.setAttribute('aria-pressed', String(scopeButton === button));
     });
-    renderMap();
-  });
-  mapClosedToggle.addEventListener('click', () => {
-    includeClosed = !includeClosed;
-    mapClosedToggle.setAttribute('aria-pressed', String(includeClosed));
     renderMap();
   });
   pollInterval.addEventListener('change', async () => {

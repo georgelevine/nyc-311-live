@@ -133,17 +133,7 @@ button, input, select { font: inherit; }
 .map-overlay strong { font-size: 15px; }
 .map-controls { width: min(440px, calc(100% - 36px)); padding: 12px; }
 .map-summary-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; padding: 0 2px 9px; }
-.map-closed-toggle {
-  display: inline-flex; align-items: center; gap: 7px; padding: 5px 8px 5px 6px; color: #5e6f7d;
-  border: 1px solid var(--line); border-radius: 99px; background: #f1f5f7; cursor: pointer;
-  font-size: 9px; font-weight: 800; white-space: nowrap;
-}
-.map-closed-toggle i { position: relative; width: 24px; height: 14px; border-radius: 99px; background: #aebac4; transition: background .18s ease; }
-.map-closed-toggle i::after { content: ""; position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; border-radius: 50%; background: white; box-shadow: 0 1px 3px rgba(24,43,58,.25); transition: transform .18s ease; }
-.map-closed-toggle[aria-pressed="true"] { color: var(--blue); border-color: #bdd3f3; background: #edf5ff; }
-.map-closed-toggle[aria-pressed="true"] i { background: var(--blue); }
-.map-closed-toggle[aria-pressed="true"] i::after { transform: translateX(10px); }
-.map-closed-toggle:focus-visible { outline: 2px solid #78aaf0; outline-offset: 2px; }
+.map-summary-heading > .eyebrow { margin: 0 2px 2px 0; }
 .map-scope { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: #f1f5f7; }
 .map-scope button { min-width: 0; padding: 7px 6px; color: #5e6f7d; border: 0; border-radius: 7px; background: transparent; cursor: pointer; font-size: 10px; font-weight: 750; white-space: nowrap; }
 .map-scope button:hover { color: var(--ink); background: rgba(255,255,255,.65); }
