@@ -365,7 +365,7 @@
     document.getElementById('detail-number').textContent = record.srnumber;
     document.getElementById('detail-time').textContent = fullTimeLabel(record.submitted_at);
     document.getElementById('detail-link').href = record.portal_url || '#';
-    detailPendingBadge.classList.toggle('hidden', record.public_details_state !== 'pending');
+    setDetailBadge(record.public_details_state === 'pending' ? 'pending' : null);
     const archiveRow = document.getElementById('detail-archive-row');
     const archiveValue = document.getElementById('detail-archive');
     let archiveLabel = '';
@@ -383,15 +383,50 @@
     archiveValue.textContent = archiveLabel;
     archiveRow.classList.toggle('hidden', !archiveLabel);
     renderCoreDataWarning(record);
-    const savedDetail = portalDetailByNumber.get(record.srnumber) || (record.details_fetched_at ? {
-      problemDetails: record.problem_details,
-      additionalDetails: record.additional_details,
-      nextUpdate: record.next_update,
-      dateReported: record.date_reported,
-      updatedOn: record.updated_on,
-      dateClosed: record.date_closed
-    } : null);
-    if (savedDetail) renderSubmittedDetails(savedDetail);
+    const cachedDetail = portalDetailByNumber.get(record.srnumber);
+    if (cachedDetail) {
+      renderSubmittedDetails(cachedDetail, 'success');
+    } else if (record.details_fetched_at) {
+      const savedDetail = {
+        problemDetails: record.problem_details,
+        additionalDetails: record.additional_details,
+        nextUpdate: record.next_update,
+        dateReported: record.date_reported,
+        updatedOn: record.updated_on,
+        dateClosed: record.date_closed
+      };
+      portalDetailByNumber.set(record.srnumber, savedDetail);
+      renderSubmittedDetails(savedDetail, 'stored');
+    }
+  }
+
+  function setDetailBadge(state) {
+    const labels = {
+      pending: 'Pending',
+      loading: 'Checking',
+      stored: 'Saved',
+      success: 'Loaded',
+      error: 'Unavailable'
+    };
+    const label = labels[state] || '';
+    detailPendingBadge.textContent = label;
+    detailPendingBadge.dataset.state = state || '';
+    detailPendingBadge.classList.toggle('hidden', !label);
+    detail.setAttribute('aria-busy', String(state === 'loading'));
+  }
+
+  function setDetailPanelVisible(visible) {
+    if (visible) {
+      detail.classList.remove('hidden');
+      detail.inert = false;
+      detail.setAttribute('aria-hidden', 'false');
+      return;
+    }
+    if (detail.contains(document.activeElement)) document.activeElement.blur();
+    detail.inert = true;
+    detail.setAttribute('aria-busy', 'false');
+    detail.setAttribute('aria-hidden', 'true');
+    detail.classList.add('hidden');
   }
 
   function renderCoreDataWarning(record) {
@@ -415,14 +450,15 @@
     warning.classList.toggle('hidden', !uniqueFields.length);
   }
 
-  function renderSubmittedDetails(detailData, state = 'ready') {
+  function renderSubmittedDetails(detailData, state = 'success') {
     const problemDetails = document.getElementById('detail-problem-details');
     const additionalDetails = document.getElementById('detail-additional-details');
     const updatedRow = document.getElementById('detail-updated-row');
     const closedRow = document.getElementById('detail-closed-row');
     const nextUpdateRow = document.getElementById('detail-next-update-row');
     if (state === 'loading') {
-      problemDetails.textContent = 'Loading from NYC311…';
+      setDetailBadge('loading');
+      problemDetails.textContent = 'Checking submitted details…';
       additionalDetails.textContent = '';
       updatedRow.classList.add('hidden');
       closedRow.classList.add('hidden');
@@ -430,18 +466,31 @@
       return;
     }
     if (state === 'error') {
-      problemDetails.textContent = 'Details are temporarily unavailable';
-      additionalDetails.textContent = 'The request summary is still saved locally.';
+      setDetailBadge('error');
+      problemDetails.textContent = 'Submitted details are unavailable right now.';
+      additionalDetails.textContent = 'The request remains saved in the archive.';
       updatedRow.classList.add('hidden');
       closedRow.classList.add('hidden');
       nextUpdateRow.classList.add('hidden');
       return;
     }
-    problemDetails.textContent = detailData.problemDetails || 'No additional public details were submitted.';
-    const extraDetails = /^(?:N\/?A|NONE|NOT PROVIDED)$/i.test(String(detailData.additionalDetails || '').trim())
+    setDetailBadge(state);
+    const primaryDetails = /^(?:N\/?A|NONE|NOT PROVIDED)$/i.test(String(detailData && detailData.problemDetails || '').trim())
       ? ''
-      : detailData.additionalDetails || '';
-    additionalDetails.textContent = extraDetails;
+      : String(detailData && detailData.problemDetails || '').trim();
+    const extraDetails = /^(?:N\/?A|NONE|NOT PROVIDED)$/i.test(String(detailData && detailData.additionalDetails || '').trim())
+      ? ''
+      : String(detailData && detailData.additionalDetails || '').trim();
+    if (primaryDetails) {
+      problemDetails.textContent = primaryDetails;
+      additionalDetails.textContent = extraDetails;
+    } else if (extraDetails) {
+      problemDetails.textContent = extraDetails;
+      additionalDetails.textContent = '';
+    } else {
+      problemDetails.textContent = 'No additional submitted details are available for this request.';
+      additionalDetails.textContent = '';
+    }
     const currentRecord = findRecord(selectedNumber);
     const followupState = String(currentRecord && currentRecord.followup_state || '').toLowerCase();
     const currentlyOpen = followupState === 'open';
@@ -461,11 +510,6 @@
 
   async function loadPortalDetails(record) {
     const sequence = ++detailLoadSequence;
-    const cached = portalDetailByNumber.get(record.srnumber);
-    if (cached) {
-      renderSubmittedDetails(cached);
-      return;
-    }
     if (record.details_fetched_at) {
       const saved = {
         problemDetails: record.problem_details,
@@ -476,7 +520,12 @@
         dateClosed: record.date_closed
       };
       portalDetailByNumber.set(record.srnumber, saved);
-      renderSubmittedDetails(saved);
+      renderSubmittedDetails(saved, 'stored');
+      return;
+    }
+    const cached = portalDetailByNumber.get(record.srnumber);
+    if (cached) {
+      renderSubmittedDetails(cached, 'success');
       return;
     }
     const portalId = portalIdFor(record);
@@ -486,13 +535,16 @@
     }
     renderSubmittedDetails(null, 'loading');
     try {
-      const response = await fetch(`/api/portal-detail?id=${encodeURIComponent(portalId)}`, { cache: 'no-store' });
+      const response = await fetch(`/api/portal-detail?id=${encodeURIComponent(portalId)}&preferArchive=1`, { cache: 'no-store' });
       if (!response.ok) throw new Error(`Detail service returned ${response.status}`);
+      const responseSource = String(response.headers.get('X-Detail-Source') || '').toLowerCase();
       const portalDetail = await response.json();
       portalDetailByNumber.set(record.srnumber, portalDetail);
       if (sequence === detailLoadSequence && selectedNumber === record.srnumber) {
-        detailPendingBadge.classList.add('hidden');
-        renderSubmittedDetails(portalDetail);
+        const displayState = responseSource === 'archive' || responseSource === 'stored'
+          ? 'stored'
+          : 'success';
+        renderSubmittedDetails(portalDetail, displayState);
       }
     } catch (error) {
       if (sequence === detailLoadSequence && selectedNumber === record.srnumber) {
@@ -507,7 +559,7 @@
     if (!record) return;
     selectedNumber = number;
     renderDetail(record);
-    detail.classList.remove('hidden');
+    setDetailPanelVisible(true);
     renderFeed();
     loadPortalDetails(record);
     const coordinates = recordCoordinates(record);
@@ -934,9 +986,15 @@
   });
   document.getElementById('detail-close').addEventListener('click', () => {
     detailLoadSequence += 1;
+    const closedNumber = selectedNumber;
     selectedNumber = null;
-    detail.classList.add('hidden');
+    setDetailPanelVisible(false);
     renderFeed();
+    const returnTarget = window.matchMedia('(max-width: 720px)').matches
+      ? mobileViewTabs.querySelector('button[aria-pressed="true"]')
+      : [...feed.querySelectorAll('.request-card')]
+        .find(card => card.dataset.number === closedNumber);
+    if (returnTarget) returnTarget.focus();
   });
 
   refresh();

@@ -20,6 +20,7 @@ const { inspectSqliteHealth } = require('./sqlite-health');
 const { originMatchesHost } = require('./request-security');
 const { normalizePortalTimestamp } = require('./portal-timestamp');
 const { loadSqliteLiveSummary } = require('./sqlite-live-summary');
+const { readStoredPortalDetail } = require('./stored-portal-detail');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -607,20 +608,41 @@ function persistLivePortalDetail(portalId, detail) {
   }
 }
 
-// Enrich a map pin only when its popup is opened.
+// The live dashboard can prefer the durable archived detail. Other consumers
+// retain the endpoint's original live-Portal behavior.
 app.get('/api/portal-detail', async (req, res) => {
   const id = String(req.query.id || '').trim();
   if (!/^[0-9a-f-]{36}$/i.test(id)) {
     return res.status(400).json({ error: 'valid id parameter required' });
   }
 
+  res.setHeader('Cache-Control', 'no-store');
+  if (req.query.preferArchive === '1') {
+    const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
+    let storedDetail;
+    try {
+      storedDetail = readStoredPortalDetail(databasePath, id);
+    } catch (error) {
+      console.error('Stored Portal detail read error:', error.message);
+      return res.status(503).json({ error: 'Archived request details are temporarily unavailable' });
+    }
+    if (storedDetail) {
+      res.setHeader('X-Detail-Source', 'archive');
+      return res.json(storedDetail);
+    }
+  }
+
   const ck = cacheKey({ endpoint: 'portal-detail', id });
   const cached = getCached(ck);
-  if (cached) return res.json(cached);
+  if (cached) {
+    res.setHeader('X-Detail-Source', 'memory');
+    return res.json(cached);
+  }
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 7000);
   try {
+    res.setHeader('X-Detail-Source', 'portal');
     const response = await fetch(`https://portal.311.nyc.gov/sr-details/?id=${encodeURIComponent(id)}`, {
       headers: { ...PORTAL_HEADERS, Accept: 'text/html,application/xhtml+xml' },
       signal: controller.signal

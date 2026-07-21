@@ -145,7 +145,7 @@
         <span><i class="marker-swatch active"></i>In progress</span>
         <span><i class="marker-swatch closed"></i>Closed</span>
       </div>
-      <article id="request-detail" class="request-detail hidden" aria-live="polite">
+      <article id="request-detail" class="request-detail hidden" aria-live="polite" aria-hidden="true" aria-busy="false" inert>
         <button id="detail-close" type="button" aria-label="Close request details">×</button>
         <span id="detail-status" class="status-pill"></span>
         <h2 id="detail-problem"></h2>
@@ -153,9 +153,9 @@
         <section class="detail-submission" aria-label="Submitted request details">
           <div class="detail-submission-heading">
             <span>Submitted details</span>
-            <span id="detail-pending-badge" class="detail-pending-badge hidden">Details pending</span>
+            <span id="detail-pending-badge" class="detail-state-badge hidden" data-state="pending">Pending</span>
           </div>
-          <strong id="detail-problem-details">Loading from NYC311…</strong>
+          <strong id="detail-problem-details">Checking submitted details…</strong>
           <p id="detail-additional-details"></p>
         </section>
         <p id="detail-data-warning" class="detail-data-warning hidden" role="status"></p>
