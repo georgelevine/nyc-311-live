@@ -33,14 +33,8 @@
   const pollInterval = document.getElementById('poll-interval');
   const detail = document.getElementById('request-detail');
   const mapScopeControl = document.getElementById('map-scope');
+  const mapClosedToggle = document.getElementById('map-closed-toggle');
   const mapCounts = document.getElementById('map-counts');
-  const catchupPanel = document.getElementById('catchup-panel');
-  const catchupStatus = document.getElementById('catchup-status');
-  const catchupTimeRange = document.getElementById('catchup-time-range');
-  const catchupPosition = document.getElementById('catchup-position');
-  const catchupProgress = document.getElementById('catchup-progress');
-  const catchupProgressBar = document.getElementById('catchup-progress-bar');
-  const catchupCounts = document.getElementById('catchup-counts');
   const detailPendingBadge = document.getElementById('detail-pending-badge');
   const MAX_VISIBLE_RECORDS = 750;
   const MAP_REFRESH_MS = 15_000;
@@ -52,6 +46,7 @@
   let markerByNumber = new Map();
   let markerSignatureByNumber = new Map();
   let mapScope = 'all';
+  let includeClosed = true;
   let mapStats = { total: 0, mapped_total: 0, unmapped_total: 0 };
   let mapShownCount = 0;
   let mapRenderFrame = null;
@@ -88,24 +83,6 @@
       hour: 'numeric', minute: '2-digit', second: '2-digit'
     }).format(date);
   };
-  const compactDateTimeLabel = value => {
-    const date = value ? new Date(value) : null;
-    if (!date || Number.isNaN(date.getTime())) return 'Unknown';
-    return new Intl.DateTimeFormat('en-US', {
-      timeZone: 'America/New_York', month: 'short', day: 'numeric',
-      hour: 'numeric', minute: '2-digit', second: '2-digit'
-    }).format(date);
-  };
-  const requestNumberLabel = suffix => Number.isInteger(Number(suffix))
-    ? `311-${String(Number(suffix)).padStart(8, '0')}`
-    : '—';
-  const durationLabel = seconds => {
-    const value = Number(seconds);
-    if (!Number.isFinite(value) || value <= 0) return null;
-    if (value < 90) return `about ${Math.ceil(value)} sec left`;
-    if (value < 5400) return `about ${Math.ceil(value / 60)} min left`;
-    return `about ${(value / 3600).toFixed(1)} hr left`;
-  };
 
   function setMobileView(view) {
     if (!['feed', 'map', 'overview'].includes(view)) return;
@@ -121,28 +98,6 @@
     }
   }
 
-  function renderCatchup(catchup) {
-    if (!catchup || !catchup.offline_from || !catchup.offline_to) {
-      catchupPanel.classList.add('hidden');
-      return;
-    }
-    catchupPanel.classList.remove('hidden');
-    const labels = { running: 'Auditing', queued: 'Queued', complete: 'Complete', retry: 'Needs retry' };
-    catchupStatus.textContent = labels[catchup.status] || 'Queued';
-    catchupTimeRange.textContent = `Offline ${compactDateTimeLabel(catchup.offline_from)} → ${compactDateTimeLabel(catchup.offline_to)}`;
-    if (catchup.status === 'complete') {
-      catchupPosition.textContent = `Covered ${requestNumberLabel(catchup.high_suffix)} → ${requestNumberLabel(catchup.low_suffix)}`;
-    } else if (catchup.current_suffix) {
-      catchupPosition.textContent = `Checking ${requestNumberLabel(catchup.current_suffix)} → ${requestNumberLabel(catchup.low_suffix)}`;
-    } else {
-      catchupPosition.textContent = `Range ${requestNumberLabel(catchup.high_suffix)} → ${requestNumberLabel(catchup.low_suffix)}`;
-    }
-    const percent = Math.max(0, Math.min(100, Number(catchup.percent || 0)));
-    catchupProgress.setAttribute('aria-valuenow', String(percent));
-    catchupProgressBar.style.width = `${percent}%`;
-    const eta = durationLabel(catchup.estimated_seconds_remaining);
-    catchupCounts.textContent = `${Number(catchup.completed || 0).toLocaleString()} of ${Number(catchup.total || 0).toLocaleString()} covered · ${Number(catchup.remaining || 0).toLocaleString()} left${eta ? ` · ${eta}` : ''}`;
-  }
   const submittedMillis = record => {
     const date = portalDate(record && record.submitted_at);
     return date && !Number.isNaN(date.getTime()) ? date.getTime() : null;
@@ -217,7 +172,7 @@
   }
 
   function matchesMapScope(record, now = Date.now()) {
-    if (mapScope === 'open') return !isClosed(record.status);
+    if (!includeClosed && isClosed(record.status)) return false;
     if (mapScope === 'all') return true;
     const timestamp = mapRecordTime(record);
     if (timestamp === null) return false;
@@ -699,7 +654,6 @@
       pollInterval.value = String(currentPollSeconds);
       lastPortalCheck = stats.last_seen_at ? new Date(stats.last_seen_at) : null;
       renderOverviewStats(stats);
-      renderCatchup(stats.catchup);
       document.getElementById('frontier-number').textContent = stats.frontier ? `311-${String(stats.frontier).padStart(8, '0')}` : '—';
       document.getElementById('last-updated').textContent = lastPortalCheck
         ? `Portal ${lastPortalCheck.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}`
@@ -749,6 +703,11 @@
     mapScopeControl.querySelectorAll('button[data-map-scope]').forEach(scopeButton => {
       scopeButton.setAttribute('aria-pressed', String(scopeButton === button));
     });
+    renderMap();
+  });
+  mapClosedToggle.addEventListener('click', () => {
+    includeClosed = !includeClosed;
+    mapClosedToggle.setAttribute('aria-pressed', String(includeClosed));
     renderMap();
   });
   pollInterval.addEventListener('change', async () => {

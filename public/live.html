@@ -54,19 +54,6 @@
         </article>
       </section>
 
-      <section id="catchup-panel" class="catchup-panel hidden" aria-label="Offline audit catch-up" aria-live="polite">
-        <div class="catchup-heading">
-          <span>Offline catch-up</span>
-          <strong id="catchup-status">Queued</strong>
-        </div>
-        <p id="catchup-time-range" class="catchup-time-range"></p>
-        <p id="catchup-position" class="catchup-position"></p>
-        <div id="catchup-progress" class="catchup-progress" role="progressbar" aria-label="Offline catch-up progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-          <span id="catchup-progress-bar"></span>
-        </div>
-        <p id="catchup-counts" class="catchup-counts"></p>
-      </section>
-
       <section class="monitor-strip" aria-label="Live monitor timing">
         <label>
           <span>Check Portal every</span>
@@ -111,13 +98,14 @@
             <span class="eyebrow">Latest frontier</span>
             <strong id="frontier-number">—</strong>
           </div>
-          <span class="eyebrow">Map scope</span>
+          <button id="map-closed-toggle" class="map-closed-toggle" type="button" aria-pressed="true" aria-label="Include closed requests on the map">
+            <i aria-hidden="true"></i><span>Closed too</span>
+          </button>
         </div>
         <div id="map-scope" class="map-scope" role="group" aria-label="Choose which requests appear on the map">
           <button type="button" data-map-scope="all" aria-pressed="true">All</button>
           <button type="button" data-map-scope="24h" aria-pressed="false">24 hours</button>
           <button type="button" data-map-scope="7d" aria-pressed="false">7 days</button>
-          <button type="button" data-map-scope="open" aria-pressed="false">Open only</button>
         </div>
         <p id="map-counts" class="map-counts" aria-live="polite">0 shown · 0 without stored Portal coordinates · 0 captured</p>
       </div>

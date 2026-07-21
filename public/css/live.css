@@ -56,21 +56,6 @@ button, input, select { font: inherit; }
 .metrics span { display: block; margin-top: 1px; color: var(--muted); font-size: 8px; font-weight: 800; text-transform: uppercase; letter-spacing: .4px; }
 .metrics small { display: block; min-height: 20px; margin-top: 4px; color: #8a98a4; font-size: 8px; line-height: 1.25; }
 
-.catchup-panel {
-  margin: -5px 18px 15px; padding: 11px 12px; border: 1px solid #cfe0f7; border-radius: 11px;
-  background: linear-gradient(145deg, #f7fbff, #edf5ff);
-}
-.catchup-panel.hidden { display: none; }
-.catchup-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.catchup-heading span { color: #45647f; font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .55px; }
-.catchup-heading strong { color: var(--blue); font-size: 10px; text-transform: uppercase; letter-spacing: .35px; }
-.catchup-time-range, .catchup-position, .catchup-counts { margin: 0; color: #536b80; font-size: 9px; line-height: 1.35; }
-.catchup-time-range { margin-top: 5px; }
-.catchup-position { margin-top: 2px; color: var(--ink); font-weight: 700; font-variant-numeric: tabular-nums; }
-.catchup-progress { height: 6px; margin: 8px 0 5px; overflow: hidden; border-radius: 99px; background: #dce9f7; }
-.catchup-progress span { display: block; width: 0; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--blue), var(--cyan)); transition: width .25s ease; }
-.catchup-counts { display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; }
-
 .monitor-strip {
   display: flex; align-items: center; justify-content: space-between; gap: 12px;
   margin: 0 18px 15px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 11px; background: white;
@@ -148,8 +133,18 @@ button, input, select { font: inherit; }
 .map-overlay strong { font-size: 15px; }
 .map-controls { width: min(440px, calc(100% - 36px)); padding: 12px; }
 .map-summary-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; padding: 0 2px 9px; }
-.map-summary-heading > .eyebrow { margin: 0 2px 2px 0; }
-.map-scope { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: #f1f5f7; }
+.map-closed-toggle {
+  display: inline-flex; align-items: center; gap: 7px; padding: 5px 8px 5px 6px; color: #5e6f7d;
+  border: 1px solid var(--line); border-radius: 99px; background: #f1f5f7; cursor: pointer;
+  font-size: 9px; font-weight: 800; white-space: nowrap;
+}
+.map-closed-toggle i { position: relative; width: 24px; height: 14px; border-radius: 99px; background: #aebac4; transition: background .18s ease; }
+.map-closed-toggle i::after { content: ""; position: absolute; top: 2px; left: 2px; width: 10px; height: 10px; border-radius: 50%; background: white; box-shadow: 0 1px 3px rgba(24,43,58,.25); transition: transform .18s ease; }
+.map-closed-toggle[aria-pressed="true"] { color: var(--blue); border-color: #bdd3f3; background: #edf5ff; }
+.map-closed-toggle[aria-pressed="true"] i { background: var(--blue); }
+.map-closed-toggle[aria-pressed="true"] i::after { transform: translateX(10px); }
+.map-closed-toggle:focus-visible { outline: 2px solid #78aaf0; outline-offset: 2px; }
+.map-scope { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; padding: 4px; border: 1px solid var(--line); border-radius: 10px; background: #f1f5f7; }
 .map-scope button { min-width: 0; padding: 7px 6px; color: #5e6f7d; border: 0; border-radius: 7px; background: transparent; cursor: pointer; font-size: 10px; font-weight: 750; white-space: nowrap; }
 .map-scope button:hover { color: var(--ink); background: rgba(255,255,255,.65); }
 .map-scope button[aria-pressed="true"] { color: white; background: var(--blue); box-shadow: 0 3px 9px rgba(23,105,224,.23); }
@@ -230,10 +225,8 @@ button, input, select { font: inherit; }
   .mobile-view-tabs button[aria-pressed="true"] { color: white; background: var(--blue); box-shadow: 0 4px 12px rgba(23,105,224,.2); }
 
   .app-shell[data-mobile-view="feed"] .metrics,
-  .app-shell[data-mobile-view="feed"] .catchup-panel,
   .app-shell[data-mobile-view="feed"] .monitor-strip,
   .app-shell[data-mobile-view="map"] .metrics,
-  .app-shell[data-mobile-view="map"] .catchup-panel,
   .app-shell[data-mobile-view="map"] .monitor-strip,
   .app-shell[data-mobile-view="map"] .toolbar,
   .app-shell[data-mobile-view="map"] .feed-heading,
@@ -248,8 +241,6 @@ button, input, select { font: inherit; }
   .metrics strong { font-size: 24px; }
   .metrics span { margin-top: 3px; font-size: 9px; }
   .metrics small { min-height: 0; margin-top: 5px; font-size: 9px; }
-  .catchup-panel { margin: 0 12px 13px; padding: 14px; border-radius: 14px; }
-  .catchup-heading span, .catchup-heading strong, .catchup-time-range, .catchup-position, .catchup-counts { font-size: 10px; }
   .monitor-strip { flex: none; margin: 0 12px 14px; padding: 13px; border-radius: 14px; }
   .monitor-strip label { align-items: flex-start; flex-direction: column; gap: 5px; font-size: 9px; }
   .monitor-strip select { height: 34px; font-size: 12px; }
