@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const fetch = require('node-fetch');
 const { DatabaseSync } = require('node:sqlite');
+const { normalizePortalTimestamp } = require('./portal-timestamp');
 
 const PORTAL_URL = 'https://portal.311.nyc.gov/entity-pin-fetch-service-requests/';
 const NYC = { west: -74.2591, south: 40.4774, east: -73.7002, north: 40.9176 };
@@ -130,7 +131,7 @@ function save(tile, records) {
         details.address || pin.sublabel || null,
         Number.isFinite(Number(pin.latitude)) ? Number(pin.latitude) : null,
         Number.isFinite(Number(pin.longitude)) ? Number(pin.longitude) : null,
-        details.submitteddate || null,
+        normalizePortalTimestamp(details.submitteddate),
         details.status || null,
         pin.id ? `https://portal.311.nyc.gov/sr-details/?id=${pin.id}` : null,
         now,

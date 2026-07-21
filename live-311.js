@@ -12,6 +12,7 @@ const {
 const { promoteAuditDiscoveries } = require('./audit-discovery');
 const { reconcileStoredDetails } = require('./detail-queue');
 const { resolveSynchronousMode } = require('./sqlite-runtime');
+const { normalizePortalTimestamp } = require('./portal-timestamp');
 
 const PORTAL_URL = 'https://portal.311.nyc.gov/entity-pin-fetch-service-requests/';
 const POLL_INTERVAL_SECONDS = Math.max(5, Number(process.env.POLL_INTERVAL_SECONDS || 15));
@@ -435,7 +436,7 @@ function parseLiveDetail(html, expectedNumber, portalId) {
   const scriptDate = id => {
     const pattern = new RegExp(`\\$\\(["']#${id}["']\\)\\.text\\(getESTDate\\(["']([^"']+)["']\\)\\)`);
     const match = scripts.match(pattern);
-    return match ? match[1] : null;
+    return match ? normalizePortalTimestamp(match[1]) : null;
   };
 
   const number = fields['SR Number'] || expectedNumber;
@@ -832,7 +833,7 @@ function savePoll(records) {
         data.address || pin.sublabel || null,
         Number.isFinite(Number(pin.latitude)) ? Number(pin.latitude) : null,
         Number.isFinite(Number(pin.longitude)) ? Number(pin.longitude) : null,
-        data.submitteddate || null,
+        normalizePortalTimestamp(data.submitteddate),
         data.status || null,
         pin.id ? `https://portal.311.nyc.gov/sr-details/?id=${pin.id}` : null,
         nowIso,

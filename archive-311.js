@@ -4,6 +4,7 @@ const fetch = require('node-fetch');
 const cheerio = require('cheerio');
 const { DatabaseSync } = require('node:sqlite');
 const { resolveSynchronousMode } = require('./sqlite-runtime');
+const { normalizePortalTimestamp } = require('./portal-timestamp');
 
 const LOW_SUFFIX = Number(process.env.LOW_SUFFIX);
 const HIGH_SUFFIX = Number(process.env.HIGH_SUFFIX);
@@ -135,7 +136,7 @@ function parseDetail(html, expectedNumber) {
   const scriptDate = (id) => {
     const pattern = new RegExp(`\\$\\(["']#${id}["']\\)\\.text\\(getESTDate\\(["']([^"']+)["']\\)\\)`);
     const match = scripts.match(pattern);
-    return match ? match[1] : null;
+    return match ? normalizePortalTimestamp(match[1]) : null;
   };
   const actualNumber = fields['SR Number'] || expectedNumber;
 

@@ -63,8 +63,7 @@
   const isClosed = status => /\b(?:closed|resolved|cancel(?:led|ed)?)\b/i.test(status || '');
   const portalDate = value => {
     if (!value) return null;
-    const parsed = new Date(`${value} UTC`);
-    return Number.isNaN(parsed.getTime()) ? new Date(value) : parsed;
+    return new Date(value);
   };
   const timeLabel = value => {
     const date = portalDate(value);

@@ -5,6 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { DatabaseSync, backup: sqliteBackup } = require('node:sqlite');
+const { normalizePortalTimestamp } = require('./portal-timestamp');
 
 const APPLICATION_ID = 0x4e594333; // "NYC3"
 const BUSY_TIMEOUT_MS = 5000;
@@ -177,52 +178,7 @@ function applyMigrations(database, appliedAt = new Date().toISOString()) {
   return state;
 }
 
-function normalizeSubmittedTimestamp(value) {
-  if (value == null || String(value).trim() === '') return null;
-  const text = String(value).trim();
-  const portal = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})\s*(AM|PM)$/i);
-  if (portal) {
-    const [, month, day, year, rawHour, minute, second, period] = portal;
-    const numericMonth = Number(month);
-    const numericDay = Number(day);
-    const numericYear = Number(year);
-    const numericRawHour = Number(rawHour);
-    const numericMinute = Number(minute);
-    const numericSecond = Number(second);
-    if (numericMonth < 1 || numericMonth > 12
-        || numericDay < 1 || numericDay > 31
-        || numericRawHour < 1 || numericRawHour > 12
-        || numericMinute < 0 || numericMinute > 59
-        || numericSecond < 0 || numericSecond > 59) return null;
-    let hour = numericRawHour % 12;
-    if (period.toUpperCase() === 'PM') hour += 12;
-    const date = new Date(Date.UTC(
-      numericYear, numericMonth - 1, numericDay, hour, numericMinute, numericSecond
-    ));
-    if (date.getUTCFullYear() !== numericYear
-        || date.getUTCMonth() !== numericMonth - 1
-        || date.getUTCDate() !== numericDay) return null;
-    return date.toISOString();
-  }
-
-  // Only accept machine timestamps carrying an explicit timezone. Ambiguous
-  // local clock strings are deliberately left untouched for manual review.
-  const iso = text.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|([+-])(\d{2}):?(\d{2}))$/i);
-  if (!iso) return null;
-  const [, year, month, day, hour, minute, second, , zone, , offsetHour, offsetMinute] = iso;
-  const numericYear = Number(year);
-  const numericMonth = Number(month);
-  const numericDay = Number(day);
-  const leapYear = numericYear % 4 === 0 && (numericYear % 100 !== 0 || numericYear % 400 === 0);
-  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
-  if (numericMonth < 1 || numericMonth > 12
-      || numericDay < 1 || numericDay > daysInMonth[numericMonth - 1]
-      || Number(hour) > 23 || Number(minute) > 59 || Number(second) > 59
-      || (zone.toUpperCase() !== 'Z'
-        && (Number(offsetHour) > 23 || Number(offsetMinute) > 59))) return null;
-  const milliseconds = Date.parse(text);
-  return Number.isFinite(milliseconds) ? new Date(milliseconds).toISOString() : null;
-}
+const normalizeSubmittedTimestamp = normalizePortalTimestamp;
 
 const STALE_MAP_CANDIDATES_SQL = `
   SELECT queue.suffix

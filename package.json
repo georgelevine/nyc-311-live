@@ -14,6 +14,7 @@
     "db:finalize": "node finalize-sqlite.js",
     "db:verify": "node finalize-sqlite.js --verify-only",
     "db:backup": "node backup-sqlite.js",
+    "db:normalize-timestamps": "node normalize-sqlite-timestamps.js",
     "db:verify-snapshot": "node verify-sqlite-snapshot.js",
     "desktop": "electron .",
     "desktop:package": "electron-packager . \"NYC 311 Live\" --platform=darwin --arch=arm64 --out=dist --overwrite --prune=true --ignore='^/data' --ignore='^/dist'",

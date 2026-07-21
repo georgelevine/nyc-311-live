@@ -18,6 +18,7 @@ const { reconcileStoredDetails } = require('./detail-queue');
 const { createDashboardAuth, dashboardAuthConfig } = require('./dashboard-auth');
 const { inspectSqliteHealth } = require('./sqlite-health');
 const { originMatchesHost } = require('./request-security');
+const { normalizePortalTimestamp } = require('./portal-timestamp');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -74,26 +75,6 @@ function setCache(key, data) {
     const oldest = cache.keys().next().value;
     cache.delete(oldest);
   }
-}
-
-/**
- * The portal map feed returns a UTC clock in US date format without a timezone.
- * Normalize it to an explicit ISO timestamp before sending it to the browser.
- */
-function normalizePortalTimestamp(value) {
-  if (!value) return null;
-  const text = String(value).trim();
-  const match = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})\s*(AM|PM)$/i);
-  if (!match) return text;
-
-  const [, month, day, year, rawHour, minute, second, period] = match;
-  let hour = Number(rawHour) % 12;
-  if (period.toUpperCase() === 'PM') hour += 12;
-
-  return new Date(Date.UTC(
-    Number(year), Number(month) - 1, Number(day),
-    hour, Number(minute), Number(second)
-  )).toISOString();
 }
 
 function portalTimestampDay(value) {
@@ -428,7 +409,7 @@ function parsePortalDetail(html) {
   const scriptDate = (id) => {
     const pattern = new RegExp(`\\$\\(["']#${id}["']\\)\\.text\\(getESTDate\\(["']([^"']+)["']\\)\\)`);
     const match = scripts.match(pattern);
-    return match ? match[1] : null;
+    return match ? normalizePortalTimestamp(match[1]) : null;
   };
 
   return {

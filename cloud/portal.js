@@ -1,5 +1,6 @@
 const fetch = require('node-fetch');
 const cheerio = require('cheerio');
+const { normalizePortalTimestamp } = require('../portal-timestamp');
 
 const MAP_URL = 'https://portal.311.nyc.gov/entity-pin-fetch-service-requests/';
 const PORTAL_HEADERS = {
@@ -8,20 +9,6 @@ const PORTAL_HEADERS = {
   Referer: 'https://portal.311.nyc.gov/check-status/',
   Origin: 'https://portal.311.nyc.gov'
 };
-function normalizePortalTimestamp(value) {
-  if (!value) return null;
-  const text = String(value).trim();
-  const match = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})\s*(AM|PM)$/i);
-  if (!match) {
-    const parsed = new Date(text);
-    return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
-  }
-  const [, month, day, year, rawHour, minute, second, period] = match;
-  let hour = Number(rawHour) % 12;
-  if (period.toUpperCase() === 'PM') hour += 12;
-  return new Date(Date.UTC(Number(year), Number(month) - 1, Number(day), hour, Number(minute), Number(second))).toISOString();
-}
-
 function parseDetail(html, expectedNumber, expectedPortalId = null) {
   const $ = cheerio.load(html);
   const portalId = String($('#EntityFormView_EntityID').val() || expectedPortalId || '').trim();
@@ -42,7 +29,7 @@ function parseDetail(html, expectedNumber, expectedPortalId = null) {
   const scriptDate = id => {
     const pattern = new RegExp(`\\$\\(["']#${id}["']\\)\\.text\\(getESTDate\\(["']([^"']+)["']\\)\\)`);
     const match = scripts.match(pattern);
-    return match ? match[1] : null;
+    return match ? normalizePortalTimestamp(match[1]) : null;
   };
   const srnumber = fields['SR Number'] || expectedNumber;
   if (!srnumber) return { outcome: 'retry', error: 'Portal detail did not contain a request number' };
