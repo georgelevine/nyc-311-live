@@ -24,6 +24,8 @@
   map.addLayer(markerLayer);
 
   const feed = document.getElementById('request-feed');
+  const appShell = document.querySelector('.app-shell');
+  const mobileViewTabs = document.querySelector('.mobile-view-tabs');
   const search = document.getElementById('request-search');
   const statusFilter = document.getElementById('status-filter');
   const connection = document.querySelector('.live-state');
@@ -46,8 +48,6 @@
   let mapRecords = [];
   let feedByNumber = new Map();
   let mapByNumber = new Map();
-  let knownNumbers = new Set();
-  let sessionNew = new Set();
   let selectedNumber = null;
   let markerByNumber = new Map();
   let markerSignatureByNumber = new Map();
@@ -59,7 +59,6 @@
   let mapRefreshInFlight = false;
   let mapRequestSequence = 0;
   let lastMapRefreshStartedAt = 0;
-  let initialLoad = true;
   let currentPollSeconds = 15;
   let lastPortalCheck = null;
   let portalDetailByNumber = new Map();
@@ -105,6 +104,20 @@
     if (value < 5400) return `about ${Math.ceil(value / 60)} min left`;
     return `about ${(value / 3600).toFixed(1)} hr left`;
   };
+
+  function setMobileView(view) {
+    if (!['feed', 'map', 'overview'].includes(view)) return;
+    appShell.dataset.mobileView = view;
+    mobileViewTabs.querySelectorAll('button[data-mobile-view]').forEach(button => {
+      button.setAttribute('aria-pressed', String(button.dataset.mobileView === view));
+    });
+    if (view === 'map') {
+      window.requestAnimationFrame(() => {
+        map.invalidateSize();
+        renderMap();
+      });
+    }
+  }
 
   function renderCatchup(catchup) {
     if (!catchup || !catchup.offline_from || !catchup.offline_to) {
@@ -262,18 +275,17 @@
       return;
     }
     feed.innerHTML = visible.map(record => {
-      const fresh = sessionNew.has(record.srnumber);
       const hasMapPin = recordHasMapPin(record);
       const unavailableBadge = missingBadge(record);
       const headline = record.problem_details
         ? `${record.problem || 'Service Request'}: ${record.problem_details}`
         : record.problem || 'Service Request';
       return `<article class="request-card${selectedNumber === record.srnumber ? ' selected' : ''}" data-number="${esc(record.srnumber)}" tabindex="0">
-        <span class="request-dot${fresh ? ' fresh' : isClosed(record.status) ? ' closed' : ''}"></span>
+        <span class="request-dot${isClosed(record.status) ? ' closed' : ''}"></span>
         <div class="request-copy">
           <div class="request-topline"><strong>${esc(headline)}</strong><time>${esc(timeLabel(record.submitted_at))}</time></div>
           <p>${esc(record.address || 'Location unavailable')}</p>
-          <div class="request-meta"><span>${esc(record.srnumber)}</span><span>•</span><span>${esc(record.status || 'Unknown')}</span>${fresh ? '<span class="fresh-label">NEW</span>' : ''}${unavailableBadge}${!hasMapPin ? '<span class="unmapped-label">NO MAP PIN</span>' : ''}</div>
+          <div class="request-meta"><span>${esc(record.srnumber)}</span><span>•</span><span>${esc(record.status || 'Unknown')}</span>${unavailableBadge}${!hasMapPin ? '<span class="unmapped-label">NO MAP PIN</span>' : ''}</div>
         </div>
       </article>`;
     }).join('');
@@ -552,15 +564,6 @@
       .filter(record => record && record.srnumber)
       .slice(0, MAX_VISIBLE_RECORDS)
       .sort((a, b) => suffixOf(b) - suffixOf(a));
-    if (initialLoad) {
-      knownNumbers = new Set(nextRecords.map(record => record.srnumber));
-    } else {
-      for (const record of nextRecords) {
-        if (!knownNumbers.has(record.srnumber)) sessionNew.add(record.srnumber);
-        knownNumbers.add(record.srnumber);
-      }
-    }
-
     for (const record of nextRecords) {
       const previous = feedByNumber.get(record.srnumber);
       if (previous && previous.details_fetched_at !== record.details_fetched_at) {
@@ -571,7 +574,6 @@
     const changed = !recordsMatch(nextRecords, records);
     records = nextRecords;
     feedByNumber = new Map(records.map(record => [record.srnumber, record]));
-    document.getElementById('new-count').textContent = sessionNew.size.toLocaleString();
     if (!changed) return;
     syncStatuses();
     renderFeed();
@@ -620,6 +622,34 @@
     updateMapCountText();
   }
 
+  function percentage(part, total) {
+    if (!Number.isFinite(total) || total <= 0) return '—';
+    return `${Math.round(Math.max(0, Math.min(1, part / total)) * 100)}%`;
+  }
+
+  function renderOverviewStats(stats) {
+    const total = finiteStat(stats.total);
+    const detailsPending = finiteStat(stats.details_pending);
+    const detailsLoaded = finiteStat(stats.details_loaded, Math.max(0, total - detailsPending));
+    const unmapped = finiteStat(stats.unmapped_total);
+    const mapped = Math.max(0, total - unmapped);
+    const closing = finiteStat(stats.closure_refreshes_pending);
+
+    document.getElementById('total-count').textContent = total.toLocaleString();
+    document.getElementById('details-coverage-rate').textContent = percentage(detailsLoaded, total);
+    document.getElementById('details-coverage-note').textContent = detailsPending
+      ? `${detailsPending.toLocaleString()} pending`
+      : 'Complete';
+    document.getElementById('map-coverage-rate').textContent = percentage(mapped, total);
+    document.getElementById('map-coverage-note').textContent = unmapped
+      ? `${unmapped.toLocaleString()} without a pin`
+      : 'All requests mapped';
+    document.getElementById('monitored-count').textContent = finiteStat(stats.open_followups_scheduled).toLocaleString();
+    document.getElementById('pending-count').textContent = finiteStat(stats.pending).toLocaleString();
+    document.getElementById('closures-count').textContent = finiteStat(stats.closures_finalized).toLocaleString();
+    document.getElementById('closures-note').textContent = `${closing.toLocaleString()} ${closing === 1 ? 'check' : 'checks'} in progress`;
+  }
+
   async function refreshMap(dashboardStats) {
     const now = Date.now();
     if (mapRefreshInFlight || now - lastMapRefreshStartedAt < MAP_REFRESH_MS) return;
@@ -649,12 +679,7 @@
       currentPollSeconds = Number(stats.poll_interval_seconds || 15);
       pollInterval.value = String(currentPollSeconds);
       lastPortalCheck = stats.last_seen_at ? new Date(stats.last_seen_at) : null;
-      document.getElementById('total-count').textContent = Number(stats.total || 0).toLocaleString();
-      document.getElementById('new-count').textContent = sessionNew.size.toLocaleString();
-      document.getElementById('details-pending-count').textContent = Number(stats.details_pending || 0).toLocaleString();
-      document.getElementById('pending-count').textContent = Number(stats.pending || 0).toLocaleString();
-      document.getElementById('closing-count').textContent = Number(stats.closure_refreshes_pending || 0).toLocaleString();
-      document.getElementById('closures-count').textContent = Number(stats.closures_finalized || 0).toLocaleString();
+      renderOverviewStats(stats);
       renderCatchup(stats.catchup);
       document.getElementById('frontier-number').textContent = stats.frontier ? `311-${String(stats.frontier).padStart(8, '0')}` : '—';
       document.getElementById('last-updated').textContent = lastPortalCheck
@@ -662,7 +687,6 @@
         : 'Waiting for data';
       connection.classList.remove('offline');
       updateConnectionLabel();
-      initialLoad = false;
     } catch (error) {
       connection.classList.add('offline');
       connectionLabel.textContent = 'Reconnecting…';
@@ -674,12 +698,28 @@
 
   feed.addEventListener('click', event => {
     const card = event.target.closest('.request-card');
-    if (card) selectRequest(card.dataset.number);
+    if (!card) return;
+    if (window.matchMedia('(max-width: 720px)').matches) {
+      setMobileView('map');
+      window.setTimeout(() => selectRequest(card.dataset.number), 0);
+    } else {
+      selectRequest(card.dataset.number);
+    }
   });
   feed.addEventListener('keydown', event => {
     if (event.key !== 'Enter' && event.key !== ' ') return;
     const card = event.target.closest('.request-card');
-    if (card) selectRequest(card.dataset.number);
+    if (!card) return;
+    if (window.matchMedia('(max-width: 720px)').matches) {
+      setMobileView('map');
+      window.setTimeout(() => selectRequest(card.dataset.number), 0);
+    } else {
+      selectRequest(card.dataset.number);
+    }
+  });
+  mobileViewTabs.addEventListener('click', event => {
+    const button = event.target.closest('button[data-mobile-view]');
+    if (button) setMobileView(button.dataset.mobileView);
   });
   search.addEventListener('input', () => { renderFeed({ resetScroll: true }); renderMap(); });
   statusFilter.addEventListener('change', () => { renderFeed({ resetScroll: true }); renderMap(); });

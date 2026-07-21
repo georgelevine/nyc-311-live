@@ -11,7 +11,7 @@
   <link rel="stylesheet" href="/css/live.css">
 </head>
 <body>
-  <main class="app-shell">
+  <main class="app-shell" data-mobile-view="feed">
     <aside class="sidebar">
       <header class="app-header">
         <div class="brand-mark">311</div>
@@ -21,13 +21,37 @@
         </div>
       </header>
 
+      <nav class="mobile-view-tabs" aria-label="Dashboard view">
+        <button type="button" data-mobile-view="feed" aria-pressed="true">Requests</button>
+        <button type="button" data-mobile-view="map" aria-pressed="false">Map</button>
+        <button type="button" data-mobile-view="overview" aria-pressed="false">Overview</button>
+      </nav>
+
       <section class="metrics" aria-label="Live collection statistics">
-        <article><strong id="total-count">0</strong><span>Captured</span></article>
-        <article><strong id="new-count">0</strong><span>This session</span></article>
-        <article><strong id="details-pending-count">0</strong><span>Details pending</span></article>
-        <article><strong id="pending-count">0</strong><span>Number audit</span></article>
-        <article><strong id="closing-count">0</strong><span>Closing checks</span></article>
-        <article><strong id="closures-count">0</strong><span>Closures saved</span></article>
+        <article>
+          <strong id="total-count">0</strong><span>Captured</span>
+          <small>Stored in database</small>
+        </article>
+        <article>
+          <strong id="details-coverage-rate">—</strong><span>Details loaded</span>
+          <small id="details-coverage-note">Checking coverage</small>
+        </article>
+        <article>
+          <strong id="map-coverage-rate">—</strong><span>Map coverage</span>
+          <small id="map-coverage-note">Checking coordinates</small>
+        </article>
+        <article>
+          <strong id="monitored-count">0</strong><span>Open monitored</span>
+          <small>Checked every 24 hours</small>
+        </article>
+        <article>
+          <strong id="pending-count">0</strong><span>Audit queued</span>
+          <small>Request numbers waiting</small>
+        </article>
+        <article>
+          <strong id="closures-count">0</strong><span>Closures saved</span>
+          <small id="closures-note">0 checks in progress</small>
+        </article>
       </section>
 
       <section id="catchup-panel" class="catchup-panel hidden" aria-label="Offline audit catch-up" aria-live="polite">
