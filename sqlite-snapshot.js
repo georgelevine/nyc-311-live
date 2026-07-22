@@ -17,7 +17,9 @@ const REQUIRED_ARCHIVE_COLUMNS = Object.freeze({
     'srnumber', 'suffix', 'portal_id', 'problem', 'address', 'latitude',
     'longitude', 'submitted_at', 'status', 'portal_url', 'first_seen_at',
     'last_seen_at', 'raw_json', 'police_precinct',
-    'police_precinct_boundary_version', 'police_precinct_matched_at'
+    'police_precinct_boundary_version', 'police_precinct_matched_at',
+    'business_improvement_district_boundary_version',
+    'business_improvement_district_matched_at'
   ]),
   live_number_queue: Object.freeze([
     'suffix', 'srnumber', 'first_detected_at', 'audit_after', 'map_seen',
@@ -57,6 +59,18 @@ const REQUIRED_ARCHIVE_COLUMNS = Object.freeze({
     'boundary_version', 'precinct_number', 'label', 'geometry_json',
     'min_longitude', 'min_latitude', 'max_longitude', 'max_latitude'
   ]),
+  business_improvement_district_boundary_versions: Object.freeze([
+    'version', 'source_url', 'source_sha256', 'source_date', 'imported_at',
+    'feature_count', 'active'
+  ]),
+  business_improvement_districts: Object.freeze([
+    'boundary_version', 'bid_id', 'name', 'borough_code', 'borough_name',
+    'geometry_json', 'min_longitude', 'min_latitude', 'max_longitude',
+    'max_latitude'
+  ]),
+  live_request_bid_memberships: Object.freeze([
+    'srnumber', 'boundary_version', 'bid_id', 'matched_at'
+  ]),
   schema_migrations: Object.freeze(['version', 'name', 'checksum', 'applied_at'])
 });
 
@@ -72,6 +86,9 @@ const REQUIRED_ARCHIVE_PRIMARY_KEYS = Object.freeze({
   request_followup_queue: Object.freeze(['srnumber']),
   police_precinct_boundary_versions: Object.freeze(['version']),
   police_precincts: Object.freeze(['boundary_version', 'precinct_number']),
+  business_improvement_district_boundary_versions: Object.freeze(['version']),
+  business_improvement_districts: Object.freeze(['boundary_version', 'bid_id']),
+  live_request_bid_memberships: Object.freeze(['srnumber', 'boundary_version', 'bid_id']),
   schema_migrations: Object.freeze(['version'])
 });
 
@@ -92,6 +109,9 @@ const REQUIRED_ARCHIVE_UNIQUE_CONSTRAINTS = Object.freeze({
   police_precinct_boundary_versions: Object.freeze([
     Object.freeze(['source_sha256'])
   ]),
+  business_improvement_district_boundary_versions: Object.freeze([
+    Object.freeze(['source_sha256'])
+  ]),
   schema_migrations: Object.freeze([Object.freeze(['name'])])
 });
 
@@ -101,6 +121,28 @@ const REQUIRED_ARCHIVE_FOREIGN_KEYS = Object.freeze({
       columns: Object.freeze(['boundary_version']),
       referenced_table: 'police_precinct_boundary_versions',
       referenced_columns: Object.freeze(['version']),
+      on_delete: 'CASCADE'
+    })
+  ]),
+  business_improvement_districts: Object.freeze([
+    Object.freeze({
+      columns: Object.freeze(['boundary_version']),
+      referenced_table: 'business_improvement_district_boundary_versions',
+      referenced_columns: Object.freeze(['version']),
+      on_delete: 'CASCADE'
+    })
+  ]),
+  live_request_bid_memberships: Object.freeze([
+    Object.freeze({
+      columns: Object.freeze(['boundary_version', 'bid_id']),
+      referenced_table: 'business_improvement_districts',
+      referenced_columns: Object.freeze(['boundary_version', 'bid_id']),
+      on_delete: 'CASCADE'
+    }),
+    Object.freeze({
+      columns: Object.freeze(['srnumber']),
+      referenced_table: 'live_portal_requests',
+      referenced_columns: Object.freeze(['srnumber']),
       on_delete: 'CASCADE'
     })
   ])
@@ -129,6 +171,16 @@ const REQUIRED_ARCHIVE_INDEX_CONTRACTS = Object.freeze({
     keys: Object.freeze([indexKey('police_precinct'), indexKey('suffix', true)]),
     where: null
   }),
+  live_request_bid_memberships_district_idx: Object.freeze({
+    table: 'live_request_bid_memberships',
+    unique: false,
+    keys: Object.freeze([
+      indexKey('boundary_version'),
+      indexKey('bid_id'),
+      indexKey('srnumber')
+    ]),
+    where: null
+  }),
   number_ledger_outcome_idx: Object.freeze({
     table: 'number_ledger',
     unique: false,
@@ -149,6 +201,24 @@ const REQUIRED_ARCHIVE_INDEX_CONTRACTS = Object.freeze({
   }),
   police_precinct_one_active_version_idx: Object.freeze({
     table: 'police_precinct_boundary_versions',
+    unique: true,
+    keys: Object.freeze([indexKey('active')]),
+    where: 'active = 1'
+  }),
+  business_improvement_district_bbox_idx: Object.freeze({
+    table: 'business_improvement_districts',
+    unique: false,
+    keys: Object.freeze([
+      indexKey('boundary_version'),
+      indexKey('min_longitude'),
+      indexKey('max_longitude'),
+      indexKey('min_latitude'),
+      indexKey('max_latitude')
+    ]),
+    where: null
+  }),
+  business_improvement_district_one_active_version_idx: Object.freeze({
+    table: 'business_improvement_district_boundary_versions',
     unique: true,
     keys: Object.freeze([indexKey('active')]),
     where: 'active = 1'

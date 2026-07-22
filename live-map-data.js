@@ -11,6 +11,8 @@ const MAP_RECORD_FIELDS = Object.freeze([
   'incident_zip',
   'police_precinct',
   'police_precinct_boundary_version',
+  'business_improvement_district_ids',
+  'business_improvement_district_boundary_version',
   'latitude',
   'longitude',
   'submitted_at',
@@ -51,6 +53,20 @@ function suffixValue(value) {
 function precinctValue(value) {
   const number = suffixValue(value);
   return number != null && number > 0 ? number : null;
+}
+
+function businessImprovementDistrictIds(value) {
+  let items = value;
+  if (typeof value === 'string') {
+    try {
+      items = JSON.parse(value);
+    } catch (_) {
+      items = [];
+    }
+  }
+  if (!Array.isArray(items)) return [];
+  return [...new Set(items.map(suffixValue).filter(number => number != null && number > 0))]
+    .sort((first, second) => first - second);
 }
 
 function coordinateValue(value, minimum, maximum) {
@@ -94,6 +110,12 @@ function projectLiveMapRow(row) {
     incident_zip: textValue(row.incident_zip),
     police_precinct: precinctValue(row.police_precinct),
     police_precinct_boundary_version: textValue(row.police_precinct_boundary_version),
+    business_improvement_district_ids: businessImprovementDistrictIds(
+      row.business_improvement_district_ids
+    ),
+    business_improvement_district_boundary_version: textValue(
+      row.business_improvement_district_boundary_version
+    ),
     latitude,
     longitude,
     submitted_at: timestampValue(row.submitted_at, row.detail_date_reported),
@@ -136,6 +158,7 @@ function buildLiveMapPayload(rows) {
 
 module.exports = {
   MAP_RECORD_FIELDS,
+  businessImprovementDistrictIds,
   buildLiveMapPayload,
   coordinateValue,
   projectLiveMapRow,

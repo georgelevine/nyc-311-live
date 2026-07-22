@@ -12,7 +12,7 @@ const {
   currentLifecycleProjection,
   hasText
 } = require('./record-availability');
-const { buildLiveMapPayload } = require('./live-map-data');
+const { buildLiveMapPayload, businessImprovementDistrictIds } = require('./live-map-data');
 const { buildCatchupStatus, parseState } = require('./catchup-status');
 const { reconcileStoredDetails } = require('./detail-queue');
 const { createDashboardAuth, dashboardAuthConfig } = require('./dashboard-auth');
@@ -63,6 +63,88 @@ function policePrecinctFilter(req, database) {
   return { precinct, boundaryVersion: boundary.boundary_version };
 }
 
+function businessImprovementDistrictFilter(req, database) {
+  const raw = req.query && req.query.bid_id;
+  if (raw == null || String(raw).trim() === '') return null;
+  if (!/^\d{1,6}$/.test(String(raw).trim())) {
+    const error = new Error('bid_id must be a valid business improvement district ID');
+    error.statusCode = 400;
+    throw error;
+  }
+  const bidId = Number(raw);
+  const boundary = tableExists(database, 'business_improvement_districts')
+    && tableExists(database, 'business_improvement_district_boundary_versions')
+    && database.prepare(`
+      SELECT district.boundary_version,district.name
+      FROM business_improvement_districts AS district
+      JOIN business_improvement_district_boundary_versions AS version
+        ON version.version=district.boundary_version AND version.active=1
+      WHERE district.bid_id=?
+    `).get(bidId);
+  if (!boundary) {
+    const error = new Error(`BID ${bidId} is not in the active boundary release`);
+    error.statusCode = 400;
+    throw error;
+  }
+  return { bidId, name: boundary.name, boundaryVersion: boundary.boundary_version };
+}
+
+function requestGeographyScope(req, database) {
+  return {
+    precinct: policePrecinctFilter(req, database),
+    bid: businessImprovementDistrictFilter(req, database)
+  };
+}
+
+function scopeIsEmpty(scope) {
+  return !scope || (!scope.precinct && !scope.bid);
+}
+
+function scopeParameters(scope) {
+  return {
+    ...(scope && scope.precinct ? {
+      precinct: scope.precinct.precinct,
+      precinct_boundary_version: scope.precinct.boundaryVersion
+    } : {}),
+    ...(scope && scope.bid ? {
+      bid_id: scope.bid.bidId,
+      bid_boundary_version: scope.bid.boundaryVersion
+    } : {})
+  };
+}
+
+function scopePredicates(alias, scope) {
+  const predicates = [];
+  if (scope && scope.precinct) {
+    predicates.push(
+      `${alias}.police_precinct=@precinct`,
+      `${alias}.police_precinct_boundary_version=@precinct_boundary_version`
+    );
+  }
+  if (scope && scope.bid) {
+    predicates.push(`EXISTS (
+      SELECT 1 FROM live_request_bid_memberships AS bid_membership
+      WHERE bid_membership.srnumber=${alias}.srnumber
+        AND bid_membership.boundary_version=@bid_boundary_version
+        AND bid_membership.bid_id=@bid_id
+    )`);
+  }
+  return predicates;
+}
+
+function businessImprovementDistrictIdsSql(alias = 'live') {
+  return `COALESCE((
+    SELECT json_group_array(ordered.bid_id)
+    FROM (
+      SELECT membership.bid_id
+      FROM live_request_bid_memberships AS membership
+      WHERE membership.srnumber=${alias}.srnumber
+        AND membership.boundary_version=${alias}.business_improvement_district_boundary_version
+      ORDER BY membership.bid_id
+    ) AS ordered
+  ),'[]')`;
+}
+
 function liveSummaryRevision(database) {
   try {
     const row = database.prepare(`
@@ -74,27 +156,33 @@ function liveSummaryRevision(database) {
   }
 }
 
-function cachedLiveSummary(database, databasePath, precinctScope = null) {
+function cachedLiveSummary(database, databasePath, scope = null) {
   const now = Date.now();
   const revision = liveSummaryRevision(database);
-  const cacheKey = precinctScope
-    ? `${databasePath}|precinct:${precinctScope.precinct}|boundary:${precinctScope.boundaryVersion}`
-    : `${databasePath}|precinct:all`;
+  const scoped = !scopeIsEmpty(scope);
+  const cacheKey = scoped
+    ? `${databasePath}|precinct:${scope.precinct ? scope.precinct.precinct : 'all'}`
+      + `:${scope.precinct ? scope.precinct.boundaryVersion : 'none'}`
+      + `|bid:${scope.bid ? scope.bid.bidId : 'all'}`
+      + `:${scope.bid ? scope.bid.boundaryVersion : 'none'}`
+    : `${databasePath}|geography:all`;
   const cached = liveSummaryCache.get(cacheKey);
   if (cached && cached.revision === revision && now - cached.created_at < LIVE_SUMMARY_CACHE_TTL_MS) {
     return cached.summary;
   }
-  const qualityEntry = precinctScope == null ? archiveQualityCache.get(databasePath) : null;
+  const qualityEntry = !scoped ? archiveQualityCache.get(databasePath) : null;
   const archiveQuality = qualityEntry && now - qualityEntry.created_at < ARCHIVE_QUALITY_CACHE_TTL_MS
     ? qualityEntry.quality
     : null;
   const summary = loadSqliteLiveSummary(database, {
     now: new Date(now),
     archiveQuality,
-    policePrecinct: precinctScope && precinctScope.precinct,
-    policePrecinctBoundaryVersion: precinctScope && precinctScope.boundaryVersion
+    policePrecinct: scope && scope.precinct && scope.precinct.precinct,
+    policePrecinctBoundaryVersion: scope && scope.precinct && scope.precinct.boundaryVersion,
+    businessImprovementDistrictId: scope && scope.bid && scope.bid.bidId,
+    businessImprovementDistrictBoundaryVersion: scope && scope.bid && scope.bid.boundaryVersion
   });
-  if (precinctScope == null && !archiveQuality) {
+  if (!scoped && !archiveQuality) {
     archiveQualityCache.set(databasePath, {
       created_at: now,
       quality: {
@@ -731,6 +819,42 @@ app.get('/api/police-precincts', (req, res) => {
   }
 });
 
+app.get('/api/business-improvement-districts', (req, res) => {
+  const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
+  let database;
+  res.setHeader('Cache-Control', 'private, max-age=300');
+  try {
+    if (!require('fs').existsSync(databasePath)) {
+      return res.json({ boundary_version: null, districts: [] });
+    }
+    const { DatabaseSync } = require('node:sqlite');
+    database = new DatabaseSync(databasePath, { readOnly: true });
+    if (!tableExists(database, 'business_improvement_districts')
+        || !tableExists(database, 'business_improvement_district_boundary_versions')) {
+      return res.json({ boundary_version: null, districts: [] });
+    }
+    const districts = database.prepare(`
+      SELECT district.bid_id,district.name,district.borough_code,
+             district.borough_name,district.boundary_version
+      FROM business_improvement_districts AS district
+      JOIN business_improvement_district_boundary_versions AS version
+        ON version.version=district.boundary_version AND version.active=1
+      ORDER BY district.name COLLATE NOCASE,district.bid_id
+    `).all();
+    return res.json({
+      boundary_version: districts[0] ? districts[0].boundary_version : null,
+      districts
+    });
+  } catch (error) {
+    console.error('Business improvement district list error:', error.message);
+    return res.status(503).json({
+      error: 'Business improvement districts are temporarily unavailable'
+    });
+  } finally {
+    if (database) database.close();
+  }
+});
+
 app.get('/api/live-map', (req, res) => {
   const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
   let database;
@@ -743,7 +867,7 @@ app.get('/api/live-map', (req, res) => {
       SELECT name FROM sqlite_master WHERE type='table'
     `).all().map(row => row.name));
     if (!tables.has('live_portal_requests')) return res.json(buildLiveMapPayload([]));
-    const precinctScope = policePrecinctFilter(req, database);
+    const scope = requestGeographyScope(req, database);
 
     const hasDetails = tables.has('portal_requests');
     const hasFollowUps = tables.has('request_followup_queue');
@@ -791,13 +915,15 @@ app.get('/api/live-map', (req, res) => {
                AND snapshot.is_final=1
            )`
       : '';
-    const precinctWhere = precinctScope
-      ? 'WHERE live.police_precinct=@precinct AND live.police_precinct_boundary_version=@boundary_version'
-      : '';
+    const livePredicates = scopePredicates('live', scope);
+    const liveWhere = livePredicates.length ? `WHERE ${livePredicates.join(' AND ')}` : '';
     const statement = database.prepare(`
       SELECT live.srnumber,live.suffix,live.portal_id,live.problem,live.address,
              live.borough,live.incident_zip,
              live.police_precinct,live.police_precinct_boundary_version,
+             ${businessImprovementDistrictIdsSql('live')}
+               AS business_improvement_district_ids,
+             live.business_improvement_district_boundary_version,
              live.latitude,live.longitude,live.submitted_at,live.status,
              live.portal_url,live.first_seen_at,live.last_seen_at,
              ${detailColumns},${followUpColumns},${currentClosureColumns}
@@ -805,14 +931,9 @@ app.get('/api/live-map', (req, res) => {
       ${detailJoin}
       ${followUpJoin}
       ${currentClosureJoin}
-      ${precinctWhere}
+      ${liveWhere}
     `);
-    const rows = precinctScope
-      ? statement.all({
-        precinct: precinctScope.precinct,
-        boundary_version: precinctScope.boundaryVersion
-      })
-      : statement.all();
+    const rows = statement.all(scopeParameters(scope));
     return res.json(buildLiveMapPayload(rows));
   } catch (error) {
     console.error('Live map data error:', error.message);
@@ -838,8 +959,8 @@ app.get('/api/live-summary', (req, res) => {
     }
     const { DatabaseSync } = require('node:sqlite');
     database = new DatabaseSync(databasePath, { readOnly: true });
-    const precinctScope = policePrecinctFilter(req, database);
-    return res.json(cachedLiveSummary(database, databasePath, precinctScope));
+    const scope = requestGeographyScope(req, database);
+    return res.json(cachedLiveSummary(database, databasePath, scope));
   } catch (error) {
     console.error('Live summary error:', error.message);
     return res.status(error.statusCode || 503).json({
@@ -873,7 +994,7 @@ app.get('/api/live-dashboard', (req, res) => {
     }
     const { DatabaseSync } = require('node:sqlite');
     database = new DatabaseSync(databasePath, { readOnly: true });
-    const precinctScope = policePrecinctFilter(req, database);
+    const scope = requestGeographyScope(req, database);
     const hasDetails = database.prepare(`
       SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'portal_requests'
     `).get();
@@ -923,28 +1044,21 @@ app.get('/api/live-dashboard', (req, res) => {
                AND snapshot.is_final = 1
            )`
       : '';
-    const livePredicates = [];
-    const recordParameters = { limit };
-    if (precinctScope) {
-      livePredicates.push(
-        'live.police_precinct=@precinct',
-        'live.police_precinct_boundary_version=@boundary_version'
-      );
-      recordParameters.precinct = precinctScope.precinct;
-      recordParameters.boundary_version = precinctScope.boundaryVersion;
-    }
+    const livePredicates = scopePredicates('live', scope);
+    const scopedParameters = scopeParameters(scope);
+    const recordParameters = { limit, ...scopedParameters };
     if (requestedSrnumber) {
       livePredicates.push('live.srnumber=@srnumber');
       recordParameters.srnumber = requestedSrnumber;
     }
     const liveWhere = livePredicates.length ? `WHERE ${livePredicates.join(' AND ')}` : '';
-    const precinctParameters = precinctScope
-      ? { precinct: precinctScope.precinct, boundary_version: precinctScope.boundaryVersion }
-      : null;
     const storedStatement = database.prepare(`
       SELECT live.srnumber, live.suffix, live.portal_id, live.problem, live.address,
              live.borough,live.incident_zip,
              live.police_precinct,live.police_precinct_boundary_version,
+             ${businessImprovementDistrictIdsSql('live')}
+               AS business_improvement_district_ids,
+             live.business_improvement_district_boundary_version,
              live.latitude, live.longitude, live.submitted_at, live.status,
              live.portal_url, live.first_seen_at, live.last_seen_at,
              ${detailColumns}, ${followUpColumns}, ${currentClosureColumns}
@@ -970,6 +1084,9 @@ app.get('/api/live-dashboard', (req, res) => {
       record.status = hasText(record.status) ? record.status : detailStatus;
       record.problem = hasText(record.problem) ? record.problem : detailProblem;
       record.address = hasText(record.address) ? record.address : detailAddress;
+      record.business_improvement_district_ids = businessImprovementDistrictIds(
+        record.business_improvement_district_ids
+      );
       record.submitted_at = hasText(record.submitted_at)
         ? record.submitted_at
         : record.date_reported;
@@ -985,46 +1102,44 @@ app.get('/api/live-dashboard', (req, res) => {
           : null);
       return { ...record, ...assessRecordAvailability(record) };
     });
-    const capturedPrecinctWhere = precinctScope
-      ? 'WHERE captured.police_precinct=@precinct AND captured.police_precinct_boundary_version=@boundary_version'
-      : '';
-    const capturedPrecinctAnd = precinctScope
-      ? 'AND captured.police_precinct=@precinct AND captured.police_precinct_boundary_version=@boundary_version'
-      : '';
+    const capturedPredicates = scopePredicates('captured', scope);
+    const capturedScopeSql = capturedPredicates.join(' AND ');
+    const capturedScopeWhere = capturedScopeSql ? `WHERE ${capturedScopeSql}` : '';
+    const capturedScopeAnd = capturedScopeSql ? `AND ${capturedScopeSql}` : '';
     const detailStats = hasDetails
       ? `(SELECT COUNT(*) FROM portal_requests AS stored
           JOIN live_portal_requests AS captured ON captured.srnumber = stored.srnumber
-          ${capturedPrecinctWhere}) AS details_loaded,
+          ${capturedScopeWhere}) AS details_loaded,
          (SELECT COUNT(*) FROM live_portal_requests AS captured
           LEFT JOIN portal_requests AS stored ON stored.srnumber = captured.srnumber
           WHERE stored.srnumber IS NULL
-            ${capturedPrecinctAnd}) AS details_pending`
+            ${capturedScopeAnd}) AS details_pending`
       : `0 AS details_loaded,
          (SELECT COUNT(*) FROM live_portal_requests AS captured
-          ${capturedPrecinctWhere}) AS details_pending`;
+          ${capturedScopeWhere}) AS details_pending`;
     const closureStats = hasFollowUps
       ? `(SELECT COUNT(*) FROM request_followup_queue AS followup
           JOIN live_portal_requests AS captured USING(srnumber)
           WHERE followup.state='closing'
-            ${capturedPrecinctAnd}) AS closure_refreshes_pending,
+            ${capturedScopeAnd}) AS closure_refreshes_pending,
          (SELECT COUNT(*) FROM request_followup_queue AS followup
           JOIN live_portal_requests AS captured USING(srnumber)
           WHERE followup.state='open'
-            ${capturedPrecinctAnd}) AS open_followups_scheduled,
+            ${capturedScopeAnd}) AS open_followups_scheduled,
          (SELECT COUNT(*) FROM request_followup_queue AS followup
           JOIN live_portal_requests AS captured USING(srnumber)
           WHERE followup.state='closed'
-            ${capturedPrecinctAnd}) AS closures_finalized`
+            ${capturedScopeAnd}) AS closures_finalized`
       : `0 AS closure_refreshes_pending,
          0 AS open_followups_scheduled,
          0 AS closures_finalized`;
     const totalsStatement = database.prepare(`
       SELECT
         (SELECT COUNT(*) FROM live_portal_requests AS captured
-          ${capturedPrecinctWhere}) AS total,
+          ${capturedScopeWhere}) AS total,
         (SELECT COUNT(*) FROM live_portal_requests AS captured
           WHERE (captured.latitude IS NULL OR captured.longitude IS NULL)
-            ${capturedPrecinctAnd}) AS unmapped_total,
+            ${capturedScopeAnd}) AS unmapped_total,
         (SELECT COUNT(*) FROM live_number_queue WHERE audit_outcome = 'pending') AS pending,
         (SELECT MAX(suffix) FROM live_number_queue) AS frontier,
         (SELECT MAX(last_seen_at) FROM live_portal_requests) AS last_seen_at,
@@ -1035,14 +1150,20 @@ app.get('/api/live-dashboard', (req, res) => {
         ${detailStats},
         ${closureStats}
     `);
-    const totals = precinctScope
-      ? totalsStatement.get(precinctParameters)
-      : totalsStatement.get();
+    const totals = scopeIsEmpty(scope)
+      ? totalsStatement.get()
+      : totalsStatement.get(scopedParameters);
     try {
-      totals.summary = cachedLiveSummary(database, databasePath, precinctScope);
+      totals.summary = cachedLiveSummary(database, databasePath, scope);
       totals.scope = {
-        police_precinct: precinctScope ? precinctScope.precinct : null,
-        police_precinct_boundary_version: precinctScope ? precinctScope.boundaryVersion : null
+        police_precinct: scope.precinct ? scope.precinct.precinct : null,
+        police_precinct_boundary_version: scope.precinct
+          ? scope.precinct.boundaryVersion
+          : null,
+        bid_id: scope.bid ? scope.bid.bidId : null,
+        business_improvement_district_boundary_version: scope.bid
+          ? scope.bid.boundaryVersion
+          : null
       };
     } catch (summaryError) {
       console.error('Embedded live summary error:', summaryError.message);

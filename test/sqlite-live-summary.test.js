@@ -23,12 +23,20 @@ function harness(t, { withDetails = true, withState = true } = {}) {
       address TEXT,
       police_precinct INTEGER,
       police_precinct_boundary_version TEXT,
+      business_improvement_district_boundary_version TEXT,
       latitude REAL,
       longitude REAL,
       raw_json TEXT NOT NULL
     );
     CREATE INDEX live_portal_requests_submitted_at_idx
       ON live_portal_requests(submitted_at) WHERE submitted_at IS NOT NULL;
+    CREATE TABLE live_request_bid_memberships (
+      srnumber TEXT NOT NULL,
+      boundary_version TEXT NOT NULL,
+      bid_id INTEGER NOT NULL,
+      matched_at TEXT NOT NULL,
+      PRIMARY KEY(srnumber,boundary_version,bid_id)
+    );
   `);
   if (withDetails) {
     database.exec(`
@@ -86,6 +94,13 @@ function insertLive(database, suffix, submittedAt, overrides = {}) {
   return srnumber;
 }
 
+function insertBidMembership(database, srnumber, bidId, boundaryVersion = '2026-04-28') {
+  database.prepare(`
+    INSERT INTO live_request_bid_memberships(srnumber,boundary_version,bid_id,matched_at)
+    VALUES (?,?,?,'2026-07-21T12:00:00.000Z')
+  `).run(srnumber, boundaryVersion, bidId);
+}
+
 test('scopes current, previous, delayed, and archive quality to one police precinct', t => {
   const database = harness(t, { withState: false });
   const currentVersion = { policePrecinctBoundaryVersion: '26B' };
@@ -107,12 +122,58 @@ test('scopes current, previous, delayed, and archive quality to one police preci
 
   assert.deepEqual(result.scope, {
     police_precinct: 1,
-    police_precinct_boundary_version: '26B'
+    police_precinct_boundary_version: '26B',
+    bid_id: null,
+    business_improvement_district_boundary_version: null
   });
   assert.equal(result.current.requests, 1);
   assert.equal(result.previous.requests, 1);
   assert.equal(result.delayed.requests, 1);
   assert.equal(result.data_quality.archive_requests, 3);
+});
+
+test('scopes summaries to all BID memberships and intersects with a precinct', t => {
+  const database = harness(t, { withState: false });
+  const first = insertLive(database, 11, '2026-07-21T12:20:00.000Z', {
+    policePrecinct: 1,
+    policePrecinctBoundaryVersion: '26B'
+  });
+  const second = insertLive(database, 12, '2026-07-21T12:21:00.000Z', {
+    policePrecinct: 5,
+    policePrecinctBoundaryVersion: '26B'
+  });
+  const third = insertLive(database, 13, '2026-07-21T12:22:00.000Z', {
+    policePrecinct: 1,
+    policePrecinctBoundaryVersion: '26B'
+  });
+  insertBidMembership(database, first, 8);
+  insertBidMembership(database, first, 10);
+  insertBidMembership(database, second, 8);
+  insertBidMembership(database, third, 8, '2025-01-01');
+
+  const bid = loadSqliteLiveSummary(database, {
+    asOf: '2026-07-21T12:30:00.000Z',
+    businessImprovementDistrictId: 8,
+    businessImprovementDistrictBoundaryVersion: '2026-04-28'
+  });
+  assert.equal(bid.current.requests, 2);
+  assert.equal(bid.data_quality.archive_requests, 2);
+  assert.deepEqual(bid.scope, {
+    police_precinct: null,
+    police_precinct_boundary_version: null,
+    bid_id: 8,
+    business_improvement_district_boundary_version: '2026-04-28'
+  });
+
+  const intersection = loadSqliteLiveSummary(database, {
+    asOf: '2026-07-21T12:30:00.000Z',
+    policePrecinct: 1,
+    policePrecinctBoundaryVersion: '26B',
+    businessImprovementDistrictId: 8,
+    businessImprovementDistrictBoundaryVersion: '2026-04-28'
+  });
+  assert.equal(intersection.current.requests, 1);
+  assert.equal(intersection.data_quality.archive_requests, 1);
 });
 
 function insertDetail(database, srnumber, overrides = {}) {

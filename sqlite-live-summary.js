@@ -95,7 +95,9 @@ function archiveTimeQuality(
   database,
   sql,
   policePrecinct = null,
-  policePrecinctBoundaryVersion = null
+  policePrecinctBoundaryVersion = null,
+  businessImprovementDistrictId = null,
+  businessImprovementDistrictBoundaryVersion = null
 ) {
   if (policePrecinct != null && !columnExists(database, 'live_portal_requests', 'police_precinct')) {
     return {
@@ -114,13 +116,35 @@ function archiveTimeQuality(
       oldest_submitted_at: null
     };
   }
-  const precinctWhere = policePrecinct == null
-    ? ''
-    : `WHERE live.police_precinct=@police_precinct${
+  if (businessImprovementDistrictId != null
+      && !tableExists(database, 'live_request_bid_memberships')) {
+    return {
+      archive_requests: 0,
+      missing_submitted_time: 0,
+      invalid_submitted_time: 0,
+      oldest_submitted_at: null
+    };
+  }
+  const predicates = [];
+  if (policePrecinct != null) {
+    predicates.push(`live.police_precinct=@police_precinct${
       policePrecinctBoundaryVersion == null
         ? ''
         : ' AND live.police_precinct_boundary_version=@police_precinct_boundary_version'
-    }`;
+    }`);
+  }
+  if (businessImprovementDistrictId != null) {
+    predicates.push(`EXISTS (
+      SELECT 1 FROM live_request_bid_memberships AS bid_membership
+      WHERE bid_membership.srnumber=live.srnumber
+        AND bid_membership.bid_id=@business_improvement_district_id${
+          businessImprovementDistrictBoundaryVersion == null
+            ? ''
+            : ' AND bid_membership.boundary_version=@business_improvement_district_boundary_version'
+        }
+    )`);
+  }
+  const scopeWhere = predicates.length ? `WHERE ${predicates.join(' AND ')}` : '';
   const canonical = `LENGTH(submitted_at)=24 AND submitted_at GLOB
     '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'`;
   const statement = database.prepare(`
@@ -133,16 +157,24 @@ function archiveTimeQuality(
       SELECT ${sql.submitted} AS submitted_at
       FROM live_portal_requests AS live
       ${sql.join}
-      ${precinctWhere}
+      ${scopeWhere}
     )
   `);
-  const row = policePrecinct == null
+  const scoped = policePrecinct != null || businessImprovementDistrictId != null;
+  const row = !scoped
     ? statement.get()
     : statement.get({
-      police_precinct: policePrecinct,
-      ...(policePrecinctBoundaryVersion == null
-        ? {}
-        : { police_precinct_boundary_version: policePrecinctBoundaryVersion })
+      ...(policePrecinct == null ? {} : { police_precinct: policePrecinct }),
+      ...(policePrecinctBoundaryVersion == null ? {} : {
+        police_precinct_boundary_version: policePrecinctBoundaryVersion
+      }),
+      ...(businessImprovementDistrictId == null ? {} : {
+        business_improvement_district_id: businessImprovementDistrictId
+      }),
+      ...(businessImprovementDistrictBoundaryVersion == null ? {} : {
+        business_improvement_district_boundary_version:
+          businessImprovementDistrictBoundaryVersion
+      })
     });
   return {
     archive_requests: Number(row.archive_requests || 0),
@@ -152,10 +184,27 @@ function archiveTimeQuality(
   };
 }
 
-function summaryRowsQuery(sql, scopedToPrecinct = false, scopedToBoundaryVersion = false) {
+function summaryRowsQuery(
+  sql,
+  scopedToPrecinct = false,
+  scopedToBoundaryVersion = false,
+  scopedToBusinessImprovementDistrict = false,
+  scopedToBusinessImprovementDistrictBoundaryVersion = false
+) {
   const precinctAnd = scopedToPrecinct ? ' AND live.police_precinct=@police_precinct' : '';
   const boundaryVersionAnd = scopedToBoundaryVersion
     ? ' AND live.police_precinct_boundary_version=@police_precinct_boundary_version'
+    : '';
+  const businessImprovementDistrictAnd = scopedToBusinessImprovementDistrict
+    ? ` AND EXISTS (
+      SELECT 1 FROM live_request_bid_memberships AS bid_membership
+      WHERE bid_membership.srnumber=live.srnumber
+        AND bid_membership.bid_id=@business_improvement_district_id${
+          scopedToBusinessImprovementDistrictBoundaryVersion
+            ? ' AND bid_membership.boundary_version=@business_improvement_district_boundary_version'
+            : ''
+        }
+    )`
     : '';
   const select = `SELECT live.srnumber,live.suffix,
       ${sql.submitted} AS submitted_at,
@@ -172,16 +221,16 @@ function summaryRowsQuery(sql, scopedToPrecinct = false, scopedToBoundaryVersion
   return sql.hasDetails
     ? `SELECT * FROM (
         ${select}
-        WHERE live.submitted_at>=@start AND live.submitted_at<@end${precinctAnd}${boundaryVersionAnd}
+        WHERE live.submitted_at>=@start AND live.submitted_at<@end${precinctAnd}${boundaryVersionAnd}${businessImprovementDistrictAnd}
         UNION ALL
         ${select}
         WHERE (live.submitted_at IS NULL OR TRIM(live.submitted_at)='')
           AND details.date_reported>=@start AND details.date_reported<@end
-          ${precinctAnd}${boundaryVersionAnd}
+          ${precinctAnd}${boundaryVersionAnd}${businessImprovementDistrictAnd}
       ) ORDER BY suffix`
     : `${select}
        WHERE live.submitted_at>=@start AND live.submitted_at<@end
-       ${precinctAnd}${boundaryVersionAnd}
+       ${precinctAnd}${boundaryVersionAnd}${businessImprovementDistrictAnd}
        ORDER BY live.suffix`;
 }
 
@@ -191,21 +240,44 @@ function summaryRows(
   start,
   end,
   policePrecinct = null,
-  policePrecinctBoundaryVersion = null
+  policePrecinctBoundaryVersion = null,
+  businessImprovementDistrictId = null,
+  businessImprovementDistrictBoundaryVersion = null
 ) {
-  const scoped = policePrecinct != null;
-  if (scoped && !columnExists(database, 'live_portal_requests', 'police_precinct')) return [];
+  const scopedToPrecinct = policePrecinct != null;
+  if (scopedToPrecinct && !columnExists(database, 'live_portal_requests', 'police_precinct')) return [];
   const scopedToBoundaryVersion = policePrecinctBoundaryVersion != null;
   if (scopedToBoundaryVersion
       && !columnExists(database, 'live_portal_requests', 'police_precinct_boundary_version')) return [];
-  const statement = database.prepare(summaryRowsQuery(sql, scoped, scopedToBoundaryVersion));
+  const scopedToBusinessImprovementDistrict = businessImprovementDistrictId != null;
+  if (scopedToBusinessImprovementDistrict
+      && !tableExists(database, 'live_request_bid_memberships')) return [];
+  const scopedToBusinessImprovementDistrictBoundaryVersion =
+    businessImprovementDistrictBoundaryVersion != null;
+  const statement = database.prepare(summaryRowsQuery(
+    sql,
+    scopedToPrecinct,
+    scopedToBoundaryVersion,
+    scopedToBusinessImprovementDistrict,
+    scopedToBusinessImprovementDistrictBoundaryVersion
+  ));
+  const scoped = scopedToPrecinct || scopedToBusinessImprovementDistrict;
   const rows = scoped
     ? statement.all({
       start,
       end,
-      police_precinct: policePrecinct,
+      ...(scopedToPrecinct ? { police_precinct: policePrecinct } : {}),
       ...(scopedToBoundaryVersion
         ? { police_precinct_boundary_version: policePrecinctBoundaryVersion }
+        : {}),
+      ...(scopedToBusinessImprovementDistrict
+        ? { business_improvement_district_id: businessImprovementDistrictId }
+        : {}),
+      ...(scopedToBusinessImprovementDistrictBoundaryVersion
+        ? {
+            business_improvement_district_boundary_version:
+              businessImprovementDistrictBoundaryVersion
+          }
         : {})
     })
     : statement.all({ start, end });
@@ -242,7 +314,9 @@ function loadSqliteLiveSummary(database, {
   staleAfterSeconds = DEFAULT_STALE_AFTER_SECONDS,
   archiveQuality = null,
   policePrecinct = null,
-  policePrecinctBoundaryVersion = null
+  policePrecinctBoundaryVersion = null,
+  businessImprovementDistrictId = null,
+  businessImprovementDistrictBoundaryVersion = null
 } = {}) {
   if (!database || typeof database.prepare !== 'function') {
     throw new TypeError('A readable SQLite database is required');
@@ -269,6 +343,22 @@ function loadSqliteLiveSummary(database, {
     : String(policePrecinctBoundaryVersion).trim();
   if (boundaryVersion != null && precinct == null) {
     throw new TypeError('policePrecinctBoundaryVersion requires policePrecinct');
+  }
+  const bidId = businessImprovementDistrictId == null
+    || businessImprovementDistrictId === ''
+    ? null
+    : Number(businessImprovementDistrictId);
+  if (bidId != null && (!Number.isInteger(bidId) || bidId <= 0)) {
+    throw new TypeError('businessImprovementDistrictId must be a positive integer');
+  }
+  const bidBoundaryVersion = businessImprovementDistrictBoundaryVersion == null
+    || String(businessImprovementDistrictBoundaryVersion).trim() === ''
+    ? null
+    : String(businessImprovementDistrictBoundaryVersion).trim();
+  if (bidBoundaryVersion != null && bidId == null) {
+    throw new TypeError(
+      'businessImprovementDistrictBoundaryVersion requires businessImprovementDistrictId'
+    );
   }
 
   if (!tableExists(database, 'live_portal_requests')) {
@@ -297,15 +387,32 @@ function loadSqliteLiveSummary(database, {
 
   const hasDetails = tableExists(database, 'portal_requests');
   const sql = detailSql(hasDetails);
-  const quality = (precinct == null ? archiveQuality : null)
-    || archiveTimeQuality(database, sql, precinct, boundaryVersion);
+  const scoped = precinct != null || bidId != null;
+  const quality = (!scoped ? archiveQuality : null)
+    || archiveTimeQuality(
+      database,
+      sql,
+      precinct,
+      boundaryVersion,
+      bidId,
+      bidBoundaryVersion
+    );
   const lookbackMinutes = Math.max(
     windowMinutes * 2,
     effectiveAuditDelay + maturityBufferMinutes + windowMinutes
   );
   const start = new Date(resolvedAsOf.getTime() - lookbackMinutes * 60_000).toISOString();
   const end = resolvedAsOf.toISOString();
-  const rows = summaryRows(database, sql, start, end, precinct, boundaryVersion);
+  const rows = summaryRows(
+    database,
+    sql,
+    start,
+    end,
+    precinct,
+    boundaryVersion,
+    bidId,
+    bidBoundaryVersion
+  );
   const summary = buildLiveSummary(rows, {
     asOf: resolvedAsOf,
     windowMinutes,
@@ -319,7 +426,9 @@ function loadSqliteLiveSummary(database, {
     ...summary,
     scope: {
       police_precinct: precinct,
-      police_precinct_boundary_version: boundaryVersion
+      police_precinct_boundary_version: boundaryVersion,
+      bid_id: bidId,
+      business_improvement_district_boundary_version: bidBoundaryVersion
     },
     as_of_source: explicitAsOf ? 'explicit' : collectorAnchor ? 'collector' : 'clock',
     capture,

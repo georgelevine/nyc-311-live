@@ -51,6 +51,57 @@ const MIGRATIONS = Object.freeze([
       ON police_precincts(boundary_version,min_longitude,max_longitude,min_latitude,max_latitude);
     CREATE INDEX IF NOT EXISTS live_portal_requests_police_precinct_idx
       ON live_portal_requests(police_precinct,suffix DESC);`
+  }),
+  Object.freeze({
+    version: 3,
+    name: 'add_business_improvement_district_geography',
+    sql: `CREATE TABLE IF NOT EXISTS business_improvement_district_boundary_versions (
+      version TEXT PRIMARY KEY,
+      source_url TEXT NOT NULL,
+      source_sha256 TEXT NOT NULL UNIQUE CHECK(length(source_sha256)=64),
+      source_date TEXT,
+      imported_at TEXT NOT NULL,
+      feature_count INTEGER NOT NULL CHECK(feature_count>0),
+      active INTEGER NOT NULL DEFAULT 0 CHECK(active IN (0,1))
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS business_improvement_district_one_active_version_idx
+      ON business_improvement_district_boundary_versions(active) WHERE active=1;
+
+    CREATE TABLE IF NOT EXISTS business_improvement_districts (
+      boundary_version TEXT NOT NULL,
+      bid_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      borough_code INTEGER NOT NULL CHECK(borough_code BETWEEN 1 AND 5),
+      borough_name TEXT NOT NULL,
+      geometry_json TEXT NOT NULL CHECK(json_valid(geometry_json)),
+      min_longitude REAL NOT NULL,
+      min_latitude REAL NOT NULL,
+      max_longitude REAL NOT NULL,
+      max_latitude REAL NOT NULL,
+      PRIMARY KEY(boundary_version,bid_id),
+      FOREIGN KEY(boundary_version)
+        REFERENCES business_improvement_district_boundary_versions(version) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS live_request_bid_memberships (
+      srnumber TEXT NOT NULL,
+      boundary_version TEXT NOT NULL,
+      bid_id INTEGER NOT NULL,
+      matched_at TEXT NOT NULL,
+      PRIMARY KEY(srnumber,boundary_version,bid_id),
+      FOREIGN KEY(srnumber)
+        REFERENCES live_portal_requests(srnumber) ON DELETE CASCADE,
+      FOREIGN KEY(boundary_version,bid_id)
+        REFERENCES business_improvement_districts(boundary_version,bid_id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS business_improvement_district_bbox_idx
+      ON business_improvement_districts(
+        boundary_version,min_longitude,max_longitude,min_latitude,max_latitude
+      );
+    CREATE INDEX IF NOT EXISTS live_request_bid_memberships_district_idx
+      ON live_request_bid_memberships(boundary_version,bid_id,srnumber);`
   })
 ]);
 
@@ -111,6 +162,18 @@ function addPolicePrecinctColumns(database) {
     ['police_precinct', 'INTEGER'],
     ['police_precinct_boundary_version', 'TEXT'],
     ['police_precinct_matched_at', 'TEXT']
+  ];
+  for (const [name, type] of columns) {
+    if (!columnExists(database, 'live_portal_requests', name)) {
+      database.exec(`ALTER TABLE live_portal_requests ADD COLUMN ${name} ${type}`);
+    }
+  }
+}
+
+function addBusinessImprovementDistrictColumns(database) {
+  const columns = [
+    ['business_improvement_district_boundary_version', 'TEXT'],
+    ['business_improvement_district_matched_at', 'TEXT']
   ];
   for (const [name, type] of columns) {
     if (!columnExists(database, 'live_portal_requests', name)) {
@@ -219,6 +282,7 @@ function applyMigrations(database, appliedAt = new Date().toISOString()) {
       // SQLite does not support ADD COLUMN IF NOT EXISTS. Keep this conditional
       // so databases already initialized by the live collector migrate cleanly.
       if (migration.version === 2) addPolicePrecinctColumns(database);
+      if (migration.version === 3) addBusinessImprovementDistrictColumns(database);
       database.exec(migration.sql);
       database.prepare(`
         INSERT INTO schema_migrations (version, name, checksum, applied_at)

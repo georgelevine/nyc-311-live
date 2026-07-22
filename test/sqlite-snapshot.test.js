@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { finalizeDatabase } = require('../sqlite-finalization');
+const { applyMigrations, finalizeDatabase } = require('../sqlite-finalization');
 const { verifySnapshot } = require('../sqlite-snapshot');
 const { createArchiveFixture } = require('../test-support/archive-fixture');
 const { DatabaseSync } = require('node:sqlite');
@@ -35,13 +35,16 @@ test('verifies the finalized file, digest, schema version, and table manifest', 
   });
   assert.equal(result.ok, true);
   assert.equal(result.application_id, finalized.backup.manifest.application_id);
-  assert.equal(result.user_version, 2);
+  assert.equal(result.user_version, 3);
   assert.equal(finalized.backup.manifest.journal_mode, 'delete');
   assert.equal(fs.existsSync(`${backup}-wal`), false);
   assert.equal(fs.existsSync(`${backup}-shm`), false);
   assert.deepEqual(result.tables, finalized.backup.manifest.tables);
   assert.deepEqual(result.tables.police_precinct_boundary_versions, { count: 0 });
   assert.deepEqual(result.tables.police_precincts, { count: 0 });
+  assert.deepEqual(result.tables.business_improvement_district_boundary_versions, { count: 0 });
+  assert.deepEqual(result.tables.business_improvement_districts, { count: 0 });
+  assert.deepEqual(result.tables.live_request_bid_memberships, { count: 0 });
 
   fs.chmodSync(directory, 0o500);
   try {
@@ -200,5 +203,44 @@ test('rejects a precinct polygon table without its boundary-version relationship
   await assert.rejects(
     verifySnapshot({ databasePath: snapshot.backup, manifestPath: snapshot.manifestPath }),
     /police_precincts missing FOREIGN KEY \(boundary_version\) REFERENCES police_precinct_boundary_versions\(version\) ON DELETE CASCADE/
+  );
+});
+
+test('rejects a BID membership lookup index with the wrong key order', async () => {
+  const snapshot = await finalizedMutatedSnapshot('nyc311-snapshot-bid-index-', database => {
+    applyMigrations(database);
+    database.exec(`
+      DROP INDEX live_request_bid_memberships_district_idx;
+      CREATE INDEX live_request_bid_memberships_district_idx
+        ON live_request_bid_memberships(bid_id,boundary_version,srnumber);
+    `);
+  });
+  await assert.rejects(
+    verifySnapshot({ databasePath: snapshot.backup, manifestPath: snapshot.manifestPath }),
+    /live_request_bid_memberships_district_idx keys expected .*boundary_version.*bid_id.*found .*bid_id.*boundary_version/
+  );
+});
+
+test('rejects a BID membership table without its request relationship', async () => {
+  const snapshot = await finalizedMutatedSnapshot('nyc311-snapshot-bid-foreign-key-', database => {
+    applyMigrations(database);
+    database.exec(`
+      DROP TABLE live_request_bid_memberships;
+      CREATE TABLE live_request_bid_memberships (
+        srnumber TEXT NOT NULL,
+        boundary_version TEXT NOT NULL,
+        bid_id INTEGER NOT NULL,
+        matched_at TEXT NOT NULL,
+        PRIMARY KEY(srnumber,boundary_version,bid_id),
+        FOREIGN KEY(boundary_version,bid_id)
+          REFERENCES business_improvement_districts(boundary_version,bid_id) ON DELETE CASCADE
+      );
+      CREATE INDEX live_request_bid_memberships_district_idx
+        ON live_request_bid_memberships(boundary_version,bid_id,srnumber);
+    `);
+  });
+  await assert.rejects(
+    verifySnapshot({ databasePath: snapshot.backup, manifestPath: snapshot.manifestPath }),
+    /live_request_bid_memberships missing FOREIGN KEY \(srnumber\) REFERENCES live_portal_requests\(srnumber\) ON DELETE CASCADE/
   );
 });

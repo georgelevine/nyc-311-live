@@ -330,7 +330,7 @@ test('finalizes, repairs only map-proven rows, and creates a verified backup man
     crypto.createHash('sha256').update(fs.readFileSync(backupPath)).digest('hex')
   );
   assert.equal(manifest.application_id, APPLICATION_ID);
-  assert.equal(manifest.user_version, 2);
+  assert.equal(manifest.user_version, 3);
   assert.equal(manifest.health.ok, true);
   assert.deepEqual(manifest.tables.live_portal_requests, {
     count: 3,
@@ -355,7 +355,7 @@ test('finalizes, repairs only map-proven rows, and creates a verified backup man
   const backup = inspectDatabase(backupPath);
   try {
     assert.equal(backup.prepare('PRAGMA application_id').get().application_id, APPLICATION_ID);
-    assert.equal(backup.prepare('PRAGMA user_version').get().user_version, 2);
+    assert.equal(backup.prepare('PRAGMA user_version').get().user_version, 3);
     const migrations = backup.prepare(
       'SELECT version, name, checksum, applied_at FROM schema_migrations ORDER BY version'
     ).all();
@@ -368,6 +368,10 @@ test('finalizes, repairs only map-proven rows, and creates a verified backup man
     assert.equal(
       migrationChecksum(MIGRATIONS[0]),
       '1e32eaa262dfe06fdc810ee9a2497db71c9820222ce3f702be10793ebf67a3d8'
+    );
+    assert.equal(
+      migrationChecksum(MIGRATIONS[1]),
+      'e34eeecc3084e6e677a26e31dc038ba321c7ce1cd384476ede798890abbacece'
     );
     assert.deepEqual(
       backup.prepare('PRAGMA table_info(live_portal_requests)').all()
@@ -421,7 +425,7 @@ test('finalizes, repairs only map-proven rows, and creates a verified backup man
     backupPath: secondBackupPath,
     now: new Date('2026-07-20T22:16:30.000Z')
   });
-  assert.equal(second.migrations_before.pending.length, 2);
+  assert.equal(second.migrations_before.pending.length, 3);
   assert.equal(second.planned.map_seen_repairs, 1);
   assert.equal(second.planned.submitted_at_normalizations, 1);
   assert.equal(second.changes.map_seen_repaired, 1);
@@ -442,7 +446,7 @@ for (const mode of ['dryRun', 'verifyOnly']) {
     assert.equal(result.mode, mode === 'dryRun' ? 'dry-run' : 'verify-only');
     assert.equal(result.planned.map_seen_repairs, 1);
     assert.equal(result.planned.submitted_at_normalizations, 1);
-    assert.equal(result.migrations_before.pending.length, 2);
+    assert.equal(result.migrations_before.pending.length, 3);
     assert.equal(result.backup, null);
     assert.equal(fs.existsSync(backupPath), false);
     assert.equal(fs.existsSync(`${backupPath}.manifest.json`), false);
@@ -506,9 +510,9 @@ test('precinct migration tolerates collector-created columns and remains idempot
       ALTER TABLE live_portal_requests ADD COLUMN police_precinct_matched_at TEXT;
     `);
     const first = applyMigrations(database, NOW.toISOString());
-    assert.equal(first.user_version, 2);
+    assert.equal(first.user_version, 3);
     assert.equal(first.pending.length, 0);
-    assert.equal(first.applied.length, 2);
+    assert.equal(first.applied.length, 3);
     assert.equal(
       database.prepare(`
         SELECT COUNT(*) AS count FROM pragma_table_info('live_portal_requests')
@@ -521,9 +525,44 @@ test('precinct migration tolerates collector-created columns and remains idempot
       1
     );
     const second = applyMigrations(database, '2026-07-21T00:00:00.000Z');
-    assert.equal(second.user_version, 2);
+    assert.equal(second.user_version, 3);
     assert.equal(second.pending.length, 0);
-    assert.equal(second.applied.length, 2);
+    assert.equal(second.applied.length, 3);
+  } finally {
+    database.close();
+  }
+});
+
+test('BID migration tolerates collector-created columns and remains idempotent', t => {
+  const fixture = createFixture(t);
+  const database = new DatabaseSync(fixture.databasePath);
+  try {
+    database.exec(`
+      ALTER TABLE live_portal_requests
+        ADD COLUMN business_improvement_district_boundary_version TEXT;
+      ALTER TABLE live_portal_requests
+        ADD COLUMN business_improvement_district_matched_at TEXT;
+    `);
+    const first = applyMigrations(database, NOW.toISOString());
+    assert.equal(first.user_version, 3);
+    assert.equal(first.pending.length, 0);
+    assert.equal(first.applied.length, 3);
+    assert.equal(database.prepare(`
+      SELECT COUNT(*) AS count FROM pragma_table_info('live_portal_requests')
+      WHERE name LIKE 'business_improvement_district%'
+    `).get().count, 2);
+    assert.equal(database.prepare(`
+      SELECT COUNT(*) AS count FROM sqlite_master
+      WHERE type='table' AND name IN (
+        'business_improvement_district_boundary_versions',
+        'business_improvement_districts',
+        'live_request_bid_memberships'
+      )
+    `).get().count, 3);
+    const second = applyMigrations(database, '2026-07-21T00:00:00.000Z');
+    assert.equal(second.user_version, 3);
+    assert.equal(second.pending.length, 0);
+    assert.equal(second.applied.length, 3);
   } finally {
     database.close();
   }

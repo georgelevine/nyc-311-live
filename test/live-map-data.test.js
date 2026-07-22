@@ -26,6 +26,8 @@ test('projects the exact lightweight map record contract across database types',
     last_seen_at: new Date('2026-07-20T12:05:00.000Z'),
     followup_state: 'open',
     next_check_at: new Date('2026-07-21T12:05:00.000Z'),
+    business_improvement_district_ids: '[10,8,10]',
+    business_improvement_district_boundary_version: '2026-04-28',
     finalized_at: null
   });
 
@@ -39,6 +41,8 @@ test('projects the exact lightweight map record contract across database types',
     incident_zip: null,
     police_precinct: null,
     police_precinct_boundary_version: null,
+    business_improvement_district_ids: [8, 10],
+    business_improvement_district_boundary_version: '2026-04-28',
     latitude: 40.7128,
     longitude: -74.006,
     submitted_at: '2026-07-20T12:00:00.000Z',

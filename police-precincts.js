@@ -84,7 +84,7 @@ function geometryBounds(coordinates) {
     for (const child of value) visit(child);
   }
   visit(coordinates);
-  if (!positions) throw new Error('Precinct geometry has no valid coordinate positions');
+  if (!positions) throw new Error('Geometry has no valid coordinate positions');
   return bounds;
 }
 

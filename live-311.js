@@ -22,6 +22,10 @@ const {
   ensureSqlitePolicePrecinctSchema,
   loadActivePolicePrecinctMatcher
 } = require('./police-precincts');
+const {
+  ensureSqliteBusinessImprovementDistrictSchema,
+  loadActiveBusinessImprovementDistrictMatcher
+} = require('./business-improvement-districts');
 
 const PORTAL_URL = 'https://portal.311.nyc.gov/entity-pin-fetch-service-requests/';
 const POLL_INTERVAL_SECONDS = Math.max(5, Number(process.env.POLL_INTERVAL_SECONDS || 15));
@@ -41,6 +45,7 @@ db.exec(`
   PRAGMA journal_mode = WAL;
   PRAGMA synchronous = ${SQLITE_SYNCHRONOUS};
   PRAGMA busy_timeout = 3000;
+  PRAGMA foreign_keys = ON;
 
   CREATE TABLE IF NOT EXISTS live_portal_requests (
     srnumber TEXT PRIMARY KEY,
@@ -53,6 +58,8 @@ db.exec(`
     police_precinct INTEGER,
     police_precinct_boundary_version TEXT,
     police_precinct_matched_at TEXT,
+    business_improvement_district_boundary_version TEXT,
+    business_improvement_district_matched_at TEXT,
     latitude REAL,
     longitude REAL,
     submitted_at TEXT,
@@ -134,21 +141,26 @@ ensureSqliteRequestGeography(db);
 applyMigrations(db);
 ensureSqlitePolicePrecinctSchema(db);
 const policePrecinctMatcher = loadActivePolicePrecinctMatcher(db);
+ensureSqliteBusinessImprovementDistrictSchema(db);
+const businessImprovementDistrictMatcher = loadActiveBusinessImprovementDistrictMatcher(db);
 
 const closureTracker = createClosureTracker(db);
 
 const getLiveRequest = db.prepare(`
   SELECT srnumber, suffix, portal_id, status, first_seen_at, last_seen_at,
-         latitude,longitude,police_precinct_boundary_version
+         latitude,longitude,police_precinct_boundary_version,
+         business_improvement_district_boundary_version
   FROM live_portal_requests WHERE srnumber = ?
 `);
 const upsertRequest = db.prepare(`
   INSERT INTO live_portal_requests (
     srnumber, suffix, portal_id, problem, address, borough, incident_zip,
     police_precinct, police_precinct_boundary_version, police_precinct_matched_at,
+    business_improvement_district_boundary_version,
+    business_improvement_district_matched_at,
     latitude, longitude,
     submitted_at, status, portal_url, first_seen_at, last_seen_at, raw_json
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   ON CONFLICT(srnumber) DO UPDATE SET
     portal_id = COALESCE(excluded.portal_id, live_portal_requests.portal_id),
     problem = COALESCE(excluded.problem, live_portal_requests.problem),
@@ -166,6 +178,14 @@ const upsertRequest = db.prepare(`
       excluded.police_precinct_matched_at,
       live_portal_requests.police_precinct_matched_at
     ),
+    business_improvement_district_boundary_version = COALESCE(
+      excluded.business_improvement_district_boundary_version,
+      live_portal_requests.business_improvement_district_boundary_version
+    ),
+    business_improvement_district_matched_at = COALESCE(
+      excluded.business_improvement_district_matched_at,
+      live_portal_requests.business_improvement_district_matched_at
+    ),
     latitude = COALESCE(excluded.latitude, live_portal_requests.latitude),
     longitude = COALESCE(excluded.longitude, live_portal_requests.longitude),
     submitted_at = COALESCE(excluded.submitted_at, live_portal_requests.submitted_at),
@@ -173,6 +193,13 @@ const upsertRequest = db.prepare(`
     portal_url = COALESCE(excluded.portal_url, live_portal_requests.portal_url),
     last_seen_at = excluded.last_seen_at,
     raw_json = excluded.raw_json
+`);
+const clearBusinessImprovementDistrictMemberships = db.prepare(`
+  DELETE FROM live_request_bid_memberships WHERE srnumber = ?
+`);
+const insertBusinessImprovementDistrictMembership = db.prepare(`
+  INSERT INTO live_request_bid_memberships(srnumber,boundary_version,bid_id,matched_at)
+  VALUES (?, ?, ?, ?)
 `);
 const updateLiveStatus = db.prepare(`
   UPDATE live_portal_requests SET status = ? WHERE srnumber = ?
@@ -865,6 +892,16 @@ function savePoll(records) {
       const precinctMatch = precinctAttempted
         ? policePrecinctMatcher.match(latitude, longitude)
         : null;
+      const bidAttempted = Boolean(
+        businessImprovementDistrictMatcher && latitude != null && longitude != null
+        && (!existing
+          || existing.business_improvement_district_boundary_version
+            !== businessImprovementDistrictMatcher.version
+          || coordinatesChanged)
+      );
+      const bidMatch = bidAttempted
+        ? businessImprovementDistrictMatcher.match(latitude, longitude)
+        : null;
       if (!existing) newMapRecords += 1;
       const statusChanged = data.status
         && (!existing || !statusesMatch(existing.status, data.status));
@@ -898,6 +935,8 @@ function savePoll(records) {
         precinctMatch ? precinctMatch.precinctNumber : null,
         precinctAttempted ? policePrecinctMatcher.version : null,
         precinctAttempted ? nowIso : null,
+        bidAttempted ? businessImprovementDistrictMatcher.version : null,
+        bidAttempted ? nowIso : null,
         latitude,
         longitude,
         normalizePortalTimestamp(data.submitteddate),
@@ -907,6 +946,17 @@ function savePoll(records) {
         nowIso,
         JSON.stringify(pin)
       );
+      if (bidAttempted) {
+        clearBusinessImprovementDistrictMemberships.run(number);
+        for (const district of bidMatch && bidMatch.districts || []) {
+          insertBusinessImprovementDistrictMembership.run(
+            number,
+            businessImprovementDistrictMatcher.version,
+            district.bidId,
+            nowIso
+          );
+        }
+      }
       upsertDetailQueue.run(number, pin.id || null, nowIso, nowIso);
       saveMapLedger.run(suffix, number, nowIso);
       markNumberSeenOnMap.run(nowIso, suffix);

@@ -108,6 +108,7 @@ button, input, select { font: inherit; }
 }
 .toolbar input { min-width: 0; padding: 0 10px 0 34px; font-size: 12px; }
 .toolbar select { padding: 0 8px; font-size: 12px; }
+#bid-filter { grid-column: 1 / -1; }
 .toolbar input:focus, .toolbar select:focus { border-color: #78aaf0; box-shadow: 0 0 0 3px rgba(23,105,224,.1); }
 
 .feed-heading { position: relative; display: flex; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 10px; overflow: hidden; padding: 5px 20px 9px; border-bottom: 1px solid var(--line); }

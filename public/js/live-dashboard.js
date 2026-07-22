@@ -29,6 +29,7 @@
   const search = document.getElementById('request-search');
   const statusFilter = document.getElementById('status-filter');
   const precinctFilter = document.getElementById('precinct-filter');
+  const bidFilter = document.getElementById('bid-filter');
   const connection = document.querySelector('.live-state');
   const connectionLabel = document.getElementById('connection-label');
   const pollInterval = document.getElementById('poll-interval');
@@ -84,6 +85,7 @@
   let archiveSearchState = 'idle';
   let archiveSearchSequence = 0;
   let archiveSearchTimer = null;
+  let bidById = new Map();
 
   const esc = value => String(value || '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
   const isClosed = status => /\b(?:closed|resolved|cancel(?:led|ed)?)\b/i.test(status || '');
@@ -135,6 +137,8 @@
   const recordSignature = record => JSON.stringify([
     record.srnumber, record.status, record.problem, record.address,
     record.police_precinct, record.police_precinct_boundary_version,
+    record.business_improvement_district_ids,
+    record.business_improvement_district_boundary_version,
     record.latitude, record.longitude, record.submitted_at, record.portal_url,
     record.problem_details, record.additional_details, record.next_update,
     record.date_reported, record.updated_on, record.date_closed, record.details_fetched_at,
@@ -217,12 +221,21 @@
     const exact = exactSrnumberQuery();
     const status = statusFilter.value;
     const precinct = precinctFilter.value;
+    const bidId = bidFilter.value;
     if (status && record.status !== status) return false;
     if (precinct && Number(record.police_precinct) !== Number(precinct)) return false;
+    if (bidId && !(Array.isArray(record.business_improvement_district_ids)
+        && record.business_improvement_district_ids.some(id => Number(id) === Number(bidId)))) {
+      return false;
+    }
     if (!query) return true;
     if (exact && record.srnumber === exact) return true;
+    const bidNames = (Array.isArray(record.business_improvement_district_ids)
+      ? record.business_improvement_district_ids
+      : []).map(id => bidById.get(String(id)) && bidById.get(String(id)).name);
     return [record.srnumber, record.problem, record.problem_details,
       record.additional_details, record.address, record.status,
+      ...bidNames,
       ...missingFieldLabels(record.missing_public_fields)]
       .some(value => String(value || '').toLowerCase().includes(query));
   }
@@ -419,6 +432,16 @@
       precinctValue.textContent = '';
       precinctRow.classList.add('hidden');
     }
+    const bidRow = document.getElementById('detail-bid-row');
+    const bidValue = document.getElementById('detail-bid');
+    const bidNames = (Array.isArray(record.business_improvement_district_ids)
+      ? record.business_improvement_district_ids
+      : []).map(id => {
+      const district = bidById.get(String(id));
+      return district ? district.name : `BID ${id}`;
+    });
+    bidValue.textContent = bidNames.join(' · ');
+    bidRow.classList.toggle('hidden', bidNames.length === 0);
     document.getElementById('detail-link').href = record.portal_url || '#';
     setDetailBadge(record.public_details_state === 'pending' ? 'pending' : null);
     const archiveRow = document.getElementById('detail-archive-row');
@@ -696,6 +719,7 @@
   function scopedUrl(pathname, parameters = {}) {
     const params = new URLSearchParams(parameters);
     if (precinctFilter.value) params.set('police_precinct', precinctFilter.value);
+    if (bidFilter.value) params.set('bid_id', bidFilter.value);
     const query = params.toString();
     return query ? `${pathname}?${query}` : pathname;
   }
@@ -764,6 +788,30 @@
     } catch (error) {
       precinctFilter.innerHTML = '<option value="">Precinct filter unavailable</option>';
       precinctFilter.disabled = true;
+      console.warn(error);
+    }
+  }
+
+  async function loadBusinessImprovementDistricts() {
+    try {
+      const payload = await fetchJson(
+        '/api/business-improvement-districts',
+        'Business improvement district service'
+      );
+      const districts = Array.isArray(payload.districts) ? payload.districts : [];
+      bidById = new Map(districts.map(district => [String(district.bid_id), district]));
+      bidFilter.innerHTML = '<option value="">All business improvement districts</option>'
+        + districts.map(district => {
+          const suffix = district.borough_name ? ` — ${district.borough_name}` : '';
+          return `<option value="${Number(district.bid_id)}">${esc(district.name)}${esc(suffix)}</option>`;
+        }).join('');
+      bidFilter.disabled = districts.length === 0;
+      renderFeed();
+      renderMap();
+      if (selectedNumber) renderDetail(findRecord(selectedNumber));
+    } catch (error) {
+      bidFilter.innerHTML = '<option value="">BID filter unavailable</option>';
+      bidFilter.disabled = true;
       console.warn(error);
     }
   }
@@ -989,8 +1037,13 @@
       const captureState = String(summary.capture.state || 'starting');
 
       const selectedPrecinct = precinctFilter.value;
-      summaryElements.eyebrow.textContent = selectedPrecinct
-        ? `${precinctLabel(selectedPrecinct)} ${captureState === 'fresh' ? 'right now' : 'last captured'}`
+      const selectedBid = bidFilter.value && bidById.get(String(bidFilter.value));
+      const scopeLabels = [
+        selectedBid && selectedBid.name,
+        selectedPrecinct && precinctLabel(selectedPrecinct)
+      ].filter(Boolean);
+      summaryElements.eyebrow.textContent = scopeLabels.length
+        ? `${scopeLabels.join(' · ')} ${captureState === 'fresh' ? 'right now' : 'last captured'}`
         : captureState === 'fresh' ? 'NYC right now' : 'Last captured window';
       summaryElements.title.textContent = `Last ${summaryWindowLabel(summary.window_minutes)}`;
       summaryElements.updated.textContent = asOf && !Number.isNaN(asOf.getTime())
@@ -1102,7 +1155,7 @@
     if (!card) return;
     if (window.matchMedia('(max-width: 720px)').matches) {
       setMobileView('map');
-      window.setTimeout(() => selectRequest(card.dataset.number), 0);
+      window.requestAnimationFrame(() => selectRequest(card.dataset.number));
     } else {
       selectRequest(card.dataset.number);
     }
@@ -1113,7 +1166,7 @@
     if (!card) return;
     if (window.matchMedia('(max-width: 720px)').matches) {
       setMobileView('map');
-      window.setTimeout(() => selectRequest(card.dataset.number), 0);
+      window.requestAnimationFrame(() => selectRequest(card.dataset.number));
     } else {
       selectRequest(card.dataset.number);
     }
@@ -1124,7 +1177,7 @@
   });
   search.addEventListener('input', scheduleArchiveSearch);
   statusFilter.addEventListener('change', () => { renderFeed({ resetScroll: true }); renderMap(); });
-  precinctFilter.addEventListener('change', () => {
+  function handleGeographyFilterChange() {
     lastGoodSummary = null;
     highestObservedSuffix = null;
     detailLoadSequence += 1;
@@ -1141,7 +1194,9 @@
     renderMap();
     refresh({ force: true });
     scheduleArchiveSearch();
-  });
+  }
+  precinctFilter.addEventListener('change', handleGeographyFilterChange);
+  bidFilter.addEventListener('change', handleGeographyFilterChange);
   mapScopeControl.addEventListener('click', event => {
     const button = event.target.closest('button[data-map-scope]');
     if (!button || !mapScopeControl.contains(button)) return;
@@ -1182,6 +1237,7 @@
   });
 
   loadPolicePrecincts();
+  loadBusinessImprovementDistricts();
   refresh();
   window.setInterval(refresh, 5000);
   window.setInterval(() => {

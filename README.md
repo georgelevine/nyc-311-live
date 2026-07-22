@@ -10,6 +10,8 @@ closure, and displays the archive in a macOS dashboard with a live map.
 - Public request number, status, problem, address, and Portal timestamps
 - Portal-provided coordinates when they are available
 - A coordinate-derived NYPD precinct and the exact DCP boundary release used
+- Zero or more coordinate-derived Business Improvement District memberships
+  and the exact NYC Maps boundary snapshot used
 - Status history, scheduled follow-ups, and closure snapshots
 - Audit-only requests that do not appear in the Portal's map feed
 
@@ -39,6 +41,7 @@ npm run desktop:package
 
 - `npm run live:monitor` — run the local Portal collector
 - `npm run precincts:import` — install the pinned official precinct boundaries and backfill coordinates
+- `npm run bids:import` — install the pinned official BID polygons and backfill memberships
 - `npm run db:verify` — verify the SQLite archive without changing it
 - `npm run db:finalize` — create a verified migration-ready SQLite backup
 - `npm run db:backup` — create a non-mutating verified routine SQLite backup
@@ -72,6 +75,10 @@ type and borough distributions, and detail/map-pin coverage.
 `police_precinct=NUMBER` to `/api/live-dashboard`, `/api/live-map`, or
 `/api/live-summary` to scope those results to one precinct.
 
+`GET /api/business-improvement-districts` lists the active BID release. Add
+`bid_id=NUMBER` to the same live endpoints to scope results to a BID. Precinct
+and BID parameters may be combined; their intersection is returned.
+
 ## Data-source note
 
 Coordinates are stored only when supplied by the NYC311 Portal. Audit-recovered
@@ -82,6 +89,17 @@ of City Planning [police-precinct boundary dataset](https://www.nyc.gov/content/
 the polygons live in related tables while the matched precinct and boundary
 version live on each request.
 
+Business Improvement Districts are derived from the official NYC Maps
+[Business Improvement District layer](https://www.arcgis.com/home/item.html?id=423ffb8f85e643e98c386601189523cb).
+The imported GeoJSON bytes and SHA-256 are pinned because the ArcGIS endpoint is
+mutable. BID polygons can overlap, so memberships live in a related table and a
+request may correctly belong to multiple BIDs. A current boundary version and
+match timestamp with no membership means the coordinate was checked and lies
+outside every BID.
+
 The collector loads the active boundary release at startup. For a boundary
 update, stop the collector, run `npm run precincts:import`, and then restart the
 collector so newly arriving requests use the activated release.
+
+The BID matcher is also loaded at collector startup. Stop the collector, run
+`npm run bids:import`, and restart it when installing a new pinned BID release.

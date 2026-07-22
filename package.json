@@ -12,6 +12,7 @@
     "archive:scan": "node archive-311.js",
     "live:monitor": "node live-311.js",
     "precincts:import": "node import-police-precincts.js",
+    "bids:import": "node import-business-improvement-districts.js",
     "db:finalize": "node finalize-sqlite.js",
     "db:verify": "node finalize-sqlite.js --verify-only",
     "db:backup": "node backup-sqlite.js",
