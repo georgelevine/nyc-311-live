@@ -21,6 +21,12 @@ const { originMatchesHost } = require('./request-security');
 const { normalizePortalTimestamp } = require('./portal-timestamp');
 const { loadSqliteLiveSummary } = require('./sqlite-live-summary');
 const { readStoredPortalDetail } = require('./stored-portal-detail');
+const {
+  BoundaryLookupError,
+  loadActiveBusinessImprovementDistrictFeature,
+  loadActivePolicePrecinctFeature,
+  strictPositiveId
+} = require('./geography-boundaries');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -853,6 +859,66 @@ app.get('/api/business-improvement-districts', (req, res) => {
   } finally {
     if (database) database.close();
   }
+});
+
+function serveBoundaryGeometry(req, res, {
+  load,
+  id,
+  idLabel,
+  maxIdDigits,
+  unavailableMessage,
+  logLabel
+}) {
+  const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
+  let database;
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('Vary', 'Authorization');
+  try {
+    const parsedId = strictPositiveId(id, { label: idLabel, maxDigits: maxIdDigits });
+    if (!require('fs').existsSync(databasePath)) {
+      throw new BoundaryLookupError(unavailableMessage, 503);
+    }
+    const { DatabaseSync } = require('node:sqlite');
+    database = new DatabaseSync(databasePath, { readOnly: true });
+    const feature = load(database, parsedId);
+    res.setHeader('Content-Type', 'application/geo+json; charset=utf-8');
+    res.setHeader('Cache-Control', 'private, max-age=300, must-revalidate');
+    return res.json(feature);
+  } catch (error) {
+    const expected = error instanceof BoundaryLookupError;
+    const statusCode = expected ? error.statusCode : 503;
+    if (statusCode >= 500) {
+      const cause = error.cause && error.cause.message ? `: ${error.cause.message}` : '';
+      console.error(`${logLabel}: ${error.message}${cause}`);
+    }
+    return res.status(statusCode).json({
+      error: expected ? error.message : unavailableMessage
+    });
+  } finally {
+    if (database) database.close();
+  }
+}
+
+app.get('/api/police-precincts/:precinct/geometry', (req, res) => {
+  return serveBoundaryGeometry(req, res, {
+    load: loadActivePolicePrecinctFeature,
+    id: req.params.precinct,
+    idLabel: 'Police precinct',
+    maxIdDigits: 3,
+    unavailableMessage: 'Police precinct boundaries are temporarily unavailable',
+    logLabel: 'Police precinct geometry error'
+  });
+});
+
+app.get('/api/business-improvement-districts/:bidId/geometry', (req, res) => {
+  return serveBoundaryGeometry(req, res, {
+    load: loadActiveBusinessImprovementDistrictFeature,
+    id: req.params.bidId,
+    idLabel: 'Business improvement district ID',
+    maxIdDigits: 6,
+    unavailableMessage: 'Business improvement district boundaries are temporarily unavailable',
+    logLabel: 'Business improvement district geometry error'
+  });
 });
 
 app.get('/api/live-map', (req, res) => {

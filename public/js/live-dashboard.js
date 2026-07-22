@@ -5,6 +5,11 @@
     maxZoom: 19,
     attribution: '&copy; OpenStreetMap &copy; CARTO'
   }).addTo(map);
+  const GEOGRAPHY_PANE = 'boundary';
+  const geographyPane = map.createPane(GEOGRAPHY_PANE);
+  geographyPane.style.zIndex = '350';
+  geographyPane.style.pointerEvents = 'none';
+  const geographyRenderer = L.svg({ pane: GEOGRAPHY_PANE });
   const markerLayer = L.markerClusterGroup({
     maxClusterRadius: 42,
     showCoverageOnHover: false,
@@ -36,7 +41,9 @@
   const detail = document.getElementById('request-detail');
   const mapScopeControl = document.getElementById('map-scope');
   const mapCounts = document.getElementById('map-counts');
+  const mapBoundaryKey = document.getElementById('map-boundary-key');
   const detailPendingBadge = document.getElementById('detail-pending-badge');
+  const compactLayout = window.matchMedia('(max-width: 900px)');
   const summaryElements = {
     root: document.getElementById('city-summary'),
     eyebrow: document.getElementById('city-summary-eyebrow'),
@@ -86,6 +93,29 @@
   let archiveSearchSequence = 0;
   let archiveSearchTimer = null;
   let bidById = new Map();
+  const boundaryStates = {
+    precinct: {
+      requestedValue: '', layer: null, label: '', loading: false,
+      sequence: 0, controller: null
+    },
+    bid: {
+      requestedValue: '', layer: null, label: '', loading: false,
+      sequence: 0, controller: null
+    }
+  };
+  const boundaryStyles = {
+    precinct: {
+      color: '#5846c7', weight: 3, opacity: 0.9,
+      fillColor: '#6e5ce7', fillOpacity: 0.08
+    },
+    bid: {
+      color: '#d18412', weight: 3, opacity: 0.95, dashArray: '8 6',
+      fillColor: '#f0ae35', fillOpacity: 0.09
+    }
+  };
+  let pendingBoundaryFit = false;
+  let boundaryFitRevision = 0;
+  let lastMapLayoutKey = '';
 
   const esc = value => String(value || '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
   const isClosed = status => /\b(?:closed|resolved|cancel(?:led|ed)?)\b/i.test(status || '');
@@ -109,18 +139,42 @@
     }).format(date);
   };
 
-  function setMobileView(view) {
-    if (!['feed', 'map', 'overview'].includes(view)) return;
-    appShell.dataset.mobileView = view;
+  function viewTabsVisible() {
+    if (!mobileViewTabs) return false;
+    const style = window.getComputedStyle(mobileViewTabs);
+    const bounds = mobileViewTabs.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility !== 'hidden'
+      && bounds.width > 0 && bounds.height > 0;
+  }
+
+  function viewButtonVisible(view) {
+    const button = mobileViewTabs
+      && mobileViewTabs.querySelector(`button[data-mobile-view="${view}"]`);
+    if (!button) return false;
+    const style = window.getComputedStyle(button);
+    const bounds = button.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility !== 'hidden'
+      && bounds.width > 0 && bounds.height > 0;
+  }
+
+  function setPressedView(view) {
     mobileViewTabs.querySelectorAll('button[data-mobile-view]').forEach(button => {
       button.setAttribute('aria-pressed', String(button.dataset.mobileView === view));
     });
-    if (view === 'map') {
-      window.requestAnimationFrame(() => {
-        map.invalidateSize();
-        renderMap();
-      });
+  }
+
+  function setMobileView(view) {
+    if (!['feed', 'map', 'overview'].includes(view)) return;
+    const usesViewTabs = viewTabsVisible();
+    const normalizedView = view === 'map' && !viewButtonVisible('map') ? 'feed' : view;
+    if (usesViewTabs) {
+      appShell.dataset.mobileView = normalizedView;
+      setPressedView(normalizedView);
     }
+    if (view === 'map') {
+      scheduleMapLayout({ attemptBoundaryFit: true });
+    }
+    return usesViewTabs && normalizedView === 'map';
   }
 
   const submittedMillis = record => {
@@ -642,6 +696,7 @@
     loadPortalDetails(record);
     const coordinates = recordCoordinates(record);
     if (moveMap && coordinates) {
+      cancelPendingBoundaryFit();
       map.flyTo([coordinates.lat, coordinates.lng], Math.max(map.getZoom(), 15), { duration: .6 });
       const marker = markerByNumber.get(number);
       if (marker) markerLayer.zoomToShowLayer(marker);
@@ -722,6 +777,203 @@
     if (bidFilter.value) params.set('bid_id', bidFilter.value);
     const query = params.toString();
     return query ? `${pathname}?${query}` : pathname;
+  }
+
+  function mapHasLayout() {
+    const container = map.getContainer();
+    const style = window.getComputedStyle(container);
+    const bounds = container.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility !== 'hidden'
+      && bounds.width > 0 && bounds.height > 0;
+  }
+
+  function selectedBoundariesSettled() {
+    return !Object.values(boundaryStates).some(state => state.requestedValue && state.loading);
+  }
+
+  function selectedBoundaryBounds() {
+    const bounds = L.latLngBounds([]);
+    for (const state of Object.values(boundaryStates)) {
+      if (!state.layer || typeof state.layer.getBounds !== 'function') continue;
+      const layerBounds = state.layer.getBounds();
+      if (layerBounds && layerBounds.isValid()) bounds.extend(layerBounds);
+    }
+    return bounds;
+  }
+
+  function fitSelectedBoundaryUnion(revision) {
+    if (!pendingBoundaryFit || revision !== boundaryFitRevision
+        || !selectedBoundariesSettled() || !mapHasLayout()) return;
+    const bounds = selectedBoundaryBounds();
+    pendingBoundaryFit = false;
+    if (!bounds.isValid()) return;
+    const mapHeight = map.getContainer().getBoundingClientRect().height;
+    const topPadding = Math.min(170, Math.max(32, Math.floor(mapHeight * 0.45)));
+    map.fitBounds(bounds, {
+      paddingTopLeft: [32, topPadding],
+      paddingBottomRight: [32, 32],
+      maxZoom: 16,
+      animate: true,
+      duration: 0.45
+    });
+  }
+
+  function scheduleMapLayout({ attemptBoundaryFit = false } = {}) {
+    const fitRevision = boundaryFitRevision;
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        if (!mapHasLayout()) return;
+        map.invalidateSize({ pan: false, debounceMoveend: true });
+        renderMap();
+        if (attemptBoundaryFit) fitSelectedBoundaryUnion(fitRevision);
+      });
+    });
+  }
+
+  function scheduleSelectedBoundaryFit() {
+    if (!pendingBoundaryFit || !selectedBoundariesSettled()) return;
+    scheduleMapLayout({ attemptBoundaryFit: true });
+  }
+
+  function cancelPendingBoundaryFit() {
+    pendingBoundaryFit = false;
+    boundaryFitRevision += 1;
+  }
+
+  function removeBoundaryLayer(state) {
+    if (state.layer && map.hasLayer(state.layer)) map.removeLayer(state.layer);
+    state.layer = null;
+    state.label = '';
+  }
+
+  function updateBoundaryKey() {
+    if (!mapBoundaryKey) return;
+    const entries = [
+      { kind: 'precinct', state: boundaryStates.precinct },
+      { kind: 'bid', state: boundaryStates.bid }
+    ].filter(entry => entry.state.layer && entry.state.label);
+    const fragment = document.createDocumentFragment();
+    for (const entry of entries) {
+      const item = document.createElement('span');
+      item.className = 'map-boundary-item';
+      const swatch = document.createElement('i');
+      swatch.className = `map-boundary-swatch ${entry.kind}`;
+      swatch.setAttribute('aria-hidden', 'true');
+      const label = document.createElement('span');
+      label.className = 'map-boundary-label';
+      label.textContent = entry.state.label;
+      item.append(swatch, label);
+      fragment.append(item);
+    }
+    mapBoundaryKey.replaceChildren(fragment);
+    mapBoundaryKey.hidden = entries.length === 0;
+  }
+
+  function boundaryConfiguration(kind) {
+    if (kind === 'precinct') {
+      return {
+        value: precinctFilter.value,
+        url: value => `/api/police-precincts/${encodeURIComponent(value)}/geometry`,
+        serviceLabel: 'Police precinct boundary service',
+        featureLabel: feature => String(
+          feature && feature.properties && feature.properties.label
+          || precinctLabel(precinctFilter.value)
+        )
+      };
+    }
+    return {
+      value: bidFilter.value,
+      url: value => `/api/business-improvement-districts/${encodeURIComponent(value)}/geometry`,
+      serviceLabel: 'Business improvement district boundary service',
+      featureLabel: feature => {
+        const selected = bidById.get(String(bidFilter.value));
+        return String(feature && feature.properties && feature.properties.name
+          || selected && selected.name || `BID ${bidFilter.value}`);
+      }
+    };
+  }
+
+  function validBoundaryFeature(feature) {
+    return Boolean(feature && feature.type === 'Feature' && feature.geometry
+      && ['Polygon', 'MultiPolygon'].includes(feature.geometry.type)
+      && Array.isArray(feature.geometry.coordinates));
+  }
+
+  async function loadSelectedBoundary(kind) {
+    const state = boundaryStates[kind];
+    const config = boundaryConfiguration(kind);
+    const value = String(config.value || '');
+    if (state.requestedValue === value && (state.layer || state.loading || !value)) return;
+
+    state.sequence += 1;
+    const sequence = state.sequence;
+    if (state.controller) state.controller.abort();
+    state.controller = null;
+    state.loading = false;
+    state.requestedValue = value;
+    removeBoundaryLayer(state);
+    updateBoundaryKey();
+    if (!value) {
+      scheduleSelectedBoundaryFit();
+      return;
+    }
+
+    const controller = new AbortController();
+    state.controller = controller;
+    state.loading = true;
+    try {
+      const feature = await fetchJson(config.url(value), config.serviceLabel, {
+        signal: controller.signal
+      });
+      if (sequence !== state.sequence || state.requestedValue !== value) return;
+      if (!validBoundaryFeature(feature)) throw new Error(`${config.serviceLabel} returned invalid GeoJSON`);
+      state.layer = L.geoJSON(feature, {
+        pane: GEOGRAPHY_PANE,
+        renderer: geographyRenderer,
+        className: `map-boundary-path ${kind}`,
+        interactive: false,
+        style: boundaryStyles[kind]
+      }).addTo(map);
+      state.label = config.featureLabel(feature);
+      updateBoundaryKey();
+    } catch (error) {
+      if (error.name !== 'AbortError' && sequence === state.sequence) console.warn(error);
+    } finally {
+      if (sequence === state.sequence) {
+        state.loading = false;
+        state.controller = null;
+        updateBoundaryKey();
+        scheduleSelectedBoundaryFit();
+      }
+    }
+  }
+
+  function syncSelectedBoundaries() {
+    pendingBoundaryFit = Boolean(precinctFilter.value || bidFilter.value);
+    boundaryFitRevision += 1;
+    loadSelectedBoundary('precinct');
+    loadSelectedBoundary('bid');
+    scheduleSelectedBoundaryFit();
+  }
+
+  function handleMapContainerResize() {
+    const bounds = map.getContainer().getBoundingClientRect();
+    if (bounds.width <= 0 || bounds.height <= 0) return;
+    const layoutKey = `${Math.round(bounds.width)}x${Math.round(bounds.height)}`;
+    if (lastMapLayoutKey && lastMapLayoutKey !== layoutKey
+        && selectedBoundaryBounds().isValid()) {
+      pendingBoundaryFit = true;
+      boundaryFitRevision += 1;
+    }
+    lastMapLayoutKey = layoutKey;
+    scheduleMapLayout({ attemptBoundaryFit: pendingBoundaryFit });
+  }
+
+  if ('ResizeObserver' in window) {
+    const mapResizeObserver = new ResizeObserver(handleMapContainerResize);
+    mapResizeObserver.observe(map.getContainer());
+  } else {
+    window.addEventListener('resize', handleMapContainerResize);
   }
 
   async function loadArchivedRequest(srnumber, sequence) {
@@ -1150,26 +1402,25 @@
     }
   }
 
+  function openRequestFromFeed(number) {
+    if (compactLayout.matches && setMobileView('map')) {
+      window.requestAnimationFrame(() => selectRequest(number));
+    } else {
+      selectRequest(number);
+    }
+  }
+
   feed.addEventListener('click', event => {
     const card = event.target.closest('.request-card');
     if (!card) return;
-    if (window.matchMedia('(max-width: 720px)').matches) {
-      setMobileView('map');
-      window.requestAnimationFrame(() => selectRequest(card.dataset.number));
-    } else {
-      selectRequest(card.dataset.number);
-    }
+    openRequestFromFeed(card.dataset.number);
   });
   feed.addEventListener('keydown', event => {
     if (event.key !== 'Enter' && event.key !== ' ') return;
     const card = event.target.closest('.request-card');
     if (!card) return;
-    if (window.matchMedia('(max-width: 720px)').matches) {
-      setMobileView('map');
-      window.requestAnimationFrame(() => selectRequest(card.dataset.number));
-    } else {
-      selectRequest(card.dataset.number);
-    }
+    event.preventDefault();
+    openRequestFromFeed(card.dataset.number);
   });
   mobileViewTabs.addEventListener('click', event => {
     const button = event.target.closest('button[data-mobile-view]');
@@ -1192,6 +1443,7 @@
     setDetailPanelVisible(false);
     renderFeed({ resetScroll: true });
     renderMap();
+    syncSelectedBoundaries();
     refresh({ force: true });
     scheduleArchiveSearch();
   }
@@ -1229,11 +1481,19 @@
     selectedNumber = null;
     setDetailPanelVisible(false);
     renderFeed();
-    const returnTarget = window.matchMedia('(max-width: 720px)').matches
+    const returnTarget = compactLayout.matches && viewTabsVisible()
       ? mobileViewTabs.querySelector('button[aria-pressed="true"]')
       : [...feed.querySelectorAll('.request-card')]
         .find(card => card.dataset.number === closedNumber);
     if (returnTarget) returnTarget.focus();
+  });
+
+  compactLayout.addEventListener('change', event => {
+    if (!event.matches && appShell.dataset.mobileView === 'map') {
+      appShell.dataset.mobileView = 'feed';
+      setPressedView('feed');
+    }
+    scheduleMapLayout({ attemptBoundaryFit: true });
   });
 
   loadPolicePrecincts();

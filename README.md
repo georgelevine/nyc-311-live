@@ -73,11 +73,15 @@ type and borough distributions, and detail/map-pin coverage.
 
 `GET /api/police-precincts` lists the active precinct release. Add
 `police_precinct=NUMBER` to `/api/live-dashboard`, `/api/live-map`, or
-`/api/live-summary` to scope those results to one precinct.
+`/api/live-summary` to scope those results to one precinct. The selected
+precinct's complete GeoJSON feature is available from
+`GET /api/police-precincts/NUMBER/geometry`.
 
 `GET /api/business-improvement-districts` lists the active BID release. Add
 `bid_id=NUMBER` to the same live endpoints to scope results to a BID. Precinct
-and BID parameters may be combined; their intersection is returned.
+and BID parameters may be combined; their intersection is returned. The
+selected district's complete GeoJSON feature is available from
+`GET /api/business-improvement-districts/NUMBER/geometry`.
 
 ## Data-source note
 
