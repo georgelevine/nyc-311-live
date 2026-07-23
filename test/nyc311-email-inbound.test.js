@@ -260,6 +260,10 @@ test('persists parsed events idempotently and wakes closure verification without
   });
   assert.equal(first.duplicate, false);
   assert.equal(first.closure_wake_queued, 1);
+  assert.equal(first.forward.recipient_address, alias.recipient_address);
+  assert.equal(first.forward.srnumber, '311-28327449');
+  assert.equal(first.forward.event_kind, 'Closed');
+  assert.equal(first.forward.response_text, 'The agency responded to the complaint.');
   const event = database.prepare('SELECT * FROM nyc311_email_events').get();
   assert.equal(event.parse_outcome, 'parsed');
   assert.equal(event.alias_match_status, 'matched');
@@ -318,6 +322,7 @@ test('flags alias/SR mismatches and does not wake either request', t => {
   });
   assert.equal(result.alias_match_status, 'mismatch');
   assert.equal(result.closure_wake_queued, 0);
+  assert.equal(result.forward, null);
   const event = database.prepare('SELECT * FROM nyc311_email_events').get();
   assert.equal(event.srnumber_mismatch, 1);
   assert.equal(event.reconciled_srnumber, null);
@@ -392,13 +397,29 @@ test('handler verifies both signed layers, SES verdicts, timestamp, and idempote
   assert.deepEqual(accepted.body, {
     accepted: true,
     duplicate: false,
-    event_id: 1
+    event_id: 1,
+    forward: {
+      recipient_address: alias.recipient_address,
+      srnumber: '311-28327449',
+      event_kind: 'Closed',
+      subject: 'SR Closed # 311-28327449',
+      agency_name: 'New York City Police Department',
+      agency_acronym: 'NYPD',
+      request_type: 'Drug Activity',
+      request_subtype: 'Use Outside',
+      location: '124 EAST 15 STREET, MANHATTAN (NEW YORK), NY, 10003',
+      submitted_at: '2026-07-22T18:46:35',
+      response_text: 'The agency responded to the complaint.',
+      next_update_text: null,
+      received_at: '2026-07-23T13:59:59.000Z'
+    }
   });
 
   const duplicate = mockResponse();
   await handler(mockRequest(raw, headers), duplicate);
   assert.equal(duplicate.statusCode, 202);
   assert.equal(duplicate.body.duplicate, true);
+  assert.equal(duplicate.body.forward, null);
 
   const badSignature = mockResponse();
   await handler(mockRequest(Buffer.from(`${raw}tampered`), headers), badSignature);

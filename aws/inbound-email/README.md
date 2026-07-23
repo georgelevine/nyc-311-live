@@ -21,6 +21,9 @@ unguessable local part for every service request.
 - An SES receipt rule for the whole dedicated inbound domain.
 - A Node.js Lambda invoked after the S3 action. It reads the stored object and
   posts `Content-Type: message/rfc822` to the configured HTTPS endpoint.
+- Immediate Gmail copies of authenticated, parsed updates whose registered
+  aliases fall within the configured pilot SR-number range. Each copy is sent
+  from that request's unique `track.opendata.support` alias.
 - Two automatic retries for asynchronous Lambda failures and an encrypted SQS
   failure queue after retries are exhausted.
 - A 30-day CloudWatch log group. Message bodies and the webhook secret are never
@@ -64,7 +67,10 @@ aws cloudformation deploy \
   --parameter-overrides \
     RecipientDomain=track.opendata.support \
     WebhookUrl=https://311.georgelevine.com/api/inbound/nyc311-email \
-    WebhookSecret="$WEBHOOK_SECRET"
+    WebhookSecret="$WEBHOOK_SECRET" \
+    ForwardToEmail=georgealevine@gmail.com \
+    ForwardPilotMinSuffix=28334803 \
+    ForwardPilotMaxSuffix=28334842
 ```
 
 After deployment, inspect the outputs:

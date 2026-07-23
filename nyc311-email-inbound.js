@@ -513,12 +513,33 @@ function persistInboundEmail(database, {
       `).run(id);
     }
     database.exec('COMMIT');
+    const forward = values.parseOutcome === 'parsed'
+      && !reconciliation.mismatch
+      && reconciliation.reconciledSrnumber
+      && ['matched', 'attached'].includes(reconciliation.status)
+      ? {
+          recipient_address: recipient.address,
+          srnumber: reconciliation.reconciledSrnumber,
+          event_kind: values.eventKind,
+          subject: values.subject,
+          agency_name: values.agencyName,
+          agency_acronym: values.agencyAcronym,
+          request_type: values.requestType,
+          request_subtype: values.requestSubtype,
+          location: values.location,
+          submitted_at: values.submittedAt,
+          response_text: values.responseText,
+          next_update_text: values.nextUpdateText,
+          received_at: receivedAt
+        }
+      : null;
     return {
       id,
       duplicate: false,
       parse_outcome: values.parseOutcome,
       closure_wake_queued: closureWakeQueued ? 1 : 0,
-      alias_match_status: reconciliation.status
+      alias_match_status: reconciliation.status,
+      forward
     };
   } catch (error) {
     database.exec('ROLLBACK');
@@ -639,7 +660,8 @@ function createNyc311EmailHandler({
       return res.status(202).json({
         accepted: true,
         duplicate: result.duplicate,
-        event_id: result.id
+        event_id: result.id,
+        forward: result.forward || null
       });
     } catch (error) {
       console.error('Inbound NYC311 email failed:', error.message);

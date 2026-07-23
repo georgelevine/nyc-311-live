@@ -52,6 +52,22 @@ Parameters:
       Shared HMAC secret configured identically on the webhook receiver. Use at
       least 32 random bytes; do not commit it to source control.
 
+  ForwardToEmail:
+    Type: String
+    Default: georgealevine@gmail.com
+    Description: Gmail address that receives immediate copies of valid pilot updates.
+    AllowedPattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
+
+  ForwardPilotMinSuffix:
+    Type: Number
+    Default: 28334803
+    Description: Lowest numeric SR suffix included in the forwarding pilot.
+
+  ForwardPilotMaxSuffix:
+    Type: Number
+    Default: 28334842
+    Description: Highest numeric SR suffix included in the forwarding pilot.
+
 Resources:
   InboundDomainIdentity:
     Type: AWS::SES::EmailIdentity
@@ -149,6 +165,11 @@ Resources:
                 Action:
                   - sqs:SendMessage
                 Resource: !GetAtt FailedDeliveryQueue.Arn
+              - Sid: ForwardPilotUpdates
+                Effect: Allow
+                Action:
+                  - ses:SendEmail
+                Resource: !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${RecipientDomain}'
               - Sid: WriteLogs
                 Effect: Allow
                 Action:
@@ -172,6 +193,10 @@ Resources:
           RAW_EMAIL_PREFIX: !Ref ObjectKeyPrefix
           WEBHOOK_URL: !Ref WebhookUrl
           WEBHOOK_SECRET: !Ref WebhookSecret
+          FORWARD_TO_EMAIL: !Ref ForwardToEmail
+          FORWARD_DOMAIN: !Ref RecipientDomain
+          FORWARD_PILOT_MIN_SUFFIX: !Ref ForwardPilotMinSuffix
+          FORWARD_PILOT_MAX_SUFFIX: !Ref ForwardPilotMaxSuffix
       Code:
         ZipFile: |
           const crypto = require("node:crypto");
@@ -179,8 +204,13 @@ Resources:
             GetObjectCommand,
             S3Client,
           } = require("@aws-sdk/client-s3");
+          const {
+            SESv2Client,
+            SendEmailCommand,
+          } = require("@aws-sdk/client-sesv2");
 
           const s3 = new S3Client({});
+          const ses = new SESv2Client({});
 
           function requireEnvironment(name) {
             const value = process.env[name];
@@ -203,6 +233,90 @@ Resources:
                 .filter((name) => receipt[name] && receipt[name].status)
                 .map((name) => [name, receipt[name].status]),
             );
+          }
+
+          function cleanHeader(value, fallback = "") {
+            const cleaned = String(value || "")
+              .replace(/[\r\n]+/g, " ")
+              .trim();
+            return cleaned || fallback;
+          }
+
+          function pilotAlias(recipient, forward) {
+            const domain = requireEnvironment("FORWARD_DOMAIN").toLowerCase();
+            const address = String(recipient || "").trim().toLowerCase();
+            if (address !== String(forward && forward.recipient_address || "")
+              .trim().toLowerCase()) return null;
+            const match = address.match(
+              new RegExp(`^r(\\d{8})-[a-z0-9]+@${domain
+                .replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}$`),
+            );
+            if (!match) return null;
+            const suffix = Number(match[1]);
+            const minimum = Number(requireEnvironment("FORWARD_PILOT_MIN_SUFFIX"));
+            const maximum = Number(requireEnvironment("FORWARD_PILOT_MAX_SUFFIX"));
+            if (!Number.isInteger(suffix) || suffix < minimum || suffix > maximum) {
+              return null;
+            }
+            return address;
+          }
+
+          function textBody(forward) {
+            const lines = [
+              `${cleanHeader(forward.event_kind, "Update")} for ${cleanHeader(forward.srnumber)}`,
+              "",
+              forward.request_type && forward.request_subtype
+                ? `${forward.request_type} — ${forward.request_subtype}`
+                : forward.request_type || forward.request_subtype,
+              forward.location,
+              forward.agency_name
+                ? `Agency: ${forward.agency_name}${forward.agency_acronym
+                    ? ` (${forward.agency_acronym})`
+                    : ""}`
+                : null,
+              forward.submitted_at ? `Submitted: ${forward.submitted_at}` : null,
+              forward.received_at ? `Email received: ${forward.received_at}` : null,
+              "",
+              forward.response_text,
+              forward.next_update_text
+                ? `\nNext update: ${forward.next_update_text}`
+                : null,
+              "",
+              "This is an immediate copy received through the NYC311 email pilot.",
+            ];
+            return lines.filter((line) => line !== null && line !== undefined)
+              .join("\n");
+          }
+
+          async function forwardPilotUpdate(recipient, payload) {
+            if (!payload || payload.duplicate || !payload.forward) return false;
+            const alias = pilotAlias(recipient, payload.forward);
+            if (!alias) return false;
+            const forward = payload.forward;
+            const srnumber = cleanHeader(forward.srnumber, "NYC311 request");
+            const eventKind = cleanHeader(forward.event_kind, "Updated");
+            const subject = `NYC311 ${eventKind} · ${srnumber}`;
+            await ses.send(new SendEmailCommand({
+              FromEmailAddress: `NYC311 ${srnumber} <${alias}>`,
+              Destination: {
+                ToAddresses: [requireEnvironment("FORWARD_TO_EMAIL")],
+              },
+              Content: {
+                Simple: {
+                  Subject: { Data: subject, Charset: "UTF-8" },
+                  Body: {
+                    Text: { Data: textBody(forward), Charset: "UTF-8" },
+                  },
+                },
+              },
+            }));
+            console.log(JSON.stringify({
+              event: "pilot_update_forwarded",
+              messageId: payload.event_id,
+              srnumber,
+              alias,
+            }));
+            return true;
           }
 
           async function deliver(record) {
@@ -292,6 +406,14 @@ Resources:
               );
             }
 
+            let payload;
+            try {
+              payload = await response.json();
+            } catch {
+              throw new Error(`Webhook returned invalid JSON for ${messageId}`);
+            }
+            const forwarded = await forwardPilotUpdate(recipient, payload);
+
             console.log(
               JSON.stringify({
                 event: "inbound_email_delivered",
@@ -299,6 +421,7 @@ Resources:
                 key,
                 status: response.status,
                 bytes: raw.length,
+                forwarded,
               }),
             );
           }
