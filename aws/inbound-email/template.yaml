@@ -55,13 +55,7 @@ Parameters:
   ForwardToEmail:
     Type: String
     Default: georgealevine@gmail.com
-    Description: Primary address that receives all monitored request emails.
-    AllowedPattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
-
-  HudsonForwardToEmail:
-    Type: String
-    Default: sean.m.lewin@gmail.com
-    Description: Additional address that receives Hudson Square BID request emails.
+    Description: Gmail address that receives immediate copies of valid pilot updates.
     AllowedPattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
 
   ForwardPilotMinSuffix:
@@ -178,7 +172,6 @@ Resources:
                 Resource:
                   - !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${RecipientDomain}'
                   - !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${ForwardToEmail}'
-                  - !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${HudsonForwardToEmail}'
               - Sid: WriteLogs
                 Effect: Allow
                 Action:
@@ -203,7 +196,6 @@ Resources:
           WEBHOOK_URL: !Ref WebhookUrl
           WEBHOOK_SECRET: !Ref WebhookSecret
           FORWARD_TO_EMAIL: !Ref ForwardToEmail
-          HUDSON_FORWARD_TO_EMAIL: !Ref HudsonForwardToEmail
           FORWARD_DOMAIN: !Ref RecipientDomain
           FORWARD_PILOT_MIN_SUFFIX: !Ref ForwardPilotMinSuffix
           FORWARD_PILOT_MAX_SUFFIX: !Ref ForwardPilotMaxSuffix
@@ -407,17 +399,6 @@ Resources:
               .join("\n");
           }
 
-          function forwardingDestinations(scopeType, scopeId) {
-            const destinations = [requireEnvironment("FORWARD_TO_EMAIL")];
-            if (scopeType === "bid" && Number(scopeId) === 68) {
-              destinations.push(requireEnvironment("HUDSON_FORWARD_TO_EMAIL"));
-            }
-            return [...new Map(destinations.map((address) => [
-              String(address).trim().toLowerCase(),
-              String(address).trim(),
-            ])).values()];
-          }
-
           async function forwardPilotUpdate(recipient, payload) {
             if (!payload || payload.duplicate || !payload.forward) return false;
             const alias = registeredAlias(recipient, payload.forward);
@@ -430,10 +411,7 @@ Resources:
             await ses.send(new SendEmailCommand({
               FromEmailAddress: `NYC311 ${srnumber} <${visibleSender}>`,
               Destination: {
-                ToAddresses: forwardingDestinations(
-                  forward.scope_type,
-                  forward.scope_id,
-                ),
+                ToAddresses: [requireEnvironment("FORWARD_TO_EMAIL")],
               },
               Content: {
                 Simple: {
@@ -536,12 +514,7 @@ Resources:
             const visibleSender = `${srnumber}@${requireEnvironment("FORWARD_DOMAIN")}`;
             await ses.send(new SendEmailCommand({
               FromEmailAddress: `NYC311 ${srnumber} <${visibleSender}>`,
-              Destination: {
-                ToAddresses: forwardingDestinations(
-                  request.scope_type,
-                  request.scope_id,
-                ),
-              },
+              Destination: { ToAddresses: [requireEnvironment("FORWARD_TO_EMAIL")] },
               Content: {
                 Simple: {
                   Subject: {
