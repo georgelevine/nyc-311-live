@@ -218,6 +218,27 @@ const MIGRATIONS = Object.freeze([
 
     CREATE INDEX IF NOT EXISTS nyc311_email_subscription_jobs_due_idx
       ON nyc311_email_subscription_jobs(state,next_attempt_at,bid_id);`
+  }),
+  Object.freeze({
+    version: 6,
+    name: 'add_nyc311_initial_email_jobs',
+    sql: `CREATE TABLE IF NOT EXISTS nyc311_initial_email_jobs (
+      srnumber TEXT PRIMARY KEY,
+      bid_id INTEGER NOT NULL,
+      state TEXT NOT NULL DEFAULT 'pending'
+        CHECK(state IN ('pending','processing','sent','retry','error')),
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0),
+      next_attempt_at TEXT NOT NULL,
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      sent_at TEXT,
+      FOREIGN KEY(srnumber)
+        REFERENCES live_portal_requests(srnumber) ON UPDATE CASCADE ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS nyc311_initial_email_jobs_due_idx
+      ON nyc311_initial_email_jobs(state,next_attempt_at,bid_id);`
   })
 ]);
 

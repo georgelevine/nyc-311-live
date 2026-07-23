@@ -34,6 +34,13 @@ const {
   retrySubscription,
   subscribeRequest
 } = require('./nyc311-portal-subscriptions');
+const {
+  claimInitialAlert,
+  completeInitialAlert,
+  enqueueInitialAlerts,
+  retryInitialAlert,
+  sendInitialAlert
+} = require('./nyc311-initial-alerts');
 
 const PORTAL_URL = 'https://portal.311.nyc.gov/entity-pin-fetch-service-requests/';
 const POLL_INTERVAL_SECONDS = Math.max(5, Number(process.env.POLL_INTERVAL_SECONDS || 15));
@@ -444,11 +451,36 @@ function startEmailSubscriptions() {
     while (!detailHydrationStopping) {
       try {
         const added = enqueueBidSubscriptions(db, EMAIL_SUBSCRIBE_BID_IDS);
+        const initialAdded = enqueueInitialAlerts(db, EMAIL_SUBSCRIBE_BID_IDS);
         if (added) {
           console.log(JSON.stringify({
             email_subscriptions_queued: added,
             bid_ids: EMAIL_SUBSCRIBE_BID_IDS
           }));
+        }
+        if (initialAdded) {
+          console.log(JSON.stringify({ initial_emails_queued: initialAdded }));
+        }
+        const initialJob = claimInitialAlert(db);
+        if (initialJob) {
+          try {
+            await sendInitialAlert(initialJob);
+            completeInitialAlert(db, initialJob);
+            console.log(JSON.stringify({
+              initial_email: 'sent',
+              srnumber: initialJob.srnumber,
+              bid_id: initialJob.bid_id
+            }));
+          } catch (error) {
+            retryInitialAlert(db, initialJob, error);
+            console.error(JSON.stringify({
+              initial_email: 'retry',
+              srnumber: initialJob.srnumber,
+              error: error.message
+            }));
+          }
+          await sleep(EMAIL_SUBSCRIPTION_DELAY_MS);
+          continue;
         }
         const job = claimSubscription(db);
         if (!job) {

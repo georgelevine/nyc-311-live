@@ -315,6 +315,78 @@ Resources:
             return true;
           }
 
+          function safeEqualHex(left, right) {
+            if (!/^[a-f0-9]{64}$/i.test(String(left || ""))
+                || !/^[a-f0-9]{64}$/i.test(String(right || ""))) return false;
+            return crypto.timingSafeEqual(
+              Buffer.from(left, "hex"),
+              Buffer.from(right, "hex"),
+            );
+          }
+
+          async function sendInitialRequest(event) {
+            const headers = Object.fromEntries(
+              Object.entries(event.headers || {})
+                .map(([key, value]) => [key.toLowerCase(), value]),
+            );
+            const timestamp = headers["x-nyc311-alert-timestamp"];
+            const supplied = String(headers["x-nyc311-alert-signature"] || "")
+              .replace(/^v1=/, "");
+            const body = event.isBase64Encoded
+              ? Buffer.from(event.body || "", "base64").toString("utf8")
+              : String(event.body || "");
+            const age = Math.abs(Date.now() / 1000 - Number(timestamp));
+            const expected = crypto.createHmac(
+              "sha256",
+              requireEnvironment("WEBHOOK_SECRET"),
+            ).update(`v1\n${timestamp}\n${body}`, "utf8").digest("hex");
+            if (!Number.isFinite(age) || age > 300 || !safeEqualHex(supplied, expected)) {
+              return { statusCode: 401, body: JSON.stringify({ error: "unauthorized" }) };
+            }
+            let request;
+            try {
+              request = JSON.parse(body);
+            } catch {
+              return { statusCode: 400, body: JSON.stringify({ error: "invalid_json" }) };
+            }
+            const srnumber = cleanHeader(request.srnumber);
+            if (request.kind !== "initial_request" || !/^311-\d{8}$/.test(srnumber)) {
+              return { statusCode: 400, body: JSON.stringify({ error: "invalid_request" }) };
+            }
+            const lines = [
+              `New Hudson Square request · ${srnumber}`,
+              "",
+              cleanHeader(request.problem),
+              cleanHeader(request.problem_details),
+              cleanHeader(request.additional_details),
+              cleanHeader(request.address),
+              request.status ? `Status: ${cleanHeader(request.status)}` : null,
+              request.submitted_at ? `Submitted: ${cleanHeader(request.submitted_at)}` : null,
+              request.updated_at ? `Updated: ${cleanHeader(request.updated_at)}` : null,
+              request.next_update ? `Next update: ${cleanHeader(request.next_update)}` : null,
+              "",
+              cleanHeader(request.portal_url),
+            ].filter(Boolean);
+            const visibleSender = `${srnumber}@${requireEnvironment("FORWARD_DOMAIN")}`;
+            await ses.send(new SendEmailCommand({
+              FromEmailAddress: `NYC311 ${srnumber} <${visibleSender}>`,
+              Destination: { ToAddresses: [requireEnvironment("FORWARD_TO_EMAIL")] },
+              Content: {
+                Simple: {
+                  Subject: {
+                    Data: `New Hudson Square NYC311 request · ${srnumber}`,
+                    Charset: "UTF-8",
+                  },
+                  Body: {
+                    Text: { Data: lines.join("\n"), Charset: "UTF-8" },
+                  },
+                },
+              },
+            }));
+            console.log(JSON.stringify({ event: "initial_request_forwarded", srnumber }));
+            return { statusCode: 200, body: JSON.stringify({ sent: true }) };
+          }
+
           async function deliver(record) {
             if (!record || record.eventSource !== "aws:ses" || !record.ses) {
               throw new Error("Unexpected event: expected an AWS SES record");
@@ -423,6 +495,9 @@ Resources:
           }
 
           exports.handler = async (event) => {
+            if (event && event.requestContext && event.requestContext.http) {
+              return sendInitialRequest(event);
+            }
             const records = Array.isArray(event && event.Records)
               ? event.Records
               : [];
@@ -432,6 +507,29 @@ Resources:
             await Promise.all(records.map(deliver));
             return { delivered: records.length };
           };
+
+  DeliveryLambdaUrl:
+    Type: AWS::Lambda::Url
+    Properties:
+      AuthType: NONE
+      InvokeMode: BUFFERED
+      TargetFunctionArn: !GetAtt DeliveryLambda.Arn
+
+  AllowPublicInitialAlertInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunctionUrl
+      FunctionName: !Ref DeliveryLambda
+      FunctionUrlAuthType: NONE
+      Principal: "*"
+
+  AllowPublicInitialAlertFunctionInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref DeliveryLambda
+      InvokedViaFunctionUrl: true
+      Principal: "*"
 
   DeliveryLambdaLogGroup:
     Type: AWS::Logs::LogGroup
@@ -544,3 +642,7 @@ Outputs:
 
   DeliveryLambdaLogGroup:
     Value: !Ref DeliveryLambdaLogGroup
+
+  InitialEmailEndpoint:
+    Description: HMAC-authenticated endpoint used by the collector for initial request emails.
+    Value: !GetAtt DeliveryLambdaUrl.FunctionUrl

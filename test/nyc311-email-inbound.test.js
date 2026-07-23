@@ -195,15 +195,19 @@ function signedHeaders(raw, recipient, metadata = signedMetadata(recipient), {
 test('email migrations create durable event, alias, and subscription job tables', t => {
   const { database } = createDatabase(t);
   t.after(() => database.close());
-  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 5);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 6);
   assert.equal(MIGRATIONS.some(item => item.name === 'add_nyc311_email_ingestion'), true);
-  assert.equal(MIGRATIONS.at(-1).name, 'add_nyc311_email_subscription_jobs');
+  assert.equal(MIGRATIONS.some(
+    item => item.name === 'add_nyc311_email_subscription_jobs'
+  ), true);
+  assert.equal(MIGRATIONS.at(-1).name, 'add_nyc311_initial_email_jobs');
   const tables = new Set(database.prepare(`
     SELECT name FROM sqlite_master WHERE type='table'
   `).all().map(row => row.name));
   assert.equal(tables.has('nyc311_email_aliases'), true);
   assert.equal(tables.has('nyc311_email_events'), true);
   assert.equal(tables.has('nyc311_email_subscription_jobs'), true);
+  assert.equal(tables.has('nyc311_initial_email_jobs'), true);
   const eventColumns = new Set(
     database.prepare('PRAGMA table_info(nyc311_email_events)').all().map(row => row.name)
   );
