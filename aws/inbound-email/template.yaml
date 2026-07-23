@@ -169,7 +169,9 @@ Resources:
                 Effect: Allow
                 Action:
                   - ses:SendEmail
-                Resource: !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${RecipientDomain}'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${RecipientDomain}'
+                  - !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:identity/${ForwardToEmail}'
               - Sid: WriteLogs
                 Effect: Allow
                 Action:
