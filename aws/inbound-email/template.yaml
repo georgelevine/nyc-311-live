@@ -1,0 +1,427 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Receives NYC311 notification email for a dedicated subdomain, retains the
+  original MIME message in S3, and forwards the exact bytes to an HTTPS webhook.
+
+Parameters:
+  RecipientDomain:
+    Type: String
+    Default: track.opendata.support
+    Description: Dedicated inbound domain. The receipt rule accepts every local part.
+    AllowedPattern: '^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$'
+
+  ReceiptRuleSetName:
+    Type: String
+    Default: nyc311-inbound
+    Description: >
+      SES receipt rule set to create. CloudFormation does not activate receipt
+      rule sets; see the activation step in README.md.
+    AllowedPattern: '^[A-Za-z0-9](?:[A-Za-z0-9_-]{0,62}[A-Za-z0-9])?$'
+
+  ReceiptRuleName:
+    Type: String
+    Default: track-opendata-support
+    AllowedPattern: '^[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,62}[A-Za-z0-9])?$'
+
+  ObjectKeyPrefix:
+    Type: String
+    Default: raw/
+    Description: S3 prefix for retained MIME messages. Include a trailing slash.
+    AllowedPattern: '^(?:[A-Za-z0-9!_.*''()/=-]+/)?$'
+
+  RawEmailRetentionDays:
+    Type: Number
+    Default: 90
+    MinValue: 1
+    MaxValue: 3650
+    Description: Days to retain current and noncurrent raw-message objects.
+
+  WebhookUrl:
+    Type: String
+    Default: https://311.georgelevine.com/api/inbound/nyc311-email
+    Description: Public HTTPS endpoint that accepts message/rfc822 request bodies.
+    AllowedPattern: '^https://.+$'
+    ConstraintDescription: Must be an HTTPS URL.
+
+  WebhookSecret:
+    Type: String
+    NoEcho: true
+    MinLength: 32
+    MaxLength: 256
+    Description: >
+      Shared HMAC secret configured identically on the webhook receiver. Use at
+      least 32 random bytes; do not commit it to source control.
+
+Resources:
+  InboundDomainIdentity:
+    Type: AWS::SES::EmailIdentity
+    Properties:
+      EmailIdentity: !Ref RecipientDomain
+      Tags:
+        - Key: Purpose
+          Value: NYC311 inbound notifications
+
+  RawEmailBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireRawMessages
+            Status: Enabled
+            ExpirationInDays: !Ref RawEmailRetentionDays
+            NoncurrentVersionExpiration:
+              NoncurrentDays: !Ref RawEmailRetentionDays
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+
+  RawEmailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref RawEmailBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowSesToStoreReceivedEmail
+            Effect: Allow
+            Principal:
+              Service: ses.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub '${RawEmailBucket.Arn}/${ObjectKeyPrefix}*'
+            Condition:
+              StringEquals:
+                AWS:SourceAccount: !Ref AWS::AccountId
+                AWS:SourceArn: !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:receipt-rule-set/${ReceiptRuleSetName}:receipt-rule/${ReceiptRuleName}'
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: s3:*
+            Resource:
+              - !GetAtt RawEmailBucket.Arn
+              - !Sub '${RawEmailBucket.Arn}/*'
+            Condition:
+              Bool:
+                aws:SecureTransport: false
+
+  FailedDeliveryQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600
+      SqsManagedSseEnabled: true
+
+  DeliveryLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: ReadRawEmailAndReportFailures
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ReadRawEmail
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                Resource: !Sub '${RawEmailBucket.Arn}/${ObjectKeyPrefix}*'
+              - Sid: SendFailedInvocation
+                Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !GetAtt FailedDeliveryQueue.Arn
+              - Sid: WriteLogs
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  DeliveryLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Sends retained NYC311 MIME messages to the Lightsail webhook.
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt DeliveryLambdaRole.Arn
+      MemorySize: 256
+      Timeout: 30
+      Environment:
+        Variables:
+          RAW_EMAIL_BUCKET: !Ref RawEmailBucket
+          RAW_EMAIL_PREFIX: !Ref ObjectKeyPrefix
+          WEBHOOK_URL: !Ref WebhookUrl
+          WEBHOOK_SECRET: !Ref WebhookSecret
+      Code:
+        ZipFile: |
+          const crypto = require("node:crypto");
+          const {
+            GetObjectCommand,
+            S3Client,
+          } = require("@aws-sdk/client-s3");
+
+          const s3 = new S3Client({});
+
+          function requireEnvironment(name) {
+            const value = process.env[name];
+            if (!value) {
+              throw new Error(`Missing required environment variable: ${name}`);
+            }
+            return value;
+          }
+
+          function verdicts(receipt = {}) {
+            const names = [
+              "spamVerdict",
+              "virusVerdict",
+              "spfVerdict",
+              "dkimVerdict",
+              "dmarcVerdict",
+            ];
+            return Object.fromEntries(
+              names
+                .filter((name) => receipt[name] && receipt[name].status)
+                .map((name) => [name, receipt[name].status]),
+            );
+          }
+
+          async function deliver(record) {
+            if (!record || record.eventSource !== "aws:ses" || !record.ses) {
+              throw new Error("Unexpected event: expected an AWS SES record");
+            }
+
+            const bucket = requireEnvironment("RAW_EMAIL_BUCKET");
+            const prefix = process.env.RAW_EMAIL_PREFIX || "";
+            const webhookUrl = requireEnvironment("WEBHOOK_URL");
+            const secret = requireEnvironment("WEBHOOK_SECRET");
+            if (!webhookUrl.startsWith("https://")) {
+              throw new Error("WEBHOOK_URL must use HTTPS");
+            }
+
+            const mail = record.ses.mail || {};
+            const receipt = record.ses.receipt || {};
+            const messageId = mail.messageId;
+            if (!messageId) {
+              throw new Error("SES event is missing mail.messageId");
+            }
+            const recipient =
+              (receipt.recipients && receipt.recipients[0]) ||
+              (mail.destination && mail.destination[0]) ||
+              "";
+            if (/[\r\n]/.test(recipient)) {
+              throw new Error("SES recipient contains invalid header characters");
+            }
+
+            const key = `${prefix}${messageId}`;
+            const object = await s3.send(
+              new GetObjectCommand({ Bucket: bucket, Key: key }),
+            );
+            const raw = Buffer.from(await object.Body.transformToByteArray());
+            const timestamp = Math.floor(Date.now() / 1000).toString();
+            const metadata = Buffer.from(
+              JSON.stringify({
+                version: 1,
+                messageId,
+                bucket,
+                key,
+                receivedAt: mail.timestamp || null,
+                source: mail.source || null,
+                destinations: mail.destination || [],
+                recipients: receipt.recipients || [],
+                verdicts: verdicts(receipt),
+              }),
+              "utf8",
+            ).toString("base64url");
+
+            // Primary authentication covers the exact raw MIME bytes.
+            const bodySignature = crypto
+              .createHmac("sha256", secret)
+              .update(raw)
+              .digest("hex");
+            // A second signature binds the delivery timestamp and SES metadata
+            // to that authenticated body without changing the raw-body contract.
+            const envelopeSignature = crypto
+              .createHmac("sha256", secret)
+              .update(
+                `v1\n${timestamp}\n${metadata}\n${bodySignature}`,
+                "utf8",
+              )
+              .digest("hex");
+
+            const response = await fetch(webhookUrl, {
+              method: "POST",
+              redirect: "error",
+              signal: AbortSignal.timeout(15000),
+              headers: {
+                "content-type": "message/rfc822",
+                "x-nyc311-email-version": "1",
+                "x-nyc311-email-timestamp": timestamp,
+                "x-nyc311-email-metadata": metadata,
+                "x-nyc311-email-signature": `v1=${bodySignature}`,
+                "x-nyc311-email-envelope-signature":
+                  `v1=${envelopeSignature}`,
+                ...(recipient ? { "x-nyc311-recipient": recipient } : {}),
+              },
+              body: raw,
+            });
+
+            if (!response.ok) {
+              const responseText = (await response.text()).slice(0, 500);
+              throw new Error(
+                `Webhook rejected ${messageId}: ${response.status} ${responseText}`,
+              );
+            }
+
+            console.log(
+              JSON.stringify({
+                event: "inbound_email_delivered",
+                messageId,
+                key,
+                status: response.status,
+                bytes: raw.length,
+              }),
+            );
+          }
+
+          exports.handler = async (event) => {
+            const records = Array.isArray(event && event.Records)
+              ? event.Records
+              : [];
+            if (records.length === 0) {
+              throw new Error("SES event contained no records");
+            }
+            await Promise.all(records.map(deliver));
+            return { delivered: records.length };
+          };
+
+  DeliveryLambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${DeliveryLambda}'
+      RetentionInDays: 30
+
+  DeliveryLambdaFailureHandling:
+    Type: AWS::Lambda::EventInvokeConfig
+    Properties:
+      FunctionName: !Ref DeliveryLambda
+      Qualifier: $LATEST
+      MaximumEventAgeInSeconds: 21600
+      MaximumRetryAttempts: 2
+      DestinationConfig:
+        OnFailure:
+          Destination: !GetAtt FailedDeliveryQueue.Arn
+
+  AllowSesInvokeDeliveryLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref DeliveryLambda
+      Principal: ses.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+      SourceArn: !Sub 'arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:receipt-rule-set/${ReceiptRuleSetName}:receipt-rule/${ReceiptRuleName}'
+
+  ReceiptRuleSet:
+    Type: AWS::SES::ReceiptRuleSet
+    Properties:
+      RuleSetName: !Ref ReceiptRuleSetName
+
+  ReceiptRule:
+    Type: AWS::SES::ReceiptRule
+    DependsOn:
+      - AllowSesInvokeDeliveryLambda
+      - DeliveryLambdaFailureHandling
+      - DeliveryLambdaLogGroup
+      - InboundDomainIdentity
+      - RawEmailBucketPolicy
+    Properties:
+      RuleSetName: !Ref ReceiptRuleSet
+      Rule:
+        Name: !Ref ReceiptRuleName
+        Enabled: true
+        ScanEnabled: true
+        TlsPolicy: Optional
+        Recipients:
+          - !Ref RecipientDomain
+        Actions:
+          - S3Action:
+              BucketName: !Ref RawEmailBucket
+              ObjectKeyPrefix: !Ref ObjectKeyPrefix
+          - LambdaAction:
+              FunctionArn: !GetAtt DeliveryLambda.Arn
+              InvocationType: Event
+          - StopAction:
+              Scope: RuleSet
+
+Outputs:
+  RecipientDomain:
+    Description: Catch-all domain accepted by the SES receipt rule.
+    Value: !Ref RecipientDomain
+
+  ExamplePilotAddress:
+    Description: >
+      Example only. No mailbox or alias resource is required; every local part
+      at the recipient domain reaches this rule.
+    Value: !Sub 'pilot-001@${RecipientDomain}'
+
+  InboundMxTarget:
+    Description: Cloudflare MX target. Configure it on the recipient subdomain at priority 10.
+    Value: !Sub 'inbound-smtp.${AWS::Region}.amazonaws.com'
+
+  DkimCnameName1:
+    Description: First Cloudflare CNAME name required to verify the inbound SES identity.
+    Value: !GetAtt InboundDomainIdentity.DkimDNSTokenName1
+
+  DkimCnameValue1:
+    Description: First Cloudflare CNAME target required to verify the inbound SES identity.
+    Value: !GetAtt InboundDomainIdentity.DkimDNSTokenValue1
+
+  DkimCnameName2:
+    Description: Second Cloudflare CNAME name required to verify the inbound SES identity.
+    Value: !GetAtt InboundDomainIdentity.DkimDNSTokenName2
+
+  DkimCnameValue2:
+    Description: Second Cloudflare CNAME target required to verify the inbound SES identity.
+    Value: !GetAtt InboundDomainIdentity.DkimDNSTokenValue2
+
+  DkimCnameName3:
+    Description: Third Cloudflare CNAME name required to verify the inbound SES identity.
+    Value: !GetAtt InboundDomainIdentity.DkimDNSTokenName3
+
+  DkimCnameValue3:
+    Description: Third Cloudflare CNAME target required to verify the inbound SES identity.
+    Value: !GetAtt InboundDomainIdentity.DkimDNSTokenValue3
+
+  ReceiptRuleSetName:
+    Description: Activate this SES receipt rule set after checking for an existing active set.
+    Value: !Ref ReceiptRuleSet
+
+  RawEmailBucketName:
+    Description: Private, retained source of truth for original MIME messages.
+    Value: !Ref RawEmailBucket
+
+  FailedDeliveryQueueUrl:
+    Description: Asynchronous Lambda failures that exhausted automatic retries.
+    Value: !Ref FailedDeliveryQueue
+
+  DeliveryLambdaLogGroup:
+    Value: !Ref DeliveryLambdaLogGroup

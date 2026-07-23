@@ -102,6 +102,98 @@ const MIGRATIONS = Object.freeze([
       );
     CREATE INDEX IF NOT EXISTS live_request_bid_memberships_district_idx
       ON live_request_bid_memberships(boundary_version,bid_id,srnumber);`
+  }),
+  Object.freeze({
+    version: 4,
+    name: 'add_nyc311_email_ingestion',
+    sql: `CREATE TABLE IF NOT EXISTS nyc311_email_aliases (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      local_part TEXT NOT NULL COLLATE NOCASE UNIQUE,
+      domain TEXT NOT NULL COLLATE NOCASE,
+      recipient_address TEXT NOT NULL COLLATE NOCASE UNIQUE,
+      srnumber TEXT COLLATE NOCASE UNIQUE,
+      token_hash TEXT NOT NULL UNIQUE CHECK(length(token_hash)=64),
+      state TEXT NOT NULL DEFAULT 'created'
+        CHECK(state IN ('created','subscribed','active','paused','retired','error')),
+      created_at TEXT NOT NULL,
+      subscribed_at TEXT,
+      last_received_at TEXT,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(srnumber)
+        REFERENCES live_portal_requests(srnumber) ON UPDATE CASCADE ON DELETE SET NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS nyc311_email_aliases_state_idx
+      ON nyc311_email_aliases(state,created_at);
+
+    CREATE TABLE IF NOT EXISTS nyc311_email_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      raw_sha256 TEXT NOT NULL UNIQUE CHECK(length(raw_sha256)=64),
+      raw_bytes INTEGER NOT NULL CHECK(raw_bytes>=0),
+      ses_message_id TEXT COLLATE NOCASE,
+      internet_message_id TEXT COLLATE NOCASE,
+      s3_bucket TEXT,
+      s3_key TEXT,
+      ses_source TEXT,
+      ses_destinations_json TEXT
+        CHECK(ses_destinations_json IS NULL OR json_valid(ses_destinations_json)),
+      ses_recipients_json TEXT
+        CHECK(ses_recipients_json IS NULL OR json_valid(ses_recipients_json)),
+      ses_metadata_json TEXT
+        CHECK(ses_metadata_json IS NULL OR json_valid(ses_metadata_json)),
+      recipient_address TEXT COLLATE NOCASE,
+      recipient_local_part TEXT COLLATE NOCASE,
+      alias_id INTEGER,
+      alias_match_status TEXT NOT NULL
+        CHECK(alias_match_status IN (
+          'matched','attached','mismatch','unregistered',
+          'missing_recipient','parsed_sr_missing','request_missing','alias_conflict'
+        )),
+      alias_srnumber TEXT,
+      parsed_srnumber TEXT,
+      reconciled_srnumber TEXT,
+      srnumber_mismatch INTEGER NOT NULL DEFAULT 0 CHECK(srnumber_mismatch IN (0,1)),
+      event_kind TEXT,
+      sender TEXT,
+      sender_name TEXT,
+      subject TEXT,
+      agency_name TEXT,
+      agency_acronym TEXT,
+      request_type_raw TEXT,
+      request_type TEXT,
+      request_subtype TEXT,
+      location TEXT,
+      submitted_at_raw TEXT,
+      submitted_at TEXT,
+      response_text TEXT,
+      next_update_text TEXT,
+      body_source TEXT,
+      spam_verdict TEXT,
+      virus_verdict TEXT,
+      spf_verdict TEXT,
+      dkim_verdict TEXT,
+      dmarc_verdict TEXT,
+      parsed_json TEXT CHECK(parsed_json IS NULL OR json_valid(parsed_json)),
+      parse_outcome TEXT NOT NULL
+        CHECK(parse_outcome IN ('parsed','unrecognized','error')),
+      parse_error TEXT,
+      received_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      closure_wake_queued INTEGER NOT NULL DEFAULT 0
+        CHECK(closure_wake_queued IN (0,1)),
+      FOREIGN KEY(alias_id) REFERENCES nyc311_email_aliases(id) ON DELETE SET NULL
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS nyc311_email_events_ses_message_id_idx
+      ON nyc311_email_events(ses_message_id)
+      WHERE ses_message_id IS NOT NULL AND TRIM(ses_message_id)<>'';
+    CREATE UNIQUE INDEX IF NOT EXISTS nyc311_email_events_internet_message_id_idx
+      ON nyc311_email_events(internet_message_id)
+      WHERE internet_message_id IS NOT NULL AND TRIM(internet_message_id)<>'';
+    CREATE INDEX IF NOT EXISTS nyc311_email_events_request_idx
+      ON nyc311_email_events(reconciled_srnumber,received_at);
+    CREATE INDEX IF NOT EXISTS nyc311_email_events_outcome_idx
+      ON nyc311_email_events(parse_outcome,received_at);`
   })
 ]);
 

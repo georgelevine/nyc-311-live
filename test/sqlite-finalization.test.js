@@ -330,7 +330,7 @@ test('finalizes, repairs only map-proven rows, and creates a verified backup man
     crypto.createHash('sha256').update(fs.readFileSync(backupPath)).digest('hex')
   );
   assert.equal(manifest.application_id, APPLICATION_ID);
-  assert.equal(manifest.user_version, 3);
+  assert.equal(manifest.user_version, MIGRATIONS.at(-1).version);
   assert.equal(manifest.health.ok, true);
   assert.deepEqual(manifest.tables.live_portal_requests, {
     count: 3,
@@ -355,7 +355,10 @@ test('finalizes, repairs only map-proven rows, and creates a verified backup man
   const backup = inspectDatabase(backupPath);
   try {
     assert.equal(backup.prepare('PRAGMA application_id').get().application_id, APPLICATION_ID);
-    assert.equal(backup.prepare('PRAGMA user_version').get().user_version, 3);
+    assert.equal(
+      backup.prepare('PRAGMA user_version').get().user_version,
+      MIGRATIONS.at(-1).version
+    );
     const migrations = backup.prepare(
       'SELECT version, name, checksum, applied_at FROM schema_migrations ORDER BY version'
     ).all();
@@ -425,7 +428,7 @@ test('finalizes, repairs only map-proven rows, and creates a verified backup man
     backupPath: secondBackupPath,
     now: new Date('2026-07-20T22:16:30.000Z')
   });
-  assert.equal(second.migrations_before.pending.length, 3);
+  assert.equal(second.migrations_before.pending.length, MIGRATIONS.length);
   assert.equal(second.planned.map_seen_repairs, 1);
   assert.equal(second.planned.submitted_at_normalizations, 1);
   assert.equal(second.changes.map_seen_repaired, 1);
@@ -446,7 +449,7 @@ for (const mode of ['dryRun', 'verifyOnly']) {
     assert.equal(result.mode, mode === 'dryRun' ? 'dry-run' : 'verify-only');
     assert.equal(result.planned.map_seen_repairs, 1);
     assert.equal(result.planned.submitted_at_normalizations, 1);
-    assert.equal(result.migrations_before.pending.length, 3);
+    assert.equal(result.migrations_before.pending.length, MIGRATIONS.length);
     assert.equal(result.backup, null);
     assert.equal(fs.existsSync(backupPath), false);
     assert.equal(fs.existsSync(`${backupPath}.manifest.json`), false);
@@ -510,9 +513,9 @@ test('precinct migration tolerates collector-created columns and remains idempot
       ALTER TABLE live_portal_requests ADD COLUMN police_precinct_matched_at TEXT;
     `);
     const first = applyMigrations(database, NOW.toISOString());
-    assert.equal(first.user_version, 3);
+    assert.equal(first.user_version, MIGRATIONS.at(-1).version);
     assert.equal(first.pending.length, 0);
-    assert.equal(first.applied.length, 3);
+    assert.equal(first.applied.length, MIGRATIONS.length);
     assert.equal(
       database.prepare(`
         SELECT COUNT(*) AS count FROM pragma_table_info('live_portal_requests')
@@ -525,9 +528,9 @@ test('precinct migration tolerates collector-created columns and remains idempot
       1
     );
     const second = applyMigrations(database, '2026-07-21T00:00:00.000Z');
-    assert.equal(second.user_version, 3);
+    assert.equal(second.user_version, MIGRATIONS.at(-1).version);
     assert.equal(second.pending.length, 0);
-    assert.equal(second.applied.length, 3);
+    assert.equal(second.applied.length, MIGRATIONS.length);
   } finally {
     database.close();
   }
@@ -544,9 +547,9 @@ test('BID migration tolerates collector-created columns and remains idempotent',
         ADD COLUMN business_improvement_district_matched_at TEXT;
     `);
     const first = applyMigrations(database, NOW.toISOString());
-    assert.equal(first.user_version, 3);
+    assert.equal(first.user_version, MIGRATIONS.at(-1).version);
     assert.equal(first.pending.length, 0);
-    assert.equal(first.applied.length, 3);
+    assert.equal(first.applied.length, MIGRATIONS.length);
     assert.equal(database.prepare(`
       SELECT COUNT(*) AS count FROM pragma_table_info('live_portal_requests')
       WHERE name LIKE 'business_improvement_district%'
@@ -560,9 +563,9 @@ test('BID migration tolerates collector-created columns and remains idempotent',
       )
     `).get().count, 3);
     const second = applyMigrations(database, '2026-07-21T00:00:00.000Z');
-    assert.equal(second.user_version, 3);
+    assert.equal(second.user_version, MIGRATIONS.at(-1).version);
     assert.equal(second.pending.length, 0);
-    assert.equal(second.applied.length, 3);
+    assert.equal(second.applied.length, MIGRATIONS.length);
   } finally {
     database.close();
   }

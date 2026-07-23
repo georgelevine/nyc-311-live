@@ -71,6 +71,25 @@ const REQUIRED_ARCHIVE_COLUMNS = Object.freeze({
   live_request_bid_memberships: Object.freeze([
     'srnumber', 'boundary_version', 'bid_id', 'matched_at'
   ]),
+  nyc311_email_aliases: Object.freeze([
+    'id', 'local_part', 'domain', 'recipient_address', 'srnumber',
+    'token_hash', 'state', 'created_at', 'subscribed_at', 'last_received_at',
+    'updated_at'
+  ]),
+  nyc311_email_events: Object.freeze([
+    'id', 'raw_sha256', 'raw_bytes', 'ses_message_id',
+    'internet_message_id', 's3_bucket', 's3_key', 'ses_source',
+    'ses_destinations_json', 'ses_recipients_json', 'ses_metadata_json',
+    'recipient_address', 'recipient_local_part', 'alias_id',
+    'alias_match_status', 'alias_srnumber', 'parsed_srnumber',
+    'reconciled_srnumber', 'srnumber_mismatch', 'event_kind', 'sender',
+    'sender_name', 'subject', 'agency_name', 'agency_acronym',
+    'request_type_raw', 'request_type', 'request_subtype', 'location',
+    'submitted_at_raw', 'submitted_at', 'response_text', 'next_update_text',
+    'body_source', 'spam_verdict', 'virus_verdict', 'spf_verdict',
+    'dkim_verdict', 'dmarc_verdict', 'parsed_json', 'parse_outcome',
+    'parse_error', 'received_at', 'created_at', 'closure_wake_queued'
+  ]),
   schema_migrations: Object.freeze(['version', 'name', 'checksum', 'applied_at'])
 });
 
@@ -89,6 +108,8 @@ const REQUIRED_ARCHIVE_PRIMARY_KEYS = Object.freeze({
   business_improvement_district_boundary_versions: Object.freeze(['version']),
   business_improvement_districts: Object.freeze(['boundary_version', 'bid_id']),
   live_request_bid_memberships: Object.freeze(['srnumber', 'boundary_version', 'bid_id']),
+  nyc311_email_aliases: Object.freeze(['id']),
+  nyc311_email_events: Object.freeze(['id']),
   schema_migrations: Object.freeze(['version'])
 });
 
@@ -111,6 +132,15 @@ const REQUIRED_ARCHIVE_UNIQUE_CONSTRAINTS = Object.freeze({
   ]),
   business_improvement_district_boundary_versions: Object.freeze([
     Object.freeze(['source_sha256'])
+  ]),
+  nyc311_email_aliases: Object.freeze([
+    Object.freeze(['local_part']),
+    Object.freeze(['recipient_address']),
+    Object.freeze(['srnumber']),
+    Object.freeze(['token_hash'])
+  ]),
+  nyc311_email_events: Object.freeze([
+    Object.freeze(['raw_sha256'])
   ]),
   schema_migrations: Object.freeze([Object.freeze(['name'])])
 });
@@ -144,6 +174,22 @@ const REQUIRED_ARCHIVE_FOREIGN_KEYS = Object.freeze({
       referenced_table: 'live_portal_requests',
       referenced_columns: Object.freeze(['srnumber']),
       on_delete: 'CASCADE'
+    })
+  ]),
+  nyc311_email_aliases: Object.freeze([
+    Object.freeze({
+      columns: Object.freeze(['srnumber']),
+      referenced_table: 'live_portal_requests',
+      referenced_columns: Object.freeze(['srnumber']),
+      on_delete: 'SET NULL'
+    })
+  ]),
+  nyc311_email_events: Object.freeze([
+    Object.freeze({
+      columns: Object.freeze(['alias_id']),
+      referenced_table: 'nyc311_email_aliases',
+      referenced_columns: Object.freeze(['id']),
+      on_delete: 'SET NULL'
     })
   ])
 });
@@ -249,6 +295,36 @@ const REQUIRED_ARCHIVE_INDEX_CONTRACTS = Object.freeze({
     table: 'request_status_history',
     unique: false,
     keys: Object.freeze([indexKey('srnumber'), indexKey('observed_at')]),
+    where: null
+  }),
+  nyc311_email_aliases_state_idx: Object.freeze({
+    table: 'nyc311_email_aliases',
+    unique: false,
+    keys: Object.freeze([indexKey('state'), indexKey('created_at')]),
+    where: null
+  }),
+  nyc311_email_events_ses_message_id_idx: Object.freeze({
+    table: 'nyc311_email_events',
+    unique: true,
+    keys: Object.freeze([indexKey('ses_message_id')]),
+    where: "ses_message_id is not null and trim(ses_message_id)<>''"
+  }),
+  nyc311_email_events_internet_message_id_idx: Object.freeze({
+    table: 'nyc311_email_events',
+    unique: true,
+    keys: Object.freeze([indexKey('internet_message_id')]),
+    where: "internet_message_id is not null and trim(internet_message_id)<>''"
+  }),
+  nyc311_email_events_request_idx: Object.freeze({
+    table: 'nyc311_email_events',
+    unique: false,
+    keys: Object.freeze([indexKey('reconciled_srnumber'), indexKey('received_at')]),
+    where: null
+  }),
+  nyc311_email_events_outcome_idx: Object.freeze({
+    table: 'nyc311_email_events',
+    unique: false,
+    keys: Object.freeze([indexKey('parse_outcome'), indexKey('received_at')]),
     where: null
   })
 });

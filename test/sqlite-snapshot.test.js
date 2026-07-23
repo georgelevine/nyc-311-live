@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { applyMigrations, finalizeDatabase } = require('../sqlite-finalization');
+const { MIGRATIONS, applyMigrations, finalizeDatabase } = require('../sqlite-finalization');
 const { verifySnapshot } = require('../sqlite-snapshot');
 const { createArchiveFixture } = require('../test-support/archive-fixture');
 const { DatabaseSync } = require('node:sqlite');
@@ -35,7 +35,7 @@ test('verifies the finalized file, digest, schema version, and table manifest', 
   });
   assert.equal(result.ok, true);
   assert.equal(result.application_id, finalized.backup.manifest.application_id);
-  assert.equal(result.user_version, 3);
+  assert.equal(result.user_version, MIGRATIONS.at(-1).version);
   assert.equal(finalized.backup.manifest.journal_mode, 'delete');
   assert.equal(fs.existsSync(`${backup}-wal`), false);
   assert.equal(fs.existsSync(`${backup}-shm`), false);

@@ -22,6 +22,11 @@ const { normalizePortalTimestamp } = require('./portal-timestamp');
 const { loadSqliteLiveSummary } = require('./sqlite-live-summary');
 const { readStoredPortalDetail } = require('./stored-portal-detail');
 const {
+  MAX_RAW_EMAIL_BYTES,
+  createNyc311EmailHandler
+} = require('./nyc311-email-inbound');
+const { parseNyc311Notification } = require('./nyc311-notification-email');
+const {
   BoundaryLookupError,
   loadActiveBusinessImprovementDistrictFeature,
   loadActivePolicePrecinctFeature,
@@ -202,6 +207,19 @@ function cachedLiveSummary(database, databasePath, scope = null) {
   liveSummaryCache.set(cacheKey, { created_at: now, revision, summary });
   return summary;
 }
+
+// This machine-to-machine webhook is authenticated with signatures over the
+// exact MIME bytes. It must run before JSON parsing and dashboard Basic Auth.
+app.post(
+  '/api/inbound/nyc311-email',
+  express.raw({
+    type: ['message/rfc822', 'application/octet-stream'],
+    limit: MAX_RAW_EMAIL_BYTES
+  }),
+  createNyc311EmailHandler({
+    parseNotification: parseNyc311Notification
+  })
+);
 
 app.use(express.json({ limit: '16kb' }));
 app.use(createDashboardAuth(dashboardAuth));
