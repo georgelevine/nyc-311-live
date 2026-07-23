@@ -512,7 +512,17 @@ function persistInboundEmail(database, {
         UPDATE nyc311_email_events SET closure_wake_queued=1 WHERE id=?
       `).run(id);
     }
-    database.exec('COMMIT');
+    const subscriptionScope = reconciliation.reconciledSrnumber
+      ? database.prepare(`
+          SELECT scope_type,scope_id,scope_label
+          FROM nyc311_email_subscription_jobs
+          WHERE srnumber=?
+          ORDER BY
+            CASE WHEN state='subscribed' THEN 0 ELSE 1 END,
+            updated_at DESC
+          LIMIT 1
+        `).get(reconciliation.reconciledSrnumber)
+      : null;
     const forward = values.parseOutcome === 'parsed'
       && !reconciliation.mismatch
       && reconciliation.reconciledSrnumber
@@ -530,9 +540,13 @@ function persistInboundEmail(database, {
           submitted_at: values.submittedAt,
           response_text: values.responseText,
           next_update_text: values.nextUpdateText,
-          received_at: receivedAt
+          received_at: receivedAt,
+          scope_type: subscriptionScope ? subscriptionScope.scope_type : null,
+          scope_id: subscriptionScope ? subscriptionScope.scope_id : null,
+          scope_label: subscriptionScope ? subscriptionScope.scope_label : null
         }
       : null;
+    database.exec('COMMIT');
     return {
       id,
       duplicate: false,

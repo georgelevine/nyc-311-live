@@ -46,6 +46,7 @@
   const detailEmailUpdates = document.getElementById('detail-email-updates');
   const detailEmailCount = document.getElementById('detail-email-count');
   const detailEmailEvents = document.getElementById('detail-email-events');
+  const { buildStatusUpdateModel } = window.NYC311StatusUpdateModel;
   const compactLayout = window.matchMedia('(max-width: 900px)');
   const summaryElements = {
     root: document.getElementById('city-summary'),
@@ -68,6 +69,7 @@
   const MAX_VISIBLE_RECORDS = 750;
   const MAP_REFRESH_MS = 15_000;
   const EMAIL_UPDATES_REFRESH_MS = 15_000;
+  const STATUS_HISTORY_REFRESH_MS = 15_000;
   let records = [];
   let mapRecords = [];
   let feedByNumber = new Map();
@@ -94,6 +96,11 @@
   let emailUpdatesLoadSequence = 0;
   let emailUpdatesAbortController = null;
   let emailUpdatesInFlightFor = null;
+  let statusHistoryByNumber = new Map();
+  let statusHistoryLoadedAt = new Map();
+  let statusHistoryLoadSequence = 0;
+  let statusHistoryAbortController = null;
+  let statusHistoryInFlightFor = null;
   let highestObservedSuffix = null;
   let arrivingNumbers = new Set();
   let lastGoodSummary = null;
@@ -541,7 +548,7 @@
     }
   }
 
-  function clearEmailUpdatesPanel({ resetDisclosure = false } = {}) {
+  function clearStatusUpdatesPanel({ resetDisclosure = false } = {}) {
     detailEmailCount.textContent = '';
     detailEmailEvents.replaceChildren();
     detailEmailUpdates.hidden = true;
@@ -558,6 +565,12 @@
   }
 
   function emailVerificationState(record, update) {
+    if (update && update.verification_label) {
+      return {
+        label: update.verification_label,
+        state: update.verification_state || 'waiting'
+      };
+    }
     if (String(update && update.event_kind || '').toLowerCase() !== 'closed') return null;
     const followupState = String(record && record.followup_state || '').toLowerCase();
     if (followupState === 'closed') {
@@ -585,7 +598,7 @@
       ? 'Closed'
       : 'Updated';
     const title = document.createElement('strong');
-    title.textContent = eventKind;
+    title.textContent = update && update.title || eventKind;
     const received = document.createElement('time');
     received.textContent = fullTimeLabel(update && update.received_at);
     if (update && update.received_at) received.dateTime = update.received_at;
@@ -593,7 +606,11 @@
 
     const agency = document.createElement('p');
     agency.className = 'detail-email-agency';
-    agency.textContent = emailAgencyLabel(update);
+    const agencyLabel = emailAgencyLabel(update);
+    const sourceLabel = String(update && update.source_label || 'NYC311 email').trim();
+    agency.textContent = agencyLabel === 'NYC311'
+      ? sourceLabel
+      : `${sourceLabel} · ${agencyLabel}`;
     item.append(heading, agency);
 
     const type = String(update && update.request_type || '').trim();
@@ -635,29 +652,100 @@
     detailEmailEvents.append(item);
   }
 
-  function renderEmailUpdates(record, payload, { resetDisclosure = false } = {}) {
+  function appendPortalUpdate(update) {
+    const item = document.createElement('li');
+    item.className = 'detail-email-event detail-portal-event';
+
+    const heading = document.createElement('div');
+    heading.className = 'detail-email-event-heading';
+    const title = document.createElement('strong');
+    title.textContent = update && update.title || update && update.status || 'Status updated';
+    const effective = document.createElement('time');
+    const effectiveAt = update && update.effective_at;
+    effective.textContent = effectiveAt ? fullTimeLabel(effectiveAt) : '';
+    if (effectiveAt) effective.dateTime = effectiveAt;
+    heading.append(title, effective);
+
+    const source = document.createElement('p');
+    source.className = 'detail-email-agency';
+    source.textContent = update && update.source_label || 'NYC311 Portal';
+    item.append(heading, source);
+
+    const response = document.createElement('p');
+    const responseText = String(update && update.response_text || '').trim();
+    response.className = responseText
+      ? 'detail-email-response'
+      : 'detail-email-response detail-status-no-narrative';
+    response.textContent = responseText || (
+      isClosed(update && update.status)
+        ? 'NYC311 did not publish an agency response with this Portal status change.'
+        : 'NYC311 did not publish additional details with this Portal status change.'
+    );
+    item.append(response);
+
+    const observedAt = update && update.observed_at;
+    if (observedAt) {
+      const observed = document.createElement('p');
+      observed.className = 'detail-email-next';
+      const label = document.createElement('strong');
+      label.textContent = update.verification_state === 'verified' ? 'Verified: ' : 'Observed: ';
+      const time = document.createElement('time');
+      time.textContent = fullTimeLabel(observedAt);
+      time.dateTime = observedAt;
+      observed.append(label, time);
+      item.append(observed);
+    }
+
+    if (update && update.final_state === 'date_missing' && !update.effective_at) {
+      const missingDate = document.createElement('p');
+      missingDate.className = 'detail-email-next';
+      missingDate.textContent = 'NYC311 did not publish a closure time.';
+      item.append(missingDate);
+    }
+
+    if (update && update.verification_label) {
+      const verification = document.createElement('span');
+      verification.className = 'detail-email-verification';
+      verification.dataset.state = update.verification_state || 'waiting';
+      verification.textContent = update.verification_label;
+      item.append(verification);
+    }
+
+    detailEmailEvents.append(item);
+  }
+
+  function renderStatusUpdates(record, { resetDisclosure = false } = {}) {
     if (!record || selectedNumber !== record.srnumber) return;
-    const updates = Array.isArray(payload && payload.updates) ? payload.updates : [];
-    clearEmailUpdatesPanel({ resetDisclosure });
-    if (!updates.length) return;
-    const total = Number(payload && payload.total);
-    const totalUpdates = Number.isFinite(total) && total >= updates.length ? total : updates.length;
-    detailEmailCount.textContent = totalUpdates > updates.length
-      ? `${updates.length} of ${totalUpdates} updates`
-      : `${updates.length} ${updates.length === 1 ? 'update' : 'updates'}`;
-    for (const update of updates) appendEmailUpdate(record, update);
+    const model = buildStatusUpdateModel(
+      record,
+      statusHistoryByNumber.get(record.srnumber) || null,
+      emailUpdatesByNumber.get(record.srnumber) || null
+    );
+    clearStatusUpdatesPanel({ resetDisclosure });
+    if (!model.events.length) return;
+    detailEmailCount.textContent = model.total > model.events.length
+      ? `${model.events.length} of ${model.total} events`
+      : `${model.events.length} ${model.events.length === 1 ? 'event' : 'events'}`;
+    for (const update of model.events) {
+      if (update.source === 'portal') appendPortalUpdate(update);
+      else appendEmailUpdate(record, update);
+    }
     detailEmailUpdates.hidden = false;
   }
 
-  function beginEmailUpdatesSelection(record) {
+  function beginStatusUpdatesSelection(record) {
     emailUpdatesLoadSequence += 1;
+    statusHistoryLoadSequence += 1;
     if (emailUpdatesAbortController) emailUpdatesAbortController.abort();
+    if (statusHistoryAbortController) statusHistoryAbortController.abort();
     emailUpdatesAbortController = null;
     emailUpdatesInFlightFor = null;
-    clearEmailUpdatesPanel({ resetDisclosure: true });
-    const cached = emailUpdatesByNumber.get(record.srnumber);
-    if (cached) renderEmailUpdates(record, cached, { resetDisclosure: true });
+    statusHistoryAbortController = null;
+    statusHistoryInFlightFor = null;
+    clearStatusUpdatesPanel({ resetDisclosure: true });
+    renderStatusUpdates(record, { resetDisclosure: true });
     loadEmailUpdates(record, { force: true });
+    loadStatusHistory(record, { force: true });
   }
 
   async function loadEmailUpdates(record, { force = false } = {}) {
@@ -681,7 +769,7 @@
       emailUpdatesByNumber.set(record.srnumber, payload);
       emailUpdatesLoadedAt.set(record.srnumber, Date.now());
       if (sequence === emailUpdatesLoadSequence && selectedNumber === record.srnumber) {
-        renderEmailUpdates(record, payload);
+        renderStatusUpdates(record);
       }
     } catch (error) {
       if (error.name !== 'AbortError') console.warn(error);
@@ -689,6 +777,39 @@
       if (emailUpdatesAbortController === controller) {
         emailUpdatesAbortController = null;
         emailUpdatesInFlightFor = null;
+      }
+    }
+  }
+
+  async function loadStatusHistory(record, { force = false } = {}) {
+    if (!record || selectedNumber !== record.srnumber) return;
+    const now = Date.now();
+    const loadedAt = statusHistoryLoadedAt.get(record.srnumber) || 0;
+    if (!force && now - loadedAt < STATUS_HISTORY_REFRESH_MS) return;
+    if (statusHistoryInFlightFor === record.srnumber) return;
+
+    const sequence = statusHistoryLoadSequence;
+    const controller = new AbortController();
+    statusHistoryAbortController = controller;
+    statusHistoryInFlightFor = record.srnumber;
+    try {
+      const response = await fetch(`/api/status-history/${encodeURIComponent(record.srnumber)}`, {
+        cache: 'no-store',
+        signal: controller.signal
+      });
+      if (!response.ok) throw new Error(`Status history service returned ${response.status}`);
+      const payload = await response.json();
+      statusHistoryByNumber.set(record.srnumber, payload);
+      statusHistoryLoadedAt.set(record.srnumber, Date.now());
+      if (sequence === statusHistoryLoadSequence && selectedNumber === record.srnumber) {
+        renderStatusUpdates(record);
+      }
+    } catch (error) {
+      if (error.name !== 'AbortError') console.warn(error);
+    } finally {
+      if (statusHistoryAbortController === controller) {
+        statusHistoryAbortController = null;
+        statusHistoryInFlightFor = null;
       }
     }
   }
@@ -855,7 +976,7 @@
     setDetailPanelVisible(true);
     renderFeed();
     loadPortalDetails(record);
-    beginEmailUpdatesSelection(record);
+    beginStatusUpdatesSelection(record);
     const coordinates = recordCoordinates(record);
     if (moveMap && coordinates) {
       cancelPendingBoundaryFit();
@@ -1549,7 +1670,11 @@
         : 'Waiting for data';
       connection.classList.remove('offline');
       updateConnectionLabel();
-      if (selectedNumber) loadEmailUpdates(findRecord(selectedNumber));
+      if (selectedNumber) {
+        const selectedRecord = findRecord(selectedNumber);
+        loadEmailUpdates(selectedRecord);
+        loadStatusHistory(selectedRecord);
+      }
     } catch (error) {
       if (error.name === 'AbortError') return;
       if (sequence !== dashboardRequestSequence) return;
@@ -1596,10 +1721,14 @@
     highestObservedSuffix = null;
     detailLoadSequence += 1;
     emailUpdatesLoadSequence += 1;
+    statusHistoryLoadSequence += 1;
     if (emailUpdatesAbortController) emailUpdatesAbortController.abort();
+    if (statusHistoryAbortController) statusHistoryAbortController.abort();
     emailUpdatesAbortController = null;
     emailUpdatesInFlightFor = null;
-    clearEmailUpdatesPanel({ resetDisclosure: true });
+    statusHistoryAbortController = null;
+    statusHistoryInFlightFor = null;
+    clearStatusUpdatesPanel({ resetDisclosure: true });
     archiveSearchSequence += 1;
     archiveSearchRecord = null;
     archiveSearchState = 'idle';
@@ -1646,10 +1775,14 @@
   document.getElementById('detail-close').addEventListener('click', () => {
     detailLoadSequence += 1;
     emailUpdatesLoadSequence += 1;
+    statusHistoryLoadSequence += 1;
     if (emailUpdatesAbortController) emailUpdatesAbortController.abort();
+    if (statusHistoryAbortController) statusHistoryAbortController.abort();
     emailUpdatesAbortController = null;
     emailUpdatesInFlightFor = null;
-    clearEmailUpdatesPanel({ resetDisclosure: true });
+    statusHistoryAbortController = null;
+    statusHistoryInFlightFor = null;
+    clearStatusUpdatesPanel({ resetDisclosure: true });
     const closedNumber = selectedNumber;
     selectedNumber = null;
     setDetailPanelVisible(false);

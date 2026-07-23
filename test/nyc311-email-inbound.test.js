@@ -385,6 +385,16 @@ test('handler verifies both signed layers, SES verdicts, timestamp, and idempote
     now: NOW,
     randomBytes: deterministicRandom
   });
+  database.prepare(`
+    INSERT INTO nyc311_email_subscription_jobs (
+      srnumber,alias_id,bid_id,state,attempts,next_attempt_at,last_error,
+      created_at,updated_at,subscribed_at,scope_type,scope_id,scope_label
+    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+  `).run(
+    '311-28327449', alias.id, 68, 'subscribed', 1, NOW.toISOString(), null,
+    NOW.toISOString(), NOW.toISOString(), NOW.toISOString(),
+    'bid', 68, 'Hudson Square BID'
+  );
   database.close();
   const raw = Buffer.from('From: SRNotice@customercare.nyc.gov\r\n\r\nclosed');
   const handler = createNyc311EmailHandler({
@@ -418,7 +428,10 @@ test('handler verifies both signed layers, SES verdicts, timestamp, and idempote
       submitted_at: '2026-07-22T18:46:35',
       response_text: 'The agency responded to the complaint.',
       next_update_text: null,
-      received_at: '2026-07-23T13:59:59.000Z'
+      received_at: '2026-07-23T13:59:59.000Z',
+      scope_type: 'bid',
+      scope_id: 68,
+      scope_label: 'Hudson Square BID'
     }
   });
 
