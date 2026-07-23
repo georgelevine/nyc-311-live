@@ -472,7 +472,7 @@ Resources:
               return { statusCode: 400, body: JSON.stringify({ error: "invalid_request" }) };
             }
             const lines = [
-              `New Hudson Square request · ${srnumber}`,
+              `New ${cleanHeader(request.scope_label, "monitored")} request · ${srnumber}`,
               "",
               cleanHeader(request.problem),
               cleanHeader(request.problem_details),
@@ -493,7 +493,7 @@ Resources:
               cleanHeader(request.portal_url),
             ].filter(Boolean);
             const initialHtml = emailShell({
-              eyebrow: "Hudson Square BID · New request",
+              eyebrow: `${cleanHeader(request.scope_label, "NYC311")} · New request`,
               status: request.status || "New",
               srnumber,
               title: request.problem || "NYC311 request",
@@ -518,7 +518,7 @@ Resources:
               Content: {
                 Simple: {
                   Subject: {
-                    Data: `New Hudson Square NYC311 request · ${srnumber}`,
+                    Data: `New ${cleanHeader(request.scope_label, "monitored")} NYC311 request · ${srnumber}`,
                     Charset: "UTF-8",
                   },
                   Body: {

@@ -22,6 +22,15 @@ function parseBidIds(value) {
     .filter(Number.isInteger))];
 }
 
+function precinctLabel(number) {
+  const value = Number(number);
+  const remainder100 = value % 100;
+  const suffix = remainder100 >= 11 && remainder100 <= 13
+    ? 'th'
+    : ({ 1: 'st', 2: 'nd', 3: 'rd' }[value % 10] || 'th');
+  return `NYPD ${value}${suffix} Precinct`;
+}
+
 function modalUrl(portalId) {
   const id = String(portalId || '').trim();
   if (!/^[0-9a-f-]{36}$/i.test(id)) throw new TypeError('portalId must be a UUID');
@@ -105,10 +114,10 @@ function enqueueBidSubscriptions(database, bidIds, {
   const insert = database.prepare(`
     INSERT OR IGNORE INTO nyc311_email_subscription_jobs (
       srnumber,alias_id,bid_id,state,attempts,next_attempt_at,last_error,
-      created_at,updated_at,subscribed_at
+      created_at,updated_at,subscribed_at,scope_type,scope_id,scope_label
     )
     SELECT ?,?,?,CASE WHEN alias.state IN ('subscribed','active') THEN 'subscribed' ELSE 'pending' END,
-           0,?,NULL,?,?,alias.subscribed_at
+           0,?,NULL,?,?,alias.subscribed_at,'bid',?,?
     FROM nyc311_email_aliases AS alias WHERE alias.id=?
   `);
   const findBid = database.prepare(`
@@ -123,7 +132,55 @@ function enqueueBidSubscriptions(database, bidIds, {
     const alias = createRequestAlias(database, { srnumber: row.srnumber, domain, now });
     const bid = findBid.get(row.srnumber, ...bidIds);
     added += insert.run(
-      row.srnumber, alias.id, bid.bid_id, nowIso, nowIso, nowIso, alias.id
+      row.srnumber, alias.id, bid.bid_id, nowIso, nowIso, nowIso,
+      bid.bid_id, bid.bid_id === 68 ? 'Hudson Square BID' : `BID ${bid.bid_id}`,
+      alias.id
+    ).changes;
+  }
+  return added;
+}
+
+function enqueuePrecinctSubscriptions(database, precincts, {
+  domain = process.env.INBOUND_EMAIL_DOMAIN,
+  startAt,
+  now = new Date()
+} = {}) {
+  if (!precincts.length) return 0;
+  const cutoff = new Date(startAt);
+  if (!Number.isFinite(cutoff.getTime())) {
+    throw new Error('EMAIL_PRECINCT_START_AT must be a valid timestamp');
+  }
+  const nowIso = now.toISOString();
+  const placeholders = precincts.map(() => '?').join(',');
+  const rows = database.prepare(`
+    SELECT srnumber,police_precinct
+    FROM live_portal_requests
+    WHERE police_precinct IN (${placeholders})
+      AND portal_id IS NOT NULL
+      AND first_seen_at>=?
+    ORDER BY suffix
+  `).all(...precincts, cutoff.toISOString());
+  const insert = database.prepare(`
+    INSERT OR IGNORE INTO nyc311_email_subscription_jobs (
+      srnumber,alias_id,bid_id,state,attempts,next_attempt_at,last_error,
+      created_at,updated_at,subscribed_at,scope_type,scope_id,scope_label
+    )
+    SELECT ?,?,0,CASE WHEN alias.state IN ('subscribed','active') THEN 'subscribed' ELSE 'pending' END,
+           0,?,NULL,?,?,alias.subscribed_at,'police_precinct',?,?
+    FROM nyc311_email_aliases AS alias WHERE alias.id=?
+  `);
+  let added = 0;
+  for (const row of rows) {
+    const alias = createRequestAlias(database, { srnumber: row.srnumber, domain, now });
+    added += insert.run(
+      row.srnumber,
+      alias.id,
+      nowIso,
+      nowIso,
+      nowIso,
+      row.police_precinct,
+      precinctLabel(row.police_precinct),
+      alias.id
     ).changes;
   }
   return added;
@@ -169,9 +226,11 @@ module.exports = {
   claimSubscription,
   completeSubscription,
   enqueueBidSubscriptions,
+  enqueuePrecinctSubscriptions,
   formPayload,
   modalUrl,
   parseBidIds,
+  precinctLabel,
   retrySubscription,
   subscribeRequest
 };

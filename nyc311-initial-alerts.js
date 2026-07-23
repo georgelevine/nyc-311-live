@@ -3,21 +3,32 @@
 const crypto = require('crypto');
 const fetch = require('node-fetch');
 
-function enqueueInitialAlerts(database, bidIds, now = new Date()) {
-  if (!bidIds.length) return 0;
-  const placeholders = bidIds.map(() => '?').join(',');
+function enqueueInitialAlerts(database, {
+  bidIds = [],
+  precincts = []
+} = {}, now = new Date()) {
+  if (!bidIds.length && !precincts.length) return 0;
+  const bidPlaceholders = bidIds.map(() => '?').join(',') || 'NULL';
+  const precinctPlaceholders = precincts.map(() => '?').join(',') || 'NULL';
   const nowIso = now.toISOString();
   return database.prepare(`
     INSERT OR IGNORE INTO nyc311_initial_email_jobs (
-      srnumber,bid_id,state,attempts,next_attempt_at,last_error,created_at,updated_at,sent_at
+      srnumber,bid_id,state,attempts,next_attempt_at,last_error,created_at,updated_at,sent_at,
+      scope_type,scope_id,scope_label
     )
-    SELECT subscription.srnumber,subscription.bid_id,'pending',0,?,NULL,?,?,NULL
+    SELECT subscription.srnumber,subscription.bid_id,'pending',0,?,NULL,?,?,NULL,
+           subscription.scope_type,subscription.scope_id,subscription.scope_label
     FROM nyc311_email_subscription_jobs subscription
     JOIN portal_requests detail USING(srnumber)
-    WHERE subscription.bid_id IN (${placeholders})
+    WHERE ((
+      subscription.scope_type='bid' AND subscription.scope_id IN (${bidPlaceholders})
+    ) OR (
+      subscription.scope_type='police_precinct'
+      AND subscription.scope_id IN (${precinctPlaceholders})
+    ))
       AND subscription.state='subscribed'
     ORDER BY subscription.created_at
-  `).run(nowIso, nowIso, nowIso, ...bidIds).changes;
+  `).run(nowIso, nowIso, nowIso, ...bidIds, ...precincts).changes;
 }
 
 function claimInitialAlert(database, now = new Date()) {
@@ -46,6 +57,9 @@ function initialPayload(row) {
     kind: 'initial_request',
     srnumber: row.srnumber,
     bid_id: row.bid_id,
+    scope_type: row.scope_type || 'bid',
+    scope_id: row.scope_id || row.bid_id,
+    scope_label: row.scope_label || (row.bid_id === 68 ? 'Hudson Square BID' : 'NYC311'),
     problem: row.problem || row.map_problem || null,
     problem_details: row.problem_details || null,
     additional_details: row.additional_details || null,

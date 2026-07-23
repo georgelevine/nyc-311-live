@@ -30,6 +30,7 @@ const {
   claimSubscription,
   completeSubscription,
   enqueueBidSubscriptions,
+  enqueuePrecinctSubscriptions,
   parseBidIds,
   retrySubscription,
   subscribeRequest
@@ -50,6 +51,8 @@ const AUDIT_DELAY_MINUTES = Math.max(30, Number(process.env.AUDIT_DELAY_MINUTES 
 // minute while keeping total routine Portal traffic below about 30/minute.
 const DETAIL_REQUEST_DELAY_MS = Math.max(500, Number(process.env.DETAIL_REQUEST_DELAY_MS || 2500));
 const EMAIL_SUBSCRIBE_BID_IDS = parseBidIds(process.env.EMAIL_SUBSCRIBE_BID_IDS);
+const EMAIL_SUBSCRIBE_PRECINCTS = parseBidIds(process.env.EMAIL_SUBSCRIBE_PRECINCTS);
+const EMAIL_PRECINCT_START_AT = process.env.EMAIL_PRECINCT_START_AT || null;
 const EMAIL_SUBSCRIPTION_DELAY_MS = Math.max(
   1000,
   Number(process.env.EMAIL_SUBSCRIPTION_DELAY_MS || 5000)
@@ -446,16 +449,30 @@ function requestStop(reason = 'requested') {
 }
 
 function startEmailSubscriptions() {
-  if (!EMAIL_SUBSCRIBE_BID_IDS.length || emailSubscriptionPromise) return;
+  if ((!EMAIL_SUBSCRIBE_BID_IDS.length && !EMAIL_SUBSCRIBE_PRECINCTS.length)
+      || emailSubscriptionPromise) return;
   emailSubscriptionPromise = (async () => {
     while (!detailHydrationStopping) {
       try {
         const added = enqueueBidSubscriptions(db, EMAIL_SUBSCRIBE_BID_IDS);
-        const initialAdded = enqueueInitialAlerts(db, EMAIL_SUBSCRIBE_BID_IDS);
+        const precinctAdded = enqueuePrecinctSubscriptions(db, EMAIL_SUBSCRIBE_PRECINCTS, {
+          startAt: EMAIL_PRECINCT_START_AT
+        });
+        const initialAdded = enqueueInitialAlerts(db, {
+          bidIds: EMAIL_SUBSCRIBE_BID_IDS,
+          precincts: EMAIL_SUBSCRIBE_PRECINCTS
+        });
         if (added) {
           console.log(JSON.stringify({
             email_subscriptions_queued: added,
             bid_ids: EMAIL_SUBSCRIBE_BID_IDS
+          }));
+        }
+        if (precinctAdded) {
+          console.log(JSON.stringify({
+            email_subscriptions_queued: precinctAdded,
+            police_precincts: EMAIL_SUBSCRIBE_PRECINCTS,
+            first_seen_at_or_after: EMAIL_PRECINCT_START_AT
           }));
         }
         if (initialAdded) {

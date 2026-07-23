@@ -239,6 +239,34 @@ const MIGRATIONS = Object.freeze([
 
     CREATE INDEX IF NOT EXISTS nyc311_initial_email_jobs_due_idx
       ON nyc311_initial_email_jobs(state,next_attempt_at,bid_id);`
+  }),
+  Object.freeze({
+    version: 7,
+    name: 'generalize_nyc311_email_monitoring_scopes',
+    sql: `ALTER TABLE nyc311_email_subscription_jobs
+      ADD COLUMN scope_type TEXT NOT NULL DEFAULT 'bid'
+        CHECK(scope_type IN ('bid','police_precinct'));
+    ALTER TABLE nyc311_email_subscription_jobs ADD COLUMN scope_id INTEGER;
+    ALTER TABLE nyc311_email_subscription_jobs ADD COLUMN scope_label TEXT;
+    UPDATE nyc311_email_subscription_jobs
+    SET scope_id=bid_id,
+        scope_label=CASE WHEN bid_id=68 THEN 'Hudson Square BID' ELSE 'BID ' || bid_id END
+    WHERE scope_id IS NULL;
+
+    ALTER TABLE nyc311_initial_email_jobs
+      ADD COLUMN scope_type TEXT NOT NULL DEFAULT 'bid'
+        CHECK(scope_type IN ('bid','police_precinct'));
+    ALTER TABLE nyc311_initial_email_jobs ADD COLUMN scope_id INTEGER;
+    ALTER TABLE nyc311_initial_email_jobs ADD COLUMN scope_label TEXT;
+    UPDATE nyc311_initial_email_jobs
+    SET scope_id=bid_id,
+        scope_label=CASE WHEN bid_id=68 THEN 'Hudson Square BID' ELSE 'BID ' || bid_id END
+    WHERE scope_id IS NULL;
+
+    CREATE INDEX IF NOT EXISTS nyc311_email_subscription_jobs_scope_idx
+      ON nyc311_email_subscription_jobs(scope_type,scope_id,state);
+    CREATE INDEX IF NOT EXISTS nyc311_initial_email_jobs_scope_idx
+      ON nyc311_initial_email_jobs(scope_type,scope_id,state);`
   })
 ]);
 
