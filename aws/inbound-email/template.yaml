@@ -263,6 +263,98 @@ Resources:
               : cleanHeader(value);
           }
 
+          function escapeHtml(value) {
+            return String(value || "")
+              .replace(/&/g, "&amp;")
+              .replace(/</g, "&lt;")
+              .replace(/>/g, "&gt;")
+              .replace(/"/g, "&quot;")
+              .replace(/'/g, "&#39;");
+          }
+
+          function detailRow(label, value) {
+            if (!value) return "";
+            return `<tr>
+              <td style="padding:8px 12px 8px 0;color:#6b7a90;font-size:13px;vertical-align:top;white-space:nowrap">${escapeHtml(label)}</td>
+              <td style="padding:8px 0;color:#172638;font-size:14px;font-weight:600;vertical-align:top">${escapeHtml(value)}</td>
+            </tr>`;
+          }
+
+          function emailShell({
+            eyebrow,
+            status,
+            srnumber,
+            title,
+            subtitle,
+            rows,
+            sectionTitle,
+            sectionBody,
+            nextUpdate,
+            portalUrl,
+          }) {
+            const statusText = cleanHeader(status, "NYC311");
+            const closed = /closed|resolved/i.test(statusText);
+            const badgeColor = closed ? "#087f5b" : "#1769e0";
+            const response = sectionBody
+              ? `<div style="margin-top:22px;padding:18px;background:#f4f7fb;border-radius:12px">
+                  <div style="font-size:12px;line-height:1.4;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#6b7a90">${escapeHtml(sectionTitle || "NYC311 response")}</div>
+                  <div style="margin-top:8px;font-size:15px;line-height:1.55;color:#26384d">${escapeHtml(sectionBody).replace(/\n/g, "<br>")}</div>
+                </div>`
+              : "";
+            const next = nextUpdate
+              ? `<div style="margin-top:14px;padding:12px 14px;border-left:4px solid #f59f00;background:#fff8e6;color:#664d03;font-size:14px;line-height:1.45"><strong>Next update:</strong> ${escapeHtml(nextUpdate)}</div>`
+              : "";
+            const button = portalUrl
+              ? `<div style="margin-top:24px"><a href="${escapeHtml(portalUrl)}" style="display:inline-block;padding:12px 18px;border-radius:9px;background:#1769e0;color:#ffffff;text-decoration:none;font-size:14px;font-weight:700">View on NYC311</a></div>`
+              : "";
+            return `<!doctype html>
+            <html><head><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"></head>
+            <body style="margin:0;padding:0;background:#eef3f8;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif">
+              <div style="display:none;max-height:0;overflow:hidden">${escapeHtml(title)} · ${escapeHtml(srnumber)}</div>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#eef3f8"><tr><td align="center" style="padding:20px 12px">
+                <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:600px;background:#ffffff;border:1px solid #dbe4ee;border-radius:16px;overflow:hidden">
+                  <tr><td style="height:7px;background:#1769e0"></td></tr>
+                  <tr><td style="padding:26px 24px 28px">
+                    <div style="font-size:12px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#6b7a90">${escapeHtml(eyebrow)}</div>
+                    <div style="margin-top:13px"><span style="display:inline-block;padding:6px 10px;border-radius:999px;background:${badgeColor};color:#fff;font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase">${escapeHtml(statusText)}</span></div>
+                    <h1 style="margin:14px 0 0;font-size:25px;line-height:1.2;color:#122033">${escapeHtml(title)}</h1>
+                    ${subtitle ? `<div style="margin-top:8px;color:#52657b;font-size:15px;line-height:1.45">${escapeHtml(subtitle)}</div>` : ""}
+                    <div style="margin-top:10px;color:#1769e0;font-size:14px;font-weight:700">${escapeHtml(srnumber)}</div>
+                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:20px;border-top:1px solid #e2e9f0">${rows}</table>
+                    ${response}${next}${button}
+                    <div style="margin-top:26px;padding-top:16px;border-top:1px solid #e2e9f0;color:#7b8ba0;font-size:12px;line-height:1.5">Monitored automatically through NYC311 email updates.</div>
+                  </td></tr>
+                </table>
+              </td></tr></table>
+            </body></html>`;
+          }
+
+          function updateHtmlBody(forward) {
+            const srnumber = cleanHeader(forward.srnumber);
+            const title = forward.request_type && forward.request_subtype
+              ? `${forward.request_type} — ${forward.request_subtype}`
+              : forward.request_type || forward.request_subtype || "NYC311 request";
+            const agency = forward.agency_name
+              ? `${forward.agency_name}${forward.agency_acronym ? ` (${forward.agency_acronym})` : ""}`
+              : "";
+            return emailShell({
+              eyebrow: "NYC311 status update",
+              status: forward.event_kind || "Updated",
+              srnumber,
+              title,
+              subtitle: forward.location,
+              rows: [
+                detailRow("Agency", agency),
+                detailRow("Submitted", formatEastern(forward.submitted_at)),
+                detailRow("Email received", formatEastern(forward.received_at)),
+              ].join(""),
+              sectionTitle: "Agency response",
+              sectionBody: forward.response_text,
+              nextUpdate: forward.next_update_text,
+              portalUrl: `https://portal.311.nyc.gov/sr-details/?srnum=${encodeURIComponent(srnumber)}`,
+            });
+          }
+
           function registeredAlias(recipient, forward) {
             const domain = requireEnvironment("FORWARD_DOMAIN").toLowerCase();
             const address = String(recipient || "").trim().toLowerCase();
@@ -326,6 +418,7 @@ Resources:
                   Subject: { Data: subject, Charset: "UTF-8" },
                   Body: {
                     Text: { Data: textBody(forward), Charset: "UTF-8" },
+                    Html: { Data: updateHtmlBody(forward), Charset: "UTF-8" },
                   },
                 },
               },
@@ -399,6 +492,25 @@ Resources:
               "",
               cleanHeader(request.portal_url),
             ].filter(Boolean);
+            const initialHtml = emailShell({
+              eyebrow: "Hudson Square BID · New request",
+              status: request.status || "New",
+              srnumber,
+              title: request.problem || "NYC311 request",
+              subtitle: request.address,
+              rows: [
+                detailRow("Submitted", formatEastern(request.submitted_at)),
+                detailRow("Updated", formatEastern(request.updated_at)),
+                detailRow("Closed", formatEastern(request.closed_at)),
+              ].join(""),
+              sectionTitle: "Submitted details",
+              sectionBody: [
+                request.problem_details,
+                request.additional_details,
+              ].filter(Boolean).join("\n\n"),
+              nextUpdate: request.next_update,
+              portalUrl: request.portal_url,
+            });
             const visibleSender = `${srnumber}@${requireEnvironment("FORWARD_DOMAIN")}`;
             await ses.send(new SendEmailCommand({
               FromEmailAddress: `NYC311 ${srnumber} <${visibleSender}>`,
@@ -411,6 +523,7 @@ Resources:
                   },
                   Body: {
                     Text: { Data: lines.join("\n"), Charset: "UTF-8" },
+                    Html: { Data: initialHtml, Charset: "UTF-8" },
                   },
                 },
               },
