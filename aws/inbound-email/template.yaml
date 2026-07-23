@@ -244,6 +244,25 @@ Resources:
             return cleaned || fallback;
           }
 
+          const easternDateTime = new Intl.DateTimeFormat("en-US", {
+            timeZone: "America/New_York",
+            year: "numeric",
+            month: "short",
+            day: "numeric",
+            hour: "numeric",
+            minute: "2-digit",
+            second: "2-digit",
+            timeZoneName: "short",
+          });
+
+          function formatEastern(value) {
+            if (!value) return "";
+            const parsed = new Date(value);
+            return Number.isFinite(parsed.getTime())
+              ? easternDateTime.format(parsed)
+              : cleanHeader(value);
+          }
+
           function registeredAlias(recipient, forward) {
             const domain = requireEnvironment("FORWARD_DOMAIN").toLowerCase();
             const address = String(recipient || "").trim().toLowerCase();
@@ -270,8 +289,12 @@ Resources:
                     ? ` (${forward.agency_acronym})`
                     : ""}`
                 : null,
-              forward.submitted_at ? `Submitted: ${forward.submitted_at}` : null,
-              forward.received_at ? `Email received: ${forward.received_at}` : null,
+              forward.submitted_at
+                ? `Submitted: ${formatEastern(forward.submitted_at)}`
+                : null,
+              forward.received_at
+                ? `Email received: ${formatEastern(forward.received_at)}`
+                : null,
               "",
               forward.response_text,
               forward.next_update_text
@@ -363,8 +386,15 @@ Resources:
               cleanHeader(request.additional_details),
               cleanHeader(request.address),
               request.status ? `Status: ${cleanHeader(request.status)}` : null,
-              request.submitted_at ? `Submitted: ${cleanHeader(request.submitted_at)}` : null,
-              request.updated_at ? `Updated: ${cleanHeader(request.updated_at)}` : null,
+              request.submitted_at
+                ? `Submitted: ${formatEastern(request.submitted_at)}`
+                : null,
+              request.updated_at
+                ? `Updated: ${formatEastern(request.updated_at)}`
+                : null,
+              request.closed_at
+                ? `Closed: ${formatEastern(request.closed_at)}`
+                : null,
               request.next_update ? `Next update: ${cleanHeader(request.next_update)}` : null,
               "",
               cleanHeader(request.portal_url),
