@@ -194,6 +194,30 @@ const MIGRATIONS = Object.freeze([
       ON nyc311_email_events(reconciled_srnumber,received_at);
     CREATE INDEX IF NOT EXISTS nyc311_email_events_outcome_idx
       ON nyc311_email_events(parse_outcome,received_at);`
+  }),
+  Object.freeze({
+    version: 5,
+    name: 'add_nyc311_email_subscription_jobs',
+    sql: `CREATE TABLE IF NOT EXISTS nyc311_email_subscription_jobs (
+      srnumber TEXT PRIMARY KEY,
+      alias_id INTEGER NOT NULL UNIQUE,
+      bid_id INTEGER NOT NULL,
+      state TEXT NOT NULL DEFAULT 'pending'
+        CHECK(state IN ('pending','processing','subscribed','retry','error')),
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0),
+      next_attempt_at TEXT NOT NULL,
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      subscribed_at TEXT,
+      FOREIGN KEY(srnumber)
+        REFERENCES live_portal_requests(srnumber) ON UPDATE CASCADE ON DELETE CASCADE,
+      FOREIGN KEY(alias_id)
+        REFERENCES nyc311_email_aliases(id) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS nyc311_email_subscription_jobs_due_idx
+      ON nyc311_email_subscription_jobs(state,next_attempt_at,bid_id);`
   })
 ]);
 

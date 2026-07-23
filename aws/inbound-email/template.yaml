@@ -242,22 +242,16 @@ Resources:
             return cleaned || fallback;
           }
 
-          function pilotAlias(recipient, forward) {
+          function registeredAlias(recipient, forward) {
             const domain = requireEnvironment("FORWARD_DOMAIN").toLowerCase();
             const address = String(recipient || "").trim().toLowerCase();
             if (address !== String(forward && forward.recipient_address || "")
               .trim().toLowerCase()) return null;
             const match = address.match(
-              new RegExp(`^r(\\d{8})-[a-z0-9]+@${domain
+              new RegExp(`^r(\\d{8})-[a-z0-9_-]+@${domain
                 .replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}$`),
             );
             if (!match) return null;
-            const suffix = Number(match[1]);
-            const minimum = Number(requireEnvironment("FORWARD_PILOT_MIN_SUFFIX"));
-            const maximum = Number(requireEnvironment("FORWARD_PILOT_MAX_SUFFIX"));
-            if (!Number.isInteger(suffix) || suffix < minimum || suffix > maximum) {
-              return null;
-            }
             return address;
           }
 
@@ -282,7 +276,7 @@ Resources:
                 ? `\nNext update: ${forward.next_update_text}`
                 : null,
               "",
-              "This is an immediate copy received through the NYC311 email pilot.",
+              "This is an immediate copy received through NYC311 email monitoring.",
             ];
             return lines.filter((line) => line !== null && line !== undefined)
               .join("\n");
@@ -290,7 +284,7 @@ Resources:
 
           async function forwardPilotUpdate(recipient, payload) {
             if (!payload || payload.duplicate || !payload.forward) return false;
-            const alias = pilotAlias(recipient, payload.forward);
+            const alias = registeredAlias(recipient, payload.forward);
             if (!alias) return false;
             const forward = payload.forward;
             const srnumber = cleanHeader(forward.srnumber, "NYC311 request");

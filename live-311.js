@@ -26,6 +26,14 @@ const {
   ensureSqliteBusinessImprovementDistrictSchema,
   loadActiveBusinessImprovementDistrictMatcher
 } = require('./business-improvement-districts');
+const {
+  claimSubscription,
+  completeSubscription,
+  enqueueBidSubscriptions,
+  parseBidIds,
+  retrySubscription,
+  subscribeRequest
+} = require('./nyc311-portal-subscriptions');
 
 const PORTAL_URL = 'https://portal.311.nyc.gov/entity-pin-fetch-service-requests/';
 const POLL_INTERVAL_SECONDS = Math.max(5, Number(process.env.POLL_INTERVAL_SECONDS || 15));
@@ -34,6 +42,11 @@ const AUDIT_DELAY_MINUTES = Math.max(30, Number(process.env.AUDIT_DELAY_MINUTES 
 // One detail request every 2.5 seconds leaves room for the four map polls per
 // minute while keeping total routine Portal traffic below about 30/minute.
 const DETAIL_REQUEST_DELAY_MS = Math.max(500, Number(process.env.DETAIL_REQUEST_DELAY_MS || 2500));
+const EMAIL_SUBSCRIBE_BID_IDS = parseBidIds(process.env.EMAIL_SUBSCRIBE_BID_IDS);
+const EMAIL_SUBSCRIPTION_DELAY_MS = Math.max(
+  1000,
+  Number(process.env.EMAIL_SUBSCRIPTION_DELAY_MS || 5000)
+);
 const SQLITE_SYNCHRONOUS = resolveSynchronousMode(process.env.SQLITE_SYNCHRONOUS);
 const DATABASE_PATH = process.env.DATABASE_PATH
   ? path.resolve(process.env.DATABASE_PATH)
@@ -390,6 +403,7 @@ let stopRequested = false;
 let stopReason = null;
 let activeArchiveChild = null;
 let detailHydrationStopping = false;
+let emailSubscriptionPromise = null;
 const pendingSleeps = new Set();
 
 function sleep(milliseconds) {
@@ -422,6 +436,57 @@ function requestStop(reason = 'requested') {
   for (const pending of [...pendingSleeps]) pending.resolve();
   terminateArchiveChild();
   console.log(JSON.stringify({ stopping: true, reason }));
+}
+
+function startEmailSubscriptions() {
+  if (!EMAIL_SUBSCRIBE_BID_IDS.length || emailSubscriptionPromise) return;
+  emailSubscriptionPromise = (async () => {
+    while (!detailHydrationStopping) {
+      try {
+        const added = enqueueBidSubscriptions(db, EMAIL_SUBSCRIBE_BID_IDS);
+        if (added) {
+          console.log(JSON.stringify({
+            email_subscriptions_queued: added,
+            bid_ids: EMAIL_SUBSCRIBE_BID_IDS
+          }));
+        }
+        const job = claimSubscription(db);
+        if (!job) {
+          await sleep(5000);
+          continue;
+        }
+        try {
+          await subscribeRequest({
+            portalId: job.portal_id,
+            email: job.recipient_address
+          });
+          db.exec('BEGIN');
+          try {
+            completeSubscription(db, job);
+            db.exec('COMMIT');
+          } catch (error) {
+            db.exec('ROLLBACK');
+            throw error;
+          }
+          console.log(JSON.stringify({
+            email_subscription: 'subscribed',
+            srnumber: job.srnumber,
+            bid_id: job.bid_id
+          }));
+        } catch (error) {
+          retrySubscription(db, job, error);
+          console.error(JSON.stringify({
+            email_subscription: 'retry',
+            srnumber: job.srnumber,
+            error: error.message
+          }));
+        }
+      } catch (error) {
+        console.error(JSON.stringify({ email_subscription_loop_error: error.message }));
+      }
+      await sleep(EMAIL_SUBSCRIPTION_DELAY_MS);
+    }
+  })();
 }
 
 function suffixOf(number) {
@@ -1166,6 +1231,7 @@ async function main() {
     open_followups_rescheduled: openFollowUpsRescheduled
   }));
   startDetailHydration();
+  startEmailSubscriptions();
 
   while (!stopRequested
       && (LIVE_DURATION_SECONDS === 0 || Date.now() - started < LIVE_DURATION_SECONDS * 1000)) {
@@ -1201,6 +1267,7 @@ async function main() {
 
   detailHydrationStopping = true;
   if (detailHydrationPromise) await detailHydrationPromise;
+  if (emailSubscriptionPromise) await emailSubscriptionPromise;
   if (auditPromise) await auditPromise;
 
   const totals = db.prepare(`
