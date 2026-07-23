@@ -21,6 +21,7 @@ const { originMatchesHost } = require('./request-security');
 const { normalizePortalTimestamp } = require('./portal-timestamp');
 const { loadSqliteLiveSummary } = require('./sqlite-live-summary');
 const { readStoredPortalDetail } = require('./stored-portal-detail');
+const { readRequestEmailUpdates } = require('./nyc311-email-events');
 const {
   MAX_RAW_EMAIL_BYTES,
   createNyc311EmailHandler
@@ -1346,6 +1347,21 @@ app.get('/api/status-history/:srnumber', (req, res) => {
     res.status(503).json({ error: error.message });
   } finally {
     if (database) database.close();
+  }
+});
+
+app.get('/api/email-updates/:srnumber', (req, res) => {
+  const srnumber = String(req.params.srnumber || '').trim();
+  res.setHeader('Cache-Control', 'no-store');
+  if (!/^311-\d{8}$/.test(srnumber)) {
+    return res.status(400).json({ error: 'valid 311 request number required' });
+  }
+  const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
+  try {
+    return res.json(readRequestEmailUpdates(databasePath, srnumber));
+  } catch (error) {
+    console.error('NYC311 email updates read error:', error.message);
+    return res.status(503).json({ error: 'Email updates are temporarily unavailable' });
   }
 });
 

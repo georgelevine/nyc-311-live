@@ -43,6 +43,9 @@
   const mapCounts = document.getElementById('map-counts');
   const mapBoundaryKey = document.getElementById('map-boundary-key');
   const detailPendingBadge = document.getElementById('detail-pending-badge');
+  const detailEmailUpdates = document.getElementById('detail-email-updates');
+  const detailEmailCount = document.getElementById('detail-email-count');
+  const detailEmailEvents = document.getElementById('detail-email-events');
   const compactLayout = window.matchMedia('(max-width: 900px)');
   const summaryElements = {
     root: document.getElementById('city-summary'),
@@ -64,6 +67,7 @@
   const hasSummaryElements = Object.values(summaryElements).every(Boolean);
   const MAX_VISIBLE_RECORDS = 750;
   const MAP_REFRESH_MS = 15_000;
+  const EMAIL_UPDATES_REFRESH_MS = 15_000;
   let records = [];
   let mapRecords = [];
   let feedByNumber = new Map();
@@ -85,6 +89,11 @@
   let lastPortalCheck = null;
   let portalDetailByNumber = new Map();
   let detailLoadSequence = 0;
+  let emailUpdatesByNumber = new Map();
+  let emailUpdatesLoadedAt = new Map();
+  let emailUpdatesLoadSequence = 0;
+  let emailUpdatesAbortController = null;
+  let emailUpdatesInFlightFor = null;
   let highestObservedSuffix = null;
   let arrivingNumbers = new Set();
   let lastGoodSummary = null;
@@ -532,6 +541,158 @@
     }
   }
 
+  function clearEmailUpdatesPanel({ resetDisclosure = false } = {}) {
+    detailEmailCount.textContent = '';
+    detailEmailEvents.replaceChildren();
+    detailEmailUpdates.hidden = true;
+    if (resetDisclosure) detailEmailUpdates.open = true;
+  }
+
+  function emailAgencyLabel(update) {
+    const acronym = String(update && update.agency_acronym || '').trim();
+    const name = String(update && update.agency_name || '').trim();
+    if (acronym && name && !name.toLowerCase().includes(acronym.toLowerCase())) {
+      return `${acronym} · ${name}`;
+    }
+    return acronym || name || 'NYC311';
+  }
+
+  function emailVerificationState(record, update) {
+    if (String(update && update.event_kind || '').toLowerCase() !== 'closed') return null;
+    const followupState = String(record && record.followup_state || '').toLowerCase();
+    if (followupState === 'closed') {
+      return { label: 'Portal verified', state: 'verified' };
+    }
+    if (followupState === 'closing') {
+      return { label: 'Portal verification in progress', state: 'checking' };
+    }
+    if (update && update.closure_wake_queued) {
+      return { label: 'Portal verification queued', state: 'queued' };
+    }
+    if (followupState !== 'open' && isClosed(record && record.status)) {
+      return { label: 'Portal verified', state: 'verified' };
+    }
+    return { label: 'Awaiting Portal verification', state: 'waiting' };
+  }
+
+  function appendEmailUpdate(record, update) {
+    const item = document.createElement('li');
+    item.className = 'detail-email-event';
+
+    const heading = document.createElement('div');
+    heading.className = 'detail-email-event-heading';
+    const eventKind = String(update && update.event_kind || '').toLowerCase() === 'closed'
+      ? 'Closed'
+      : 'Updated';
+    const title = document.createElement('strong');
+    title.textContent = eventKind;
+    const received = document.createElement('time');
+    received.textContent = fullTimeLabel(update && update.received_at);
+    if (update && update.received_at) received.dateTime = update.received_at;
+    heading.append(title, received);
+
+    const agency = document.createElement('p');
+    agency.className = 'detail-email-agency';
+    agency.textContent = emailAgencyLabel(update);
+    item.append(heading, agency);
+
+    const type = String(update && update.request_type || '').trim();
+    const subtype = String(update && update.request_subtype || '').trim();
+    if (type || subtype) {
+      const requestType = document.createElement('p');
+      requestType.className = 'detail-email-request-type';
+      requestType.textContent = [type, subtype].filter(Boolean).join(' · ');
+      item.append(requestType);
+    }
+
+    const responseText = String(update && update.response_text || '').trim();
+    if (responseText) {
+      const response = document.createElement('p');
+      response.className = 'detail-email-response';
+      response.textContent = responseText;
+      item.append(response);
+    }
+
+    const nextUpdateText = String(update && update.next_update_text || '').trim();
+    if (nextUpdateText) {
+      const nextUpdate = document.createElement('p');
+      nextUpdate.className = 'detail-email-next';
+      const label = document.createElement('strong');
+      label.textContent = 'Next update: ';
+      nextUpdate.append(label, document.createTextNode(nextUpdateText));
+      item.append(nextUpdate);
+    }
+
+    const verification = emailVerificationState(record, update);
+    if (verification) {
+      const state = document.createElement('span');
+      state.className = 'detail-email-verification';
+      state.dataset.state = verification.state;
+      state.textContent = verification.label;
+      item.append(state);
+    }
+
+    detailEmailEvents.append(item);
+  }
+
+  function renderEmailUpdates(record, payload, { resetDisclosure = false } = {}) {
+    if (!record || selectedNumber !== record.srnumber) return;
+    const updates = Array.isArray(payload && payload.updates) ? payload.updates : [];
+    clearEmailUpdatesPanel({ resetDisclosure });
+    if (!updates.length) return;
+    const total = Number(payload && payload.total);
+    const totalUpdates = Number.isFinite(total) && total >= updates.length ? total : updates.length;
+    detailEmailCount.textContent = totalUpdates > updates.length
+      ? `${updates.length} of ${totalUpdates} updates`
+      : `${updates.length} ${updates.length === 1 ? 'update' : 'updates'}`;
+    for (const update of updates) appendEmailUpdate(record, update);
+    detailEmailUpdates.hidden = false;
+  }
+
+  function beginEmailUpdatesSelection(record) {
+    emailUpdatesLoadSequence += 1;
+    if (emailUpdatesAbortController) emailUpdatesAbortController.abort();
+    emailUpdatesAbortController = null;
+    emailUpdatesInFlightFor = null;
+    clearEmailUpdatesPanel({ resetDisclosure: true });
+    const cached = emailUpdatesByNumber.get(record.srnumber);
+    if (cached) renderEmailUpdates(record, cached, { resetDisclosure: true });
+    loadEmailUpdates(record, { force: true });
+  }
+
+  async function loadEmailUpdates(record, { force = false } = {}) {
+    if (!record || selectedNumber !== record.srnumber) return;
+    const now = Date.now();
+    const loadedAt = emailUpdatesLoadedAt.get(record.srnumber) || 0;
+    if (!force && now - loadedAt < EMAIL_UPDATES_REFRESH_MS) return;
+    if (emailUpdatesInFlightFor === record.srnumber) return;
+
+    const sequence = emailUpdatesLoadSequence;
+    const controller = new AbortController();
+    emailUpdatesAbortController = controller;
+    emailUpdatesInFlightFor = record.srnumber;
+    try {
+      const response = await fetch(`/api/email-updates/${encodeURIComponent(record.srnumber)}`, {
+        cache: 'no-store',
+        signal: controller.signal
+      });
+      if (!response.ok) throw new Error(`Email update service returned ${response.status}`);
+      const payload = await response.json();
+      emailUpdatesByNumber.set(record.srnumber, payload);
+      emailUpdatesLoadedAt.set(record.srnumber, Date.now());
+      if (sequence === emailUpdatesLoadSequence && selectedNumber === record.srnumber) {
+        renderEmailUpdates(record, payload);
+      }
+    } catch (error) {
+      if (error.name !== 'AbortError') console.warn(error);
+    } finally {
+      if (emailUpdatesAbortController === controller) {
+        emailUpdatesAbortController = null;
+        emailUpdatesInFlightFor = null;
+      }
+    }
+  }
+
   function setDetailBadge(state) {
     const labels = {
       pending: 'Pending',
@@ -694,6 +855,7 @@
     setDetailPanelVisible(true);
     renderFeed();
     loadPortalDetails(record);
+    beginEmailUpdatesSelection(record);
     const coordinates = recordCoordinates(record);
     if (moveMap && coordinates) {
       cancelPendingBoundaryFit();
@@ -1387,6 +1549,7 @@
         : 'Waiting for data';
       connection.classList.remove('offline');
       updateConnectionLabel();
+      if (selectedNumber) loadEmailUpdates(findRecord(selectedNumber));
     } catch (error) {
       if (error.name === 'AbortError') return;
       if (sequence !== dashboardRequestSequence) return;
@@ -1432,6 +1595,11 @@
     lastGoodSummary = null;
     highestObservedSuffix = null;
     detailLoadSequence += 1;
+    emailUpdatesLoadSequence += 1;
+    if (emailUpdatesAbortController) emailUpdatesAbortController.abort();
+    emailUpdatesAbortController = null;
+    emailUpdatesInFlightFor = null;
+    clearEmailUpdatesPanel({ resetDisclosure: true });
     archiveSearchSequence += 1;
     archiveSearchRecord = null;
     archiveSearchState = 'idle';
@@ -1477,6 +1645,11 @@
   });
   document.getElementById('detail-close').addEventListener('click', () => {
     detailLoadSequence += 1;
+    emailUpdatesLoadSequence += 1;
+    if (emailUpdatesAbortController) emailUpdatesAbortController.abort();
+    emailUpdatesAbortController = null;
+    emailUpdatesInFlightFor = null;
+    clearEmailUpdatesPanel({ resetDisclosure: true });
     const closedNumber = selectedNumber;
     selectedNumber = null;
     setDetailPanelVisible(false);
