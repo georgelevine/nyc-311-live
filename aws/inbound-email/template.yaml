@@ -296,8 +296,9 @@ Resources:
             const srnumber = cleanHeader(forward.srnumber, "NYC311 request");
             const eventKind = cleanHeader(forward.event_kind, "Updated");
             const subject = `NYC311 ${eventKind} · ${srnumber}`;
+            const visibleSender = `${srnumber}@${requireEnvironment("FORWARD_DOMAIN")}`;
             await ses.send(new SendEmailCommand({
-              FromEmailAddress: `NYC311 ${srnumber} <${alias}>`,
+              FromEmailAddress: `NYC311 ${srnumber} <${visibleSender}>`,
               Destination: {
                 ToAddresses: [requireEnvironment("FORWARD_TO_EMAIL")],
               },
@@ -315,6 +316,7 @@ Resources:
               messageId: payload.event_id,
               srnumber,
               alias,
+              visibleSender,
             }));
             return true;
           }

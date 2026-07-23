@@ -23,7 +23,8 @@ unguessable local part for every service request.
   posts `Content-Type: message/rfc822` to the configured HTTPS endpoint.
 - Immediate Gmail copies of authenticated, parsed updates whose registered
   aliases fall within the configured pilot SR-number range. Each copy is sent
-  from that request's unique `track.opendata.support` alias.
+  from the readable address `311-########@track.opendata.support`; the
+  unguessable subscription alias remains internal.
 - Two automatic retries for asynchronous Lambda failures and an encrypted SQS
   failure queue after retries are exhausted.
 - A 30-day CloudWatch log group. Message bodies and the webhook secret are never
