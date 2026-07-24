@@ -58,6 +58,14 @@ Parameters:
     Description: Gmail address that receives immediate copies of valid pilot updates.
     AllowedPattern: '^[^@\s]+@[^@\s]+\.[^@\s]+$'
 
+  ForwardingEnabled:
+    Type: String
+    Default: "true"
+    AllowedValues:
+      - "true"
+      - "false"
+    Description: Whether new-request and status-update copies are sent by email.
+
   ForwardPilotMinSuffix:
     Type: Number
     Default: 28334803
@@ -196,6 +204,7 @@ Resources:
           WEBHOOK_URL: !Ref WebhookUrl
           WEBHOOK_SECRET: !Ref WebhookSecret
           FORWARD_TO_EMAIL: !Ref ForwardToEmail
+          FORWARDING_ENABLED: !Ref ForwardingEnabled
           FORWARD_DOMAIN: !Ref RecipientDomain
           FORWARD_PILOT_MIN_SUFFIX: !Ref ForwardPilotMinSuffix
           FORWARD_PILOT_MAX_SUFFIX: !Ref ForwardPilotMaxSuffix
@@ -220,6 +229,10 @@ Resources:
               throw new Error(`Missing required environment variable: ${name}`);
             }
             return value;
+          }
+
+          function forwardingEnabled() {
+            return String(process.env.FORWARDING_ENABLED || "true").toLowerCase() === "true";
           }
 
           function verdicts(receipt = {}) {
@@ -400,6 +413,7 @@ Resources:
           }
 
           async function forwardPilotUpdate(recipient, payload) {
+            if (!forwardingEnabled()) return false;
             if (!payload || payload.duplicate || !payload.forward) return false;
             const alias = registeredAlias(recipient, payload.forward);
             if (!alias) return false;
@@ -470,6 +484,13 @@ Resources:
             const srnumber = cleanHeader(request.srnumber);
             if (request.kind !== "initial_request" || !/^311-\d{8}$/.test(srnumber)) {
               return { statusCode: 400, body: JSON.stringify({ error: "invalid_request" }) };
+            }
+            if (!forwardingEnabled()) {
+              console.log(JSON.stringify({ event: "initial_request_forwarding_disabled", srnumber }));
+              return {
+                statusCode: 200,
+                body: JSON.stringify({ sent: false, forwarding_disabled: true }),
+              };
             }
             const lines = [
               `New ${cleanHeader(request.scope_label, "monitored")} request · ${srnumber}`,
