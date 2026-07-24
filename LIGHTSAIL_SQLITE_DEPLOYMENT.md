@@ -14,6 +14,33 @@ any, are also outside the instance price.
 The PostgreSQL/PostGIS design in `aws/lightsail/` remains an optional later
 migration if measured load eventually requires more than one application host.
 
+## Fast UI-only releases
+
+After the first full release is installed, install the root-owned UI deployment
+helper once:
+
+```bash
+sudo install -m 0755 -o root -g root \
+  /opt/nyc-311-live/aws/lightsail-sqlite/deploy-ui-release.sh \
+  /usr/local/sbin/nyc311-deploy-ui-release
+```
+
+Future browser-only changes are one command from a clean, pushed `main` branch:
+
+```bash
+cd /Users/georgelevine/nyc-bid-311
+npm run deploy:ui
+```
+
+The command runs the UI contract tests, archives the exact pushed commit, checks
+the archive checksum and expanded `RELEASE_COMMIT` on Lightsail, and refuses to
+continue if anything outside `public/` changed since the running release. It
+builds the cached web image while the existing site stays online, replaces only
+the `web` container, verifies local and public health, and rolls back on failure.
+It does not restart the collector or read, copy, migrate, or replace the SQLite
+database. Full collector, schema, dependency, Compose, and infrastructure changes
+must continue through the reviewed full-release process.
+
 ## Safety rules
 
 - The Mac remains the only collector throughout the rehearsal.

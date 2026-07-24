@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
   <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
   <link rel="stylesheet" href="/css/live.css">
+  <link rel="stylesheet" href="/css/live-ui.css">
 </head>
 <body>
   <main class="app-shell" data-mobile-view="feed">
@@ -27,107 +28,153 @@
         <button type="button" data-mobile-view="overview" aria-pressed="false">Overview</button>
       </nav>
 
-      <section id="city-summary" class="city-summary" aria-labelledby="city-summary-title" aria-busy="true">
-        <header class="city-summary-header">
-          <div>
-            <span id="city-summary-eyebrow" class="eyebrow">NYC right now</span>
-            <h2 id="city-summary-title">Last 15 minutes</h2>
+      <div class="overview-view">
+        <section id="city-summary" class="city-summary" aria-labelledby="city-summary-title" aria-busy="true">
+          <header class="city-summary-header">
+            <div>
+              <span id="city-summary-eyebrow" class="eyebrow">NYC right now</span>
+              <h2 id="city-summary-title">Last 15 minutes</h2>
+            </div>
+            <time id="city-summary-updated">Updating…</time>
+          </header>
+          <div id="city-summary-loading" class="city-summary-loading" aria-hidden="true">
+            <span></span><span></span><span></span>
           </div>
-          <time id="city-summary-updated">Updating…</time>
-        </header>
-        <div id="city-summary-loading" class="city-summary-loading" aria-hidden="true">
-          <span></span><span></span><span></span>
-        </div>
-        <div id="city-summary-content" class="city-summary-content" hidden>
-          <div class="city-summary-lead">
-            <p><strong id="summary-request-count">0</strong><span>requests</span></p>
-            <span id="summary-comparison">Building comparison…</span>
+          <div id="city-summary-content" class="city-summary-content" hidden>
+            <div class="city-summary-lead">
+              <p><strong id="summary-request-count">0</strong><span>requests</span></p>
+              <span id="summary-comparison">Building comparison…</span>
+            </div>
+            <div class="city-summary-row">
+              <span>Leading request types</span>
+              <p id="summary-categories" class="summary-rank-list">—</p>
+              <small id="summary-other-categories"></small>
+            </div>
+            <div class="city-summary-row">
+              <span>Boroughs</span>
+              <p id="summary-boroughs" class="summary-rank-list">—</p>
+              <small id="summary-other-boroughs"></small>
+            </div>
+            <details class="data-quality">
+              <summary>Data quality</summary>
+              <div>
+                <span id="summary-coverage">Checking data coverage…</span>
+                <span id="summary-history-note">Measuring archive history…</span>
+                <p id="city-summary-status" class="city-summary-status" role="status"></p>
+              </div>
+            </details>
           </div>
-          <div class="city-summary-row">
-            <span>Leading request types</span>
-            <p id="summary-categories" class="summary-rank-list">—</p>
-            <small id="summary-other-categories"></small>
+        </section>
+
+        <section class="metrics" aria-label="Live collection statistics">
+          <div class="metric-group">
+            <header>
+              <span class="eyebrow">Collection</span>
+              <h2>Archive</h2>
+            </header>
+            <div class="metric-grid">
+              <article>
+                <strong id="total-count">0</strong><span>Captured</span>
+                <small>Stored in database</small>
+              </article>
+              <article>
+                <strong id="monitored-count">0</strong><span>Open monitored</span>
+                <small>Checked every 24 hours</small>
+              </article>
+              <article>
+                <strong id="closures-count">0</strong><span>Closures saved</span>
+                <small id="closures-note">0 checks in progress</small>
+              </article>
+            </div>
           </div>
-          <div class="city-summary-row">
-            <span>Boroughs</span>
-            <p id="summary-boroughs" class="summary-rank-list">—</p>
-            <small id="summary-other-boroughs"></small>
+
+          <div class="metric-group">
+            <header>
+              <span class="eyebrow">Coverage</span>
+              <h2>Completeness</h2>
+            </header>
+            <div class="metric-grid">
+              <article>
+                <strong id="details-coverage-rate">—</strong><span>Details loaded</span>
+                <small id="details-coverage-note">Checking coverage</small>
+              </article>
+              <article>
+                <strong id="map-coverage-rate">—</strong><span>Map coverage</span>
+                <small id="map-coverage-note">Checking coordinates</small>
+              </article>
+              <article>
+                <strong id="pending-count">0</strong><span>Audit queued</span>
+                <small>Request numbers waiting</small>
+              </article>
+            </div>
           </div>
-          <footer>
-            <span id="summary-coverage">Checking data coverage…</span>
-            <span id="summary-history-note">Measuring archive history…</span>
-          </footer>
-        </div>
-        <p id="city-summary-status" class="city-summary-status" role="status"></p>
-      </section>
+        </section>
 
-      <section class="metrics" aria-label="Live collection statistics">
-        <article>
-          <strong id="total-count">0</strong><span>Captured</span>
-          <small>Stored in database</small>
-        </article>
-        <article>
-          <strong id="details-coverage-rate">—</strong><span>Details loaded</span>
-          <small id="details-coverage-note">Checking coverage</small>
-        </article>
-        <article>
-          <strong id="map-coverage-rate">—</strong><span>Map coverage</span>
-          <small id="map-coverage-note">Checking coordinates</small>
-        </article>
-        <article>
-          <strong id="monitored-count">0</strong><span>Open monitored</span>
-          <small>Checked every 24 hours</small>
-        </article>
-        <article>
-          <strong id="pending-count">0</strong><span>Audit queued</span>
-          <small>Request numbers waiting</small>
-        </article>
-        <article>
-          <strong id="closures-count">0</strong><span>Closures saved</span>
-          <small id="closures-note">0 checks in progress</small>
-        </article>
-      </section>
-
-      <section class="monitor-strip" aria-label="Live monitor timing">
-        <label>
-          <span>Check Portal every</span>
-          <select id="poll-interval">
-            <option value="5">5 seconds</option>
-            <option value="10">10 seconds</option>
-            <option value="15" selected>15 seconds</option>
-            <option value="30">30 seconds</option>
-            <option value="60">60 seconds</option>
-          </select>
-        </label>
-        <div class="clock-block">
-          <strong id="nyc-clock">—</strong>
-          <span id="next-check">New York time</span>
-        </div>
-      </section>
-
-      <section class="toolbar">
-        <div class="search-wrap">
-          <span aria-hidden="true">⌕</span>
-          <input id="request-search" type="search" placeholder="Search request or address" aria-label="Search requests or addresses" autocomplete="off">
-        </div>
-        <select id="status-filter" aria-label="Filter by status">
-          <option value="">All statuses</option>
-        </select>
-        <select id="precinct-filter" aria-label="Filter by police precinct" disabled>
-          <option value="">Loading precincts…</option>
-        </select>
-        <select id="bid-filter" aria-label="Filter by business improvement district" disabled>
-          <option value="">Loading business improvement districts…</option>
-        </select>
-      </section>
-
-      <div class="feed-heading">
-        <span class="incoming-title">Incoming requests <i class="continuous-spinner" aria-hidden="true"></i></span>
-        <time id="last-updated">Waiting for data</time>
+        <section class="monitor-strip" aria-labelledby="collector-settings-title">
+          <div class="monitor-copy">
+            <span class="eyebrow">Collector settings</span>
+            <h2 id="collector-settings-title">Portal refresh</h2>
+            <p>This controls how often the collector looks for newly submitted requests.</p>
+          </div>
+          <label>
+            <span>Check every</span>
+            <select id="poll-interval">
+              <option value="5">5 seconds</option>
+              <option value="10">10 seconds</option>
+              <option value="15" selected>15 seconds</option>
+              <option value="30">30 seconds</option>
+              <option value="60">60 seconds</option>
+            </select>
+          </label>
+          <div class="clock-block">
+            <strong id="nyc-clock">—</strong>
+            <span id="next-check">New York time</span>
+          </div>
+        </section>
       </div>
-      <section id="request-feed" class="request-feed" aria-live="polite">
-        <div class="empty-state"><span class="radar"></span><p>Waiting for the live Portal feed…</p></div>
-      </section>
+
+      <div class="requests-view">
+        <section class="toolbar" aria-label="Search and filter requests">
+          <div class="search-wrap">
+            <span aria-hidden="true">⌕</span>
+            <input id="request-search" type="search" placeholder="Search request or address" aria-label="Search requests or addresses" autocomplete="off">
+          </div>
+          <details id="request-filters" class="request-filters">
+            <summary>
+              <span>Filters</span>
+              <span id="active-filter-count">None selected</span>
+            </summary>
+            <div class="filter-fields">
+              <label>
+                <span>Status</span>
+                <select id="status-filter" aria-label="Filter by status">
+                  <option value="">All statuses</option>
+                </select>
+              </label>
+              <label>
+                <span>Police precinct</span>
+                <select id="precinct-filter" aria-label="Filter by police precinct" disabled>
+                  <option value="">Loading precincts…</option>
+                </select>
+              </label>
+              <label>
+                <span>Business improvement district</span>
+                <select id="bid-filter" aria-label="Filter by business improvement district" disabled>
+                  <option value="">Loading business improvement districts…</option>
+                </select>
+              </label>
+            </div>
+          </details>
+        </section>
+
+        <div class="feed-heading">
+          <span class="incoming-title">Incoming requests <i class="continuous-spinner" aria-hidden="true"></i></span>
+          <time id="last-updated">Waiting for data</time>
+        </div>
+        <section id="request-feed" class="request-feed" aria-live="polite">
+          <div class="empty-state"><span class="radar"></span><p>Waiting for the live Portal feed…</p></div>
+        </section>
+      </div>
     </aside>
 
     <section class="map-panel">
@@ -152,7 +199,7 @@
         <span><i class="marker-swatch active"></i>In progress</span>
         <span><i class="marker-swatch closed"></i>Closed</span>
       </div>
-      <article id="request-detail" class="request-detail hidden" aria-live="polite" aria-hidden="true" aria-busy="false" inert>
+      <article id="request-detail" class="request-detail hidden" role="dialog" aria-modal="false" aria-labelledby="detail-problem" aria-live="polite" aria-hidden="true" aria-busy="false" inert>
         <button id="detail-close" type="button" aria-label="Close request details">×</button>
         <span id="detail-status" class="status-pill"></span>
         <h2 id="detail-problem"></h2>
@@ -176,7 +223,7 @@
           <div id="detail-next-update-row" class="detail-row hidden"><dt>Next update</dt><dd id="detail-next-update"></dd></div>
           <div id="detail-archive-row" class="detail-row hidden"><dt>Archive</dt><dd id="detail-archive"></dd></div>
         </dl>
-        <details id="detail-email-updates" class="detail-email-updates" hidden open>
+        <details id="detail-email-updates" class="detail-email-updates" hidden>
           <summary>
             <span>Status updates</span>
             <span id="detail-email-count"></span>
@@ -191,6 +238,7 @@
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
   <script src="/js/status-update-model.js"></script>
+  <script src="/js/live-dashboard-model.js"></script>
   <script src="/js/live-dashboard.js"></script>
 </body>
 </html>

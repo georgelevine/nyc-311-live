@@ -42,11 +42,21 @@
   const mapScopeControl = document.getElementById('map-scope');
   const mapCounts = document.getElementById('map-counts');
   const mapBoundaryKey = document.getElementById('map-boundary-key');
+  const requestFilters = document.getElementById('request-filters');
+  const activeFilterCount = document.getElementById('active-filter-count');
   const detailPendingBadge = document.getElementById('detail-pending-badge');
   const detailEmailUpdates = document.getElementById('detail-email-updates');
   const detailEmailCount = document.getElementById('detail-email-count');
   const detailEmailEvents = document.getElementById('detail-email-events');
   const { buildStatusUpdateModel } = window.NYC311StatusUpdateModel;
+  const {
+    activeFilterLabel,
+    exactSrnumberQuery: normalizeExactSrnumberQuery,
+    feedCardModel,
+    isClosed,
+    recordCoordinates,
+    recordHasMapPin
+  } = window.NYC311LiveDashboardModel;
   const compactLayout = window.matchMedia('(max-width: 900px)');
   const summaryElements = {
     root: document.getElementById('city-summary'),
@@ -73,6 +83,8 @@
   let records = [];
   let mapRecords = [];
   let feedByNumber = new Map();
+  let feedCardByNumber = new Map();
+  let feedCardSignatureByNumber = new Map();
   let mapByNumber = new Map();
   let selectedNumber = null;
   let markerByNumber = new Map();
@@ -134,7 +146,6 @@
   let lastMapLayoutKey = '';
 
   const esc = value => String(value || '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
-  const isClosed = status => /\b(?:closed|resolved|cancel(?:led|ed)?)\b/i.test(status || '');
   const portalDate = value => {
     if (!value) return null;
     return new Date(value);
@@ -199,10 +210,7 @@
   };
   const suffixOf = record => Number(String(record && record.srnumber || '').replace(/^311-/, '')) || 0;
   function exactSrnumberQuery() {
-    const value = search.value.trim().toUpperCase().replace(/\s+/g, '');
-    if (/^\d{8}$/.test(value)) return `311-${value}`;
-    const match = value.match(/^311-?(\d{8})$/);
-    return match ? `311-${match[1]}` : null;
+    return normalizeExactSrnumberQuery(search.value);
   }
   const recordSignature = record => JSON.stringify([
     record.srnumber, record.status, record.problem, record.address,
@@ -217,24 +225,6 @@
     record.missing_public_fields, record.missing_important_fields,
     record.current_cycle_final_state, record.closure_cycle_tracking
   ]);
-  function coordinateNumber(value) {
-    if (value == null || String(value).trim() === '') return null;
-    const number = Number(value);
-    return Number.isFinite(number) ? number : null;
-  }
-
-  function recordCoordinates(record) {
-    const lat = coordinateNumber(record && record.latitude);
-    const lng = coordinateNumber(record && record.longitude);
-    return lat != null && lng != null ? { lat, lng } : null;
-  }
-
-  function recordHasMapPin(record) {
-    return typeof (record && record.has_map_pin) === 'boolean'
-      ? record.has_map_pin
-      : Boolean(recordCoordinates(record));
-  }
-
   function missingFieldLabels(fields) {
     if (!Array.isArray(fields)) return [];
     return fields.map(field => typeof field === 'string' ? field : field && field.label).filter(Boolean);
@@ -352,6 +342,43 @@
     feed.scrollTop += newOffset - snapshot.anchorOffset;
   }
 
+  function feedCardSignature(record) {
+    return recordSignature(record);
+  }
+
+  function updateFeedCardSelection(card, selected) {
+    if (!card) return;
+    card.classList.toggle('selected', selected);
+    card.setAttribute('aria-current', String(selected));
+  }
+
+  function updateSelectedFeedCard(previousNumber, nextNumber) {
+    if (previousNumber && previousNumber !== nextNumber) {
+      updateFeedCardSelection(feedCardByNumber.get(previousNumber), false);
+    }
+    if (nextNumber) updateFeedCardSelection(feedCardByNumber.get(nextNumber), true);
+  }
+
+  function updateFeedCard(card, record, { arriving = false, arrivalIndex = 0 } = {}) {
+    const model = feedCardModel(record);
+    const unavailableBadge = missingBadge(record);
+    card.type = 'button';
+    card.className = `request-card${arriving ? ' arriving' : ''}`;
+    card.dataset.number = model.srnumber;
+    card.setAttribute('aria-label', `${model.headline}, ${model.srnumber}, ${model.status}`);
+    if (arriving) card.style.setProperty('--arrival-index', Math.min(arrivalIndex, 8));
+    else card.style.removeProperty('--arrival-index');
+    updateFeedCardSelection(card, selectedNumber === model.srnumber);
+    card.innerHTML = `
+      <span class="request-dot${model.closed ? ' closed' : ''}" aria-hidden="true"></span>
+      <span class="request-copy">
+        <span class="request-topline"><strong>${esc(model.headline)}</strong><time>${esc(timeLabel(model.submittedAt))}</time></span>
+        ${model.detail ? `<span class="request-detail-line">${esc(model.detail)}</span>` : ''}
+        <span class="request-address">${esc(model.address)}</span>
+        <span class="request-meta"><span>${esc(model.srnumber)}</span><span aria-hidden="true">•</span><span>${esc(model.status)}</span>${unavailableBadge}${!model.hasMapPin ? '<span class="unmapped-label">NO MAP PIN</span>' : ''}</span>
+      </span>`;
+  }
+
   function renderFeed({ resetScroll = false } = {}) {
     const scrollSnapshot = resetScroll ? null : captureFeedScroll();
     const visible = filteredRecords();
@@ -364,31 +391,52 @@
           : exact && archiveSearchState === 'error'
             ? 'The full archive search is temporarily unavailable.'
             : 'No requests match the current filters.';
+      feedCardByNumber.clear();
+      feedCardSignatureByNumber.clear();
       feed.innerHTML = `<div class="empty-state"><p>${esc(message)}</p></div>`;
       feed.scrollTop = 0;
       return;
     }
+    if (feed.querySelector(':scope > .empty-state')) feed.replaceChildren();
+
+    const desiredNumbers = new Set();
+    const animatedCards = [];
     let arrivalIndex = 0;
-    feed.innerHTML = visible.map(record => {
-      const hasMapPin = recordHasMapPin(record);
-      const unavailableBadge = missingBadge(record);
+    visible.forEach((record, index) => {
+      const number = record.srnumber;
+      desiredNumbers.add(number);
       const arriving = arrivingNumbers.has(record.srnumber);
-      const arrivalStyle = arriving ? ` style="--arrival-index:${Math.min(arrivalIndex++, 8)}"` : '';
-      const headline = record.problem_details
-        ? `${record.problem || 'Service Request'}: ${record.problem_details}`
-        : record.problem || 'Service Request';
-      return `<article class="request-card${selectedNumber === record.srnumber ? ' selected' : ''}${arriving ? ' arriving' : ''}"${arrivalStyle} data-number="${esc(record.srnumber)}" tabindex="0">
-        <span class="request-dot${isClosed(record.status) ? ' closed' : ''}"></span>
-        <div class="request-copy">
-          <div class="request-topline"><strong>${esc(headline)}</strong><time>${esc(timeLabel(record.submitted_at))}</time></div>
-          <p>${esc(record.address || 'Location unavailable')}</p>
-          <div class="request-meta"><span>${esc(record.srnumber)}</span><span>•</span><span>${esc(record.status || 'Unknown')}</span>${unavailableBadge}${!hasMapPin ? '<span class="unmapped-label">NO MAP PIN</span>' : ''}</div>
-        </div>
-      </article>`;
-    }).join('');
-    const animatedCards = [...feed.querySelectorAll('.request-card.arriving')];
+      const signature = feedCardSignature(record);
+      let card = feedCardByNumber.get(number);
+      if (!card) {
+        card = document.createElement('button');
+        feedCardByNumber.set(number, card);
+      }
+      if (feedCardSignatureByNumber.get(number) !== signature || arriving) {
+        updateFeedCard(card, record, { arriving, arrivalIndex });
+        feedCardSignatureByNumber.set(number, signature);
+      } else {
+        updateFeedCardSelection(card, selectedNumber === number);
+      }
+      if (arriving) {
+        arrivalIndex += 1;
+        animatedCards.push(card);
+      }
+      const currentAtIndex = feed.children[index];
+      if (currentAtIndex !== card) feed.insertBefore(card, currentAtIndex || null);
+    });
+
+    for (const [number, card] of feedCardByNumber) {
+      if (desiredNumbers.has(number)) continue;
+      card.remove();
+      feedCardByNumber.delete(number);
+      feedCardSignatureByNumber.delete(number);
+    }
     if (animatedCards.length) {
-      window.setTimeout(() => animatedCards.forEach(card => card.classList.remove('arriving')), 1300);
+      window.setTimeout(() => animatedCards.forEach(card => {
+        card.classList.remove('arriving');
+        card.style.removeProperty('--arrival-index');
+      }), 1300);
     }
     arrivingNumbers.clear();
     restoreFeedScroll(scrollSnapshot);
@@ -552,7 +600,7 @@
     detailEmailCount.textContent = '';
     detailEmailEvents.replaceChildren();
     detailEmailUpdates.hidden = true;
-    if (resetDisclosure) detailEmailUpdates.open = true;
+    if (resetDisclosure) detailEmailUpdates.open = false;
   }
 
   function emailAgencyLabel(update) {
@@ -834,6 +882,7 @@
       detail.classList.remove('hidden');
       detail.inert = false;
       detail.setAttribute('aria-hidden', 'false');
+      window.requestAnimationFrame(() => document.getElementById('detail-close').focus());
       return;
     }
     if (detail.contains(document.activeElement)) document.activeElement.blur();
@@ -971,10 +1020,11 @@
   function selectRequest(number, moveMap = true) {
     const record = findRecord(number);
     if (!record) return;
+    const previousNumber = selectedNumber;
     selectedNumber = number;
     renderDetail(record);
     setDetailPanelVisible(true);
-    renderFeed();
+    updateSelectedFeedCard(previousNumber, selectedNumber);
     loadPortalDetails(record);
     beginStatusUpdatesSelection(record);
     const coordinates = recordCoordinates(record);
@@ -994,11 +1044,30 @@
     )].sort();
     statusFilter.innerHTML = '<option value="">All statuses</option>' + statuses.map(status => `<option value="${esc(status)}">${esc(status)}</option>`).join('');
     if (statuses.includes(current)) statusFilter.value = current;
+    updateActiveFilterState();
   }
 
-  function updateConnectionLabel() {
+  function updateActiveFilterState() {
+    const label = activeFilterLabel([
+      statusFilter.value,
+      precinctFilter.value,
+      bidFilter.value
+    ]);
+    const active = label !== 'None selected';
+    activeFilterCount.textContent = label;
+    requestFilters.classList.toggle('has-active-filters', active);
+  }
+
+  function updateConnectionLabel(now = new Date()) {
     if (connection.classList.contains('offline')) return;
-    connectionLabel.textContent = 'Live monitoring active';
+    if (!lastPortalCheck || Number.isNaN(lastPortalCheck.getTime())) {
+      connectionLabel.textContent = 'Live monitoring active';
+      return;
+    }
+    const ageSeconds = Math.max(0, Math.floor((now.getTime() - lastPortalCheck.getTime()) / 1000));
+    connectionLabel.textContent = ageSeconds < 2
+      ? 'Live · checked just now'
+      : `Live · checked ${ageSeconds}s ago`;
   }
 
   function recordsMatch(left, right) {
@@ -1703,19 +1772,16 @@
     if (!card) return;
     openRequestFromFeed(card.dataset.number);
   });
-  feed.addEventListener('keydown', event => {
-    if (event.key !== 'Enter' && event.key !== ' ') return;
-    const card = event.target.closest('.request-card');
-    if (!card) return;
-    event.preventDefault();
-    openRequestFromFeed(card.dataset.number);
-  });
   mobileViewTabs.addEventListener('click', event => {
     const button = event.target.closest('button[data-mobile-view]');
     if (button) setMobileView(button.dataset.mobileView);
   });
   search.addEventListener('input', scheduleArchiveSearch);
-  statusFilter.addEventListener('change', () => { renderFeed({ resetScroll: true }); renderMap(); });
+  statusFilter.addEventListener('change', () => {
+    updateActiveFilterState();
+    renderFeed({ resetScroll: true });
+    renderMap();
+  });
   function handleGeographyFilterChange() {
     lastGoodSummary = null;
     highestObservedSuffix = null;
@@ -1736,8 +1802,11 @@
       window.clearTimeout(archiveSearchTimer);
       archiveSearchTimer = null;
     }
+    const previousNumber = selectedNumber;
     selectedNumber = null;
+    updateSelectedFeedCard(previousNumber, null);
     setDetailPanelVisible(false);
+    updateActiveFilterState();
     renderFeed({ resetScroll: true });
     renderMap();
     syncSelectedBoundaries();
@@ -1772,7 +1841,8 @@
       refresh();
     }
   });
-  document.getElementById('detail-close').addEventListener('click', () => {
+  const detailClose = document.getElementById('detail-close');
+  detailClose.addEventListener('click', () => {
     detailLoadSequence += 1;
     emailUpdatesLoadSequence += 1;
     statusHistoryLoadSequence += 1;
@@ -1786,12 +1856,18 @@
     const closedNumber = selectedNumber;
     selectedNumber = null;
     setDetailPanelVisible(false);
-    renderFeed();
+    updateSelectedFeedCard(closedNumber, null);
     const returnTarget = compactLayout.matches && viewTabsVisible()
       ? mobileViewTabs.querySelector('button[aria-pressed="true"]')
       : [...feed.querySelectorAll('.request-card')]
         .find(card => card.dataset.number === closedNumber);
     if (returnTarget) returnTarget.focus();
+  });
+  document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && selectedNumber && !detail.classList.contains('hidden')) {
+      event.preventDefault();
+      detailClose.click();
+    }
   });
 
   compactLayout.addEventListener('change', event => {
@@ -1804,6 +1880,7 @@
 
   loadPolicePrecincts();
   loadBusinessImprovementDistricts();
+  updateActiveFilterState();
   refresh();
   window.setInterval(refresh, 5000);
   window.setInterval(() => {
@@ -1811,6 +1888,7 @@
     document.getElementById('nyc-clock').textContent = new Intl.DateTimeFormat('en-US', {
       timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', second: '2-digit'
     }).format(now);
+    updateConnectionLabel(now);
     if (lastPortalCheck) {
       const next = new Date(lastPortalCheck.getTime() + currentPollSeconds * 1000);
       const remaining = Math.max(0, Math.ceil((next.getTime() - now.getTime()) / 1000));
