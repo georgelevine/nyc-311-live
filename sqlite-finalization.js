@@ -267,6 +267,50 @@ const MIGRATIONS = Object.freeze([
       ON nyc311_email_subscription_jobs(scope_type,scope_id,state);
     CREATE INDEX IF NOT EXISTS nyc311_initial_email_jobs_scope_idx
       ON nyc311_initial_email_jobs(scope_type,scope_id,state);`
+  }),
+  Object.freeze({
+    version: 8,
+    name: 'allow_all_nyc311_email_monitoring_scope',
+    sql: `ALTER TABLE nyc311_email_subscription_jobs
+      RENAME TO nyc311_email_subscription_jobs_v7;
+
+    CREATE TABLE nyc311_email_subscription_jobs (
+      srnumber TEXT PRIMARY KEY,
+      alias_id INTEGER NOT NULL UNIQUE,
+      bid_id INTEGER NOT NULL,
+      state TEXT NOT NULL DEFAULT 'pending'
+        CHECK(state IN ('pending','processing','subscribed','retry','error')),
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts>=0),
+      next_attempt_at TEXT NOT NULL,
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      subscribed_at TEXT,
+      scope_type TEXT NOT NULL DEFAULT 'bid'
+        CHECK(scope_type IN ('bid','police_precinct','all')),
+      scope_id INTEGER,
+      scope_label TEXT,
+      FOREIGN KEY(srnumber)
+        REFERENCES live_portal_requests(srnumber) ON UPDATE CASCADE ON DELETE CASCADE,
+      FOREIGN KEY(alias_id)
+        REFERENCES nyc311_email_aliases(id) ON DELETE CASCADE
+    );
+
+    INSERT INTO nyc311_email_subscription_jobs (
+      srnumber,alias_id,bid_id,state,attempts,next_attempt_at,last_error,
+      created_at,updated_at,subscribed_at,scope_type,scope_id,scope_label
+    )
+    SELECT
+      srnumber,alias_id,bid_id,state,attempts,next_attempt_at,last_error,
+      created_at,updated_at,subscribed_at,scope_type,scope_id,scope_label
+    FROM nyc311_email_subscription_jobs_v7;
+
+    DROP TABLE nyc311_email_subscription_jobs_v7;
+
+    CREATE INDEX nyc311_email_subscription_jobs_due_idx
+      ON nyc311_email_subscription_jobs(state,next_attempt_at,bid_id);
+    CREATE INDEX nyc311_email_subscription_jobs_scope_idx
+      ON nyc311_email_subscription_jobs(scope_type,scope_id,state);`
   })
 ]);
 

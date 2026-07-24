@@ -186,6 +186,47 @@ function enqueuePrecinctSubscriptions(database, precincts, {
   return added;
 }
 
+function enqueueAllSubscriptions(database, {
+  domain = process.env.INBOUND_EMAIL_DOMAIN,
+  startAt,
+  now = new Date()
+} = {}) {
+  const cutoff = new Date(startAt);
+  if (!Number.isFinite(cutoff.getTime())) {
+    throw new Error('EMAIL_ALL_START_AT must be a valid timestamp');
+  }
+  const nowIso = now.toISOString();
+  const rows = database.prepare(`
+    SELECT srnumber
+    FROM live_portal_requests
+    WHERE portal_id IS NOT NULL
+      AND first_seen_at>=?
+    ORDER BY suffix
+  `).all(cutoff.toISOString());
+  const insert = database.prepare(`
+    INSERT OR IGNORE INTO nyc311_email_subscription_jobs (
+      srnumber,alias_id,bid_id,state,attempts,next_attempt_at,last_error,
+      created_at,updated_at,subscribed_at,scope_type,scope_id,scope_label
+    )
+    SELECT ?,?,0,CASE WHEN alias.state IN ('subscribed','active') THEN 'subscribed' ELSE 'pending' END,
+           0,?,NULL,?,?,alias.subscribed_at,'all',0,'All NYC311'
+    FROM nyc311_email_aliases AS alias WHERE alias.id=?
+  `);
+  let added = 0;
+  for (const row of rows) {
+    const alias = createRequestAlias(database, { srnumber: row.srnumber, domain, now });
+    added += insert.run(
+      row.srnumber,
+      alias.id,
+      nowIso,
+      nowIso,
+      nowIso,
+      alias.id
+    ).changes;
+  }
+  return added;
+}
+
 function claimSubscription(database, now = new Date()) {
   const row = database.prepare(`
     SELECT job.*,alias.recipient_address,request.portal_id
@@ -225,6 +266,7 @@ function retrySubscription(database, job, error, now = new Date()) {
 module.exports = {
   claimSubscription,
   completeSubscription,
+  enqueueAllSubscriptions,
   enqueueBidSubscriptions,
   enqueuePrecinctSubscriptions,
   formPayload,

@@ -29,6 +29,7 @@ const {
 const {
   claimSubscription,
   completeSubscription,
+  enqueueAllSubscriptions,
   enqueueBidSubscriptions,
   enqueuePrecinctSubscriptions,
   parseBidIds,
@@ -53,6 +54,10 @@ const DETAIL_REQUEST_DELAY_MS = Math.max(500, Number(process.env.DETAIL_REQUEST_
 const EMAIL_SUBSCRIBE_BID_IDS = parseBidIds(process.env.EMAIL_SUBSCRIBE_BID_IDS);
 const EMAIL_SUBSCRIBE_PRECINCTS = parseBidIds(process.env.EMAIL_SUBSCRIBE_PRECINCTS);
 const EMAIL_PRECINCT_START_AT = process.env.EMAIL_PRECINCT_START_AT || null;
+const EMAIL_SUBSCRIBE_ALL_NEW = /^(?:1|true)$/i.test(
+  String(process.env.EMAIL_SUBSCRIBE_ALL_NEW || '')
+);
+const EMAIL_ALL_START_AT = process.env.EMAIL_ALL_START_AT || null;
 const EMAIL_SUBSCRIPTION_DELAY_MS = Math.max(
   1000,
   Number(process.env.EMAIL_SUBSCRIPTION_DELAY_MS || 5000)
@@ -449,7 +454,9 @@ function requestStop(reason = 'requested') {
 }
 
 function startEmailSubscriptions() {
-  if ((!EMAIL_SUBSCRIBE_BID_IDS.length && !EMAIL_SUBSCRIBE_PRECINCTS.length)
+  if ((!EMAIL_SUBSCRIBE_BID_IDS.length
+      && !EMAIL_SUBSCRIBE_PRECINCTS.length
+      && !EMAIL_SUBSCRIBE_ALL_NEW)
       || emailSubscriptionPromise) return;
   emailSubscriptionPromise = (async () => {
     while (!detailHydrationStopping) {
@@ -458,6 +465,9 @@ function startEmailSubscriptions() {
         const precinctAdded = enqueuePrecinctSubscriptions(db, EMAIL_SUBSCRIBE_PRECINCTS, {
           startAt: EMAIL_PRECINCT_START_AT
         });
+        const allAdded = EMAIL_SUBSCRIBE_ALL_NEW
+          ? enqueueAllSubscriptions(db, { startAt: EMAIL_ALL_START_AT })
+          : 0;
         const initialAdded = enqueueInitialAlerts(db, {
           bidIds: EMAIL_SUBSCRIBE_BID_IDS,
           precincts: EMAIL_SUBSCRIBE_PRECINCTS
@@ -473,6 +483,13 @@ function startEmailSubscriptions() {
             email_subscriptions_queued: precinctAdded,
             police_precincts: EMAIL_SUBSCRIBE_PRECINCTS,
             first_seen_at_or_after: EMAIL_PRECINCT_START_AT
+          }));
+        }
+        if (allAdded) {
+          console.log(JSON.stringify({
+            email_subscriptions_queued: allAdded,
+            scope: 'all',
+            first_seen_at_or_after: EMAIL_ALL_START_AT
           }));
         }
         if (initialAdded) {

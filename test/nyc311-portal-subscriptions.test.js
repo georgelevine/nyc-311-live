@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { DatabaseSync } = require('node:sqlite');
 const {
+  enqueueAllSubscriptions,
   enqueuePrecinctSubscriptions,
   formPayload,
   modalUrl,
@@ -56,6 +57,45 @@ test('precinct enrollment honors the immutable first-seen cutoff', () => {
     scope_type: 'police_precinct',
     scope_id: 1,
     scope_label: 'NYPD 1st Precinct'
+  });
+  database.close();
+});
+
+test('all-request enrollment includes only records at or after its immutable cutoff', () => {
+  const database = new DatabaseSync(':memory:');
+  database.exec(`
+    CREATE TABLE live_portal_requests (
+      srnumber TEXT PRIMARY KEY,portal_id TEXT,police_precinct INTEGER,
+      first_seen_at TEXT NOT NULL,suffix INTEGER
+    );
+    CREATE TABLE nyc311_email_aliases (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,local_part TEXT UNIQUE,domain TEXT,
+      recipient_address TEXT UNIQUE,srnumber TEXT UNIQUE,token_hash TEXT UNIQUE,
+      state TEXT,created_at TEXT,subscribed_at TEXT,last_received_at TEXT,updated_at TEXT
+    );
+    CREATE TABLE nyc311_email_subscription_jobs (
+      srnumber TEXT PRIMARY KEY,alias_id INTEGER UNIQUE,bid_id INTEGER,state TEXT,
+      attempts INTEGER,next_attempt_at TEXT,last_error TEXT,created_at TEXT,
+      updated_at TEXT,subscribed_at TEXT,scope_type TEXT,scope_id INTEGER,scope_label TEXT
+    );
+    INSERT INTO live_portal_requests VALUES
+      ('311-28300001','11111111-1111-1111-1111-111111111111',1,'2026-07-24T20:00:00.000Z',1),
+      ('311-28300002','22222222-2222-2222-2222-222222222222',2,'2026-07-24T20:00:01.000Z',2),
+      ('311-28300003',NULL,3,'2026-07-24T20:00:02.000Z',3);
+  `);
+  assert.equal(enqueueAllSubscriptions(database, {
+    startAt: '2026-07-24T20:00:01.000Z',
+    now: new Date('2026-07-24T20:01:00.000Z')
+  }), 1);
+  const job = database.prepare(`
+    SELECT srnumber,scope_type,scope_id,scope_label
+    FROM nyc311_email_subscription_jobs
+  `).get();
+  assert.deepEqual({ ...job }, {
+    srnumber: '311-28300002',
+    scope_type: 'all',
+    scope_id: 0,
+    scope_label: 'All NYC311'
   });
   database.close();
 });
