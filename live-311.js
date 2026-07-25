@@ -43,6 +43,13 @@ const {
   retryInitialAlert,
   sendInitialAlert
 } = require('./nyc311-initial-alerts');
+const {
+  chooseDetailWork,
+  monitoringMode,
+  preservePendingClosureStatus,
+  scheduledOpenFollowupsEnabled
+} = require('./monitoring-mode');
+const { reconcileStoredEmailClosures } = require('./nyc311-email-inbound');
 
 const PORTAL_URL = 'https://portal.311.nyc.gov/entity-pin-fetch-service-requests/';
 const POLL_INTERVAL_SECONDS = Math.max(5, Number(process.env.POLL_INTERVAL_SECONDS || 15));
@@ -62,6 +69,7 @@ const EMAIL_SUBSCRIPTION_DELAY_MS = Math.max(
   1000,
   Number(process.env.EMAIL_SUBSCRIPTION_DELAY_MS || 5000)
 );
+const SCHEDULED_OPEN_FOLLOWUPS_ENABLED = scheduledOpenFollowupsEnabled(process.env);
 const SQLITE_SYNCHRONOUS = resolveSynchronousMode(process.env.SQLITE_SYNCHRONOUS);
 const DATABASE_PATH = process.env.DATABASE_PATH
   ? path.resolve(process.env.DATABASE_PATH)
@@ -818,10 +826,17 @@ async function fetchLiveDetail(row) {
 }
 
 function nextDetailWork(now) {
-  return nextClosingFollowUp.get(now)
-    || nextDetailRequest.get(now)
-    || nextOpenFollowUp.get(now)
-    || null;
+  const closing = nextClosingFollowUp.get(now);
+  const initial = closing ? null : nextDetailRequest.get(now);
+  const open = closing || initial || !SCHEDULED_OPEN_FOLLOWUPS_ENABLED
+    ? null
+    : nextOpenFollowUp.get(now);
+  return chooseDetailWork({
+    closing,
+    initial,
+    open,
+    scheduledOpenFollowups: SCHEDULED_OPEN_FOLLOWUPS_ENABLED
+  });
 }
 
 let detailHydrationPromise = null;
@@ -1034,13 +1049,24 @@ function savePoll(records) {
         ? businessImprovementDistrictMatcher.match(latitude, longitude)
         : null;
       if (!existing) newMapRecords += 1;
-      const statusChanged = data.status
-        && (!existing || !statusesMatch(existing.status, data.status));
+      const existingFollowUp = existing
+        ? closureTracker.getFollowUp.get(number)
+        : null;
+      const preservePendingClosure = existing && preservePendingClosureStatus({
+        currentStatus: existing.status,
+        incomingStatus: data.status,
+        followUpState: existingFollowUp && existingFollowUp.state
+      });
+      const effectiveMapStatus = preservePendingClosure
+        ? existing.status
+        : data.status;
+      const statusChanged = effectiveMapStatus
+        && (!existing || !statusesMatch(existing.status, effectiveMapStatus));
       if (statusChanged) {
         const added = closureTracker.observeStatus({
           srnumber: number,
           previousStatus: existing ? existing.status : null,
-          status: data.status,
+          status: effectiveMapStatus,
           source: 'map',
           observedAt: nowIso,
           snapshot: pin
@@ -1050,10 +1076,10 @@ function savePoll(records) {
           srnumber: number,
           portalId: pin.id || (existing && existing.portal_id),
           previousStatus: existing ? existing.status : null,
-          status: data.status,
+          status: effectiveMapStatus,
           observedAt: nowIso
         });
-        if (queued && isClosedStatus(data.status)) closureRefreshesQueued += 1;
+        if (queued && isClosedStatus(effectiveMapStatus)) closureRefreshesQueued += 1;
       }
       upsertRequest.run(
         number,
@@ -1071,7 +1097,7 @@ function savePoll(records) {
         latitude,
         longitude,
         normalizePortalTimestamp(data.submitteddate),
-        data.status || null,
+        effectiveMapStatus || null,
         pin.id ? `https://portal.311.nyc.gov/sr-details/?id=${pin.id}` : null,
         nowIso,
         nowIso,
@@ -1276,10 +1302,22 @@ async function main() {
     updatedAt: detailQueueSeededAt
   });
   const seeded = seedClosureTracking();
-  const openFollowUpsRescheduled = closureTracker.normalizeOpenFollowUps(new Date());
+  const emailClosuresReconciled = reconcileStoredEmailClosures(db, {
+    now: new Date()
+  });
+  const openFollowUpsRescheduled = SCHEDULED_OPEN_FOLLOWUPS_ENABLED
+    ? closureTracker.normalizeOpenFollowUps(new Date())
+    : 0;
   if (!getState.get('poll_interval_seconds')) {
     setState.run('poll_interval_seconds', String(POLL_INTERVAL_SECONDS), new Date().toISOString());
   }
+  const monitoringStateAt = new Date().toISOString();
+  setState.run(
+    'scheduled_open_followups_enabled',
+    SCHEDULED_OPEN_FOLLOWUPS_ENABLED ? '1' : '0',
+    monitoringStateAt
+  );
+  setState.run('status_monitoring_mode', monitoringMode(process.env), monitoringStateAt);
   console.log(JSON.stringify({
     database: DATABASE_PATH,
     poll_interval_seconds: currentPollIntervalSeconds(),
@@ -1294,7 +1332,14 @@ async function main() {
     status_history_seeded: seeded.statusRows,
     followups_seeded: seeded.followUpsSeeded,
     provisional_followups_seeded: seeded.provisionalFollowUpsSeeded,
-    open_followups_rescheduled: openFollowUpsRescheduled
+    stored_email_closures_reconciled: emailClosuresReconciled.reconciled,
+    stored_email_closure_verifications_queued:
+      emailClosuresReconciled.verification_queued,
+    stored_email_closures_preserved_as_reopened:
+      emailClosuresReconciled.skipped_later_open_status,
+    open_followups_rescheduled: openFollowUpsRescheduled,
+    scheduled_open_followups_enabled: SCHEDULED_OPEN_FOLLOWUPS_ENABLED,
+    status_monitoring_mode: monitoringMode(process.env)
   }));
   startDetailHydration();
   startEmailSubscriptions();

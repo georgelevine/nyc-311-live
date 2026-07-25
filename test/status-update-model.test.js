@@ -3,8 +3,10 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
+  buildEmailMetricsModel,
   buildStatusUpdateModel,
   currentClosureSnapshot,
+  formatMetricDuration,
   portalEvent
 } = require('../public/js/status-update-model');
 
@@ -160,6 +162,65 @@ test('email narrative is shown without changing the official lifecycle status', 
   assert.equal(model.events[0].verification_state, 'checking');
 });
 
+test('does not render email-sourced status history as a second Portal event', () => {
+  const record = closedRecord({ followup_state: 'closing' });
+  const model = buildStatusUpdateModel(record, {
+    history: [{
+      id: 12,
+      previous_status: 'In Progress',
+      status: 'Closed',
+      source: 'email',
+      observed_at: '2026-07-23T20:05:00.000Z'
+    }],
+    closure_snapshots: [],
+    followup: { state: 'closing', closure_cycle: 1 }
+  }, {
+    total: 1,
+    updates: [{
+      id: 9,
+      event_kind: 'Closed',
+      received_at: '2026-07-23T20:05:00.000Z',
+      closure_wake_queued: true
+    }]
+  });
+  assert.deepEqual(model.events.map(event => event.source), ['email']);
+  assert.equal(model.total, 1);
+});
+
+test('never labels a detail-unconfirmed closure as Portal verified', () => {
+  const record = closedRecord({ current_cycle_final_state: 'detail_unconfirmed' });
+  const payload = closurePayload({
+    history: [{
+      id: 12,
+      previous_status: 'In Progress',
+      status: 'Closed',
+      source: 'email',
+      observed_at: '2026-07-23T20:05:00.000Z'
+    }],
+    closure_snapshots: [{
+      id: 13,
+      closure_cycle: 1,
+      is_final: 1,
+      final_state: 'detail_unconfirmed',
+      fetched_at: '2026-07-23T21:05:00.000Z',
+      snapshot: { status: 'In Progress', dateClosed: null }
+    }]
+  });
+  const model = buildStatusUpdateModel(record, payload, {
+    total: 1,
+    updates: [{
+      id: 9,
+      event_kind: 'Closed',
+      received_at: '2026-07-23T20:05:00.000Z'
+    }]
+  });
+  assert.equal(model.events.length, 2);
+  for (const event of model.events) {
+    assert.equal(event.verification_state, 'unconfirmed');
+    assert.equal(event.verification_label, 'Portal detail did not confirm closure');
+  }
+});
+
 test('orders the newest email and Portal events first', () => {
   const model = buildStatusUpdateModel(closedRecord(), closurePayload(), {
     total: 2,
@@ -173,4 +234,135 @@ test('orders the newest email and Portal events first', () => {
     'portal-2',
     'email-1'
   ]);
+});
+
+test('normalizes email monitoring totals, coverage, and response-time samples', () => {
+  const model = buildEmailMetricsModel({
+    as_of: '2026-07-25T14:10:00.000Z',
+    monitoring_mode: 'subscription_only',
+    deliveries: {
+      total: 4500,
+      usable: 4400,
+      submitted: 76,
+      updated: 425,
+      closed: 3975,
+      issues: { total: 24 },
+      unrecognized_submitted: 20,
+      authentication_issues: 1,
+      detail_issues: 2,
+      detail_complete: 4378,
+      excluded_non_direct: 1,
+      last_received_at: '2026-07-25T14:09:58.000Z'
+    },
+    subscriptions: {
+      subscribed: 7800,
+      pending: 2,
+      retry: 1,
+      processing: 1
+    },
+    verification: {
+      eligible_portal_closures: 4000,
+      closed_emails_received: 3910,
+      coverage_percent: 97.75,
+      missing: 90,
+      missing_after_grace: 90,
+      awaiting_within_grace: 4,
+      all_known_portal_closures: 4004,
+      all_closed_emails_received: 3910,
+      grace_seconds: 3600,
+      limitation: 'Only independently known Portal closures enter the denominator'
+    },
+    response_times: {
+      cohort: {
+        requests: 7800,
+        early_subscription_seconds: 900,
+        right_censored_without_first_updated: 7375,
+        right_censored_without_observed_portal_closure: 3890
+      },
+      overall: {
+        update_median_seconds: 1800,
+        update_p90_seconds: 7200,
+        update_count: 425,
+        closure_median_seconds: 3600,
+        closure_p90_seconds: 86400,
+        closure_count: 3910,
+        closure_notification_median_seconds: 18,
+        closure_notification_p90_seconds: 29,
+        closure_notification_count: 3910
+      },
+      by_agency: [{
+        agency_name: 'Department of Transportation',
+        update_median_seconds: 600,
+        update_p90_seconds: 3600,
+        update_count: 20,
+        closure_median_seconds: 7200,
+        closure_p90_seconds: 14400,
+        closure_count: 90
+      }, {}],
+      by_complaint_type: [{
+        complaint_type: 'Illegal Parking',
+        update_median_seconds: null,
+        update_p90_seconds: null,
+        update_count: 0,
+        closure_median_seconds: 900,
+        closure_p90_seconds: 1800,
+        closure_count: 500
+      }]
+    }
+  });
+
+  assert.equal(model.available, true);
+  assert.deepEqual(model.monitoring_mode, {
+    key: 'subscription_only',
+    label: 'Email subscriptions'
+  });
+  assert.equal(model.deliveries.usable_percent, 4400 / 45);
+  assert.equal(model.deliveries.issues, 24);
+  assert.equal(model.deliveries.unrecognized_submitted, 20);
+  assert.equal(model.deliveries.authentication_issues, 1);
+  assert.equal(model.deliveries.detail_issues, 2);
+  assert.equal(model.deliveries.excluded_non_direct, 1);
+  assert.equal(model.subscriptions.subscribed, 7800);
+  assert.equal(model.verification.coverage_percent, 97.75);
+  assert.equal(model.verification.awaiting_within_grace, 4);
+  assert.equal(model.verification.grace_seconds, 3600);
+  assert.match(model.verification.limitation, /independently known Portal closures/);
+  assert.equal(model.response_times.cohort.requests, 7800);
+  assert.equal(model.response_times.cohort.right_censored_without_first_updated, 7375);
+  assert.equal(model.response_times.overall.closure_notification_median_seconds, 18);
+  assert.equal(model.response_times.by_agency.length, 1);
+  assert.equal(model.response_times.by_agency[0].label, 'Department of Transportation');
+  assert.equal(model.response_times.by_complaint_type[0].label, 'Illegal Parking');
+  assert.equal(model.response_times.by_complaint_type[0].update_median_seconds, null);
+});
+
+test('email metric model labels email-primary monitoring modes clearly', () => {
+  assert.deepEqual(buildEmailMetricsModel({
+    monitoring_mode: 'email_primary'
+  }).monitoring_mode, {
+    key: 'email_primary',
+    label: 'Email-primary monitoring'
+  });
+  assert.deepEqual(buildEmailMetricsModel({
+    monitoring_mode: 'email_primary_with_scheduled_fallback'
+  }).monitoring_mode, {
+    key: 'email_primary_with_scheduled_fallback',
+    label: 'Email primary + scheduled fallback'
+  });
+});
+
+test('email metric model handles absent data and formats compact durations', () => {
+  const missing = buildEmailMetricsModel(null);
+  assert.equal(missing.available, false);
+  assert.equal(missing.deliveries.total, 0);
+  assert.equal(missing.verification.coverage_percent, null);
+  assert.deepEqual(missing.response_times.by_agency, []);
+
+  assert.equal(formatMetricDuration(null), '—');
+  assert.equal(formatMetricDuration(-1), '—');
+  assert.equal(formatMetricDuration(42), '42s');
+  assert.equal(formatMetricDuration(90), '1m 30s');
+  assert.equal(formatMetricDuration(3600), '1h');
+  assert.equal(formatMetricDuration(9000), '2h 30m');
+  assert.equal(formatMetricDuration(90000), '1d 1h');
 });

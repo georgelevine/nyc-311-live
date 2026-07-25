@@ -62,7 +62,8 @@ stale.
 ## What is deployed
 
 - `collector`: polls the NYC311 Portal, audits request-number gaps, loads public
-  details, and monitors requests through closure.
+  details, subscribes new requests to NYC311 email updates, and monitors
+  requests through closure.
 - `web`: serves the live dashboard and API from the same SQLite archive.
 - `proxy`: exposes the web service through Caddy on ports 80 and 443.
 - `backup`: uses SQLite's online backup API, validates the complete archive,
@@ -71,6 +72,14 @@ stale.
 The Node services run as UID 10001 with a read-only container filesystem and
 dropped Linux capabilities. An operating-system lock prevents a second collector
 from using the same archive. Cloud SQLite uses `SQLITE_SYNCHRONOUS=FULL`.
+
+The collector normally treats authenticated, request-matched NYC311 email as the
+primary closure signal and immediately verifies a closure against the Portal.
+Set `SCHEDULED_OPEN_FOLLOWUPS_ENABLED=0` in the protected `.env` to stop blanket
+24-hour checks of every still-open request. Map polling, number-gap auditing,
+initial detail loading, email subscriptions, and email-triggered closure
+verification continue. This mode is reversible by restoring the value to `1`
+and recreating the collector.
 
 ## 1. Create the Lightsail instance
 

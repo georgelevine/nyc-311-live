@@ -13,6 +13,8 @@ closure, and displays the archive in a macOS dashboard with a live map.
 - Zero or more coordinate-derived Business Improvement District memberships
   and the exact NYC Maps boundary snapshot used
 - Status history, scheduled follow-ups, and closure snapshots
+- Per-request NYC311 Submitted, Updated, and Closed subscription emails,
+  including parsed agency routing and response text
 - Audit-only requests that do not appear in the Portal's map feed
 
 The live database is intentionally excluded from Git. It remains on the Mac at:
@@ -70,6 +72,12 @@ provisional. A separate delayed window combines map and request-number-audit
 discoveries without claiming the audit is complete. The response also reports
 collector freshness, archive time coverage, missing submitted times, request
 type and borough distributions, and detail/map-pin coverage.
+
+`GET /api/email-metrics` reports accepted and usable NYC311 emails, subscription
+queue state, measured closure-email coverage, and observed response-time
+distributions by agency and complaint type. Update time and Portal closure time
+are reported separately from email-notification delay; these are observational
+archive statistics, not official agency service levels.
 
 `GET /api/police-precincts` lists the active precinct release. Add
 `police_precinct=NUMBER` to `/api/live-dashboard`, `/api/live-map`, or

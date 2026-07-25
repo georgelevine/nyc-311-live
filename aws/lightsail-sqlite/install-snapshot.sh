@@ -93,6 +93,7 @@ declare -A allowed_env_keys=(
   [EMAIL_ALL_START_AT]=1
   [EMAIL_SUBSCRIPTION_DELAY_MS]=1
   [INITIAL_EMAIL_ENDPOINT]=1
+  [SCHEDULED_OPEN_FOLLOWUPS_ENABLED]=1
 )
 env_line_number=0
 while IFS= read -r env_line || [[ -n "${env_line}" ]]; do
@@ -134,6 +135,10 @@ if [[ "${SQLITE_SYNCHRONOUS:-}" != "FULL" ]]; then
 fi
 if [[ ! "${POLL_INTERVAL_SECONDS:-}" =~ ^(5|10|15|30|60)$ ]]; then
   echo "POLL_INTERVAL_SECONDS must be 5, 10, 15, 30, or 60." >&2
+  exit 1
+fi
+if [[ ! "${SCHEDULED_OPEN_FOLLOWUPS_ENABLED:-1}" =~ ^(0|1)$ ]]; then
+  echo "SCHEDULED_OPEN_FOLLOWUPS_ENABLED must be 0 or 1." >&2
   exit 1
 fi
 require_integer_range() {

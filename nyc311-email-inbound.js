@@ -140,6 +140,14 @@ function verifySignedEnvelope({
     error.statusCode = 422;
     throw error;
   }
+  const dmarcPassed = String(metadata.verdicts.dmarcVerdict || '').toUpperCase() === 'PASS';
+  const spfPassed = String(metadata.verdicts.spfVerdict || '').toUpperCase() === 'PASS';
+  const dkimPassed = String(metadata.verdicts.dkimVerdict || '').toUpperCase() === 'PASS';
+  if (!dmarcPassed || (!spfPassed && !dkimPassed)) {
+    const error = new Error('message did not pass SES sender authentication checks');
+    error.statusCode = 422;
+    throw error;
+  }
   return {
     metadata,
     recipient: convenienceRecipient,
@@ -308,11 +316,13 @@ function reconcileAlias(database, {
   };
 }
 
-function wakeClosureVerification(database, srnumber, checkedAt) {
+function wakeClosureVerification(database, srnumber, checkedAt, {
+  allowAlreadyClosedStatus = false
+} = {}) {
   const request = database.prepare(`
     SELECT srnumber,portal_id,status FROM live_portal_requests WHERE srnumber=?
   `).get(srnumber);
-  if (!request || isClosedStatus(request.status)) return false;
+  if (!request || (!allowAlreadyClosedStatus && isClosedStatus(request.status))) return false;
   const closureTracker = createClosureTracker(database);
   const existing = closureTracker.getFollowUp.get(srnumber);
   if (existing && existing.state === 'closed') return false;
@@ -347,6 +357,159 @@ function wakeClosureVerification(database, srnumber, checkedAt) {
     checkedAt
   );
   return Number(result.changes || 0) > 0;
+}
+
+function observeAuthoritativeEmailClosure(
+  database,
+  srnumber,
+  observedAt,
+  values,
+  { effectiveAt = null } = {}
+) {
+  const request = database.prepare(`
+    SELECT srnumber,status FROM live_portal_requests WHERE srnumber=?
+  `).get(srnumber);
+  if (!request) return false;
+
+  const status = 'Closed';
+  const closureTracker = createClosureTracker(database);
+  const historyAdded = closureTracker.observeStatus({
+    srnumber,
+    previousStatus: request.status,
+    status,
+    source: 'email',
+    observedAt,
+    effectiveAt,
+    snapshot: {
+      eventKind: values.eventKind,
+      subject: values.subject,
+      agencyName: values.agencyName,
+      agencyAcronym: values.agencyAcronym,
+      responseText: values.responseText,
+      nextUpdateText: values.nextUpdateText
+    }
+  });
+  const statusUpdated = database.prepare(`
+    UPDATE live_portal_requests
+    SET status=?
+    WHERE srnumber=? AND (status IS NULL OR status<>?)
+  `).run(status, srnumber, status);
+  return historyAdded || Number(statusUpdated.changes || 0) > 0;
+}
+
+function reconcileStoredEmailClosures(database, {
+  now = new Date(),
+  manageTransaction = true
+} = {}) {
+  if (!database || typeof database.prepare !== 'function') {
+    throw new TypeError('database must be an open SQLite database');
+  }
+  const reconciledAt = now instanceof Date ? now.toISOString() : new Date(now).toISOString();
+  applyMigrations(database, reconciledAt);
+  createClosureTracker(database);
+  const candidates = database.prepare(`
+    SELECT event.id,event.reconciled_srnumber,event.event_kind,event.subject,
+           event.agency_name,event.agency_acronym,event.response_text,
+           event.next_update_text,event.received_at,live.status AS live_status
+    FROM nyc311_email_events AS event
+    JOIN live_portal_requests AS live
+      ON live.srnumber=event.reconciled_srnumber
+    WHERE event.parse_outcome='parsed'
+      AND event.srnumber_mismatch=0
+      AND event.alias_match_status IN ('matched','attached')
+      AND event.event_kind='Closed'
+      AND json_extract(event.parsed_json,'$.deliveryMode')='direct'
+      AND UPPER(TRIM(COALESCE(event.spam_verdict,'')))='PASS'
+      AND UPPER(TRIM(COALESCE(event.virus_verdict,'')))='PASS'
+      AND UPPER(TRIM(COALESCE(event.dmarc_verdict,'')))='PASS'
+      AND (
+        UPPER(TRIM(COALESCE(event.spf_verdict,'')))='PASS'
+        OR UPPER(TRIM(COALESCE(event.dkim_verdict,'')))='PASS'
+      )
+    ORDER BY event.received_at DESC,event.id DESC
+  `).all();
+  const latestCandidateByRequest = new Map();
+  for (const row of candidates) {
+    if (isClosedStatus(row.live_status)
+        || latestCandidateByRequest.has(row.reconciled_srnumber)) continue;
+    latestCandidateByRequest.set(row.reconciled_srnumber, row);
+  }
+
+  const laterStatus = database.prepare(`
+    SELECT status,source,observed_at
+    FROM request_status_history
+    WHERE srnumber=? AND observed_at>?
+    ORDER BY observed_at DESC,id DESC
+    LIMIT 1
+  `);
+  const markWakeQueued = database.prepare(`
+    UPDATE nyc311_email_events SET closure_wake_queued=1 WHERE id=?
+  `);
+  const result = {
+    candidates: latestCandidateByRequest.size,
+    reconciled: 0,
+    verification_queued: 0,
+    skipped_later_open_status: 0
+  };
+
+  if (manageTransaction) database.exec('BEGIN IMMEDIATE');
+  try {
+    for (const row of latestCandidateByRequest.values()) {
+      const emailReceivedAt = Number.isFinite(Date.parse(row.received_at))
+        ? new Date(row.received_at).toISOString()
+        : reconciledAt;
+      const later = laterStatus.get(row.reconciled_srnumber, emailReceivedAt);
+      // Never let a startup repair overwrite a subsequently observed reopen.
+      // The detail archive intentionally retains the last closure snapshot, so
+      // it cannot distinguish a stale map observation from a genuine reopen.
+      if (later && !isClosedStatus(later.status)) {
+        result.skipped_later_open_status += 1;
+        // A newer map pin can lag behind the request detail page. Recheck it
+        // immediately, but do not change the live status until Portal detail
+        // confirms the email. A later detail observation is stronger evidence
+        // of a genuine reopen and is left untouched.
+        if (String(later.source || '').trim().toLowerCase() === 'map'
+            && wakeClosureVerification(
+              database,
+              row.reconciled_srnumber,
+              reconciledAt
+            )) {
+          markWakeQueued.run(row.id);
+          result.verification_queued += 1;
+        }
+        continue;
+      }
+      observeAuthoritativeEmailClosure(
+        database,
+        row.reconciled_srnumber,
+        reconciledAt,
+        {
+          eventKind: row.event_kind,
+          subject: row.subject,
+          agencyName: row.agency_name,
+          agencyAcronym: row.agency_acronym,
+          responseText: row.response_text,
+          nextUpdateText: row.next_update_text
+        },
+        { effectiveAt: emailReceivedAt }
+      );
+      result.reconciled += 1;
+      if (wakeClosureVerification(
+        database,
+        row.reconciled_srnumber,
+        reconciledAt,
+        { allowAlreadyClosedStatus: true }
+      )) {
+        markWakeQueued.run(row.id);
+        result.verification_queued += 1;
+      }
+    }
+    if (manageTransaction) database.exec('COMMIT');
+    return result;
+  } catch (error) {
+    if (manageTransaction) database.exec('ROLLBACK');
+    throw error;
+  }
 }
 
 function parsedEventValues(parsed) {
@@ -502,10 +665,32 @@ function persistInboundEmail(database, {
       return { ...existing, duplicate: true };
     }
     const id = Number(insert.lastInsertRowid);
-    const closureWakeQueued = values.parseOutcome === 'parsed'
-      && values.eventKind === 'Closed'
+    const matchedEvent = values.parseOutcome === 'parsed'
+      && !reconciliation.mismatch
       && reconciliation.reconciledSrnumber
-      ? wakeClosureVerification(database, reconciliation.reconciledSrnumber, createdAt)
+      && ['matched', 'attached'].includes(reconciliation.status);
+    // Only a message delivered directly by NYC311 can authoritatively change
+    // status. A forwarded .eml attachment is useful evidence for display, but
+    // SES authenticated its outer sender rather than the attached From header.
+    const directlyAuthenticatedEvent = matchedEvent
+      && parsed
+      && parsed.deliveryMode === 'direct';
+    const authoritativeClosureObserved =
+      directlyAuthenticatedEvent && values.eventKind === 'Closed'
+      ? observeAuthoritativeEmailClosure(
+          database,
+          reconciliation.reconciledSrnumber,
+          receivedAt,
+          values
+        )
+      : false;
+    const closureWakeQueued = directlyAuthenticatedEvent && values.eventKind === 'Closed'
+      ? wakeClosureVerification(
+          database,
+          reconciliation.reconciledSrnumber,
+          receivedAt,
+          { allowAlreadyClosedStatus: true }
+        )
       : false;
     if (closureWakeQueued) {
       database.prepare(`
@@ -513,10 +698,7 @@ function persistInboundEmail(database, {
       `).run(id);
     }
     database.exec('COMMIT');
-    const forward = values.parseOutcome === 'parsed'
-      && !reconciliation.mismatch
-      && reconciliation.reconciledSrnumber
-      && ['matched', 'attached'].includes(reconciliation.status)
+    const forward = matchedEvent
       ? {
           recipient_address: recipient.address,
           srnumber: reconciliation.reconciledSrnumber,
@@ -537,6 +719,7 @@ function persistInboundEmail(database, {
       id,
       duplicate: false,
       parse_outcome: values.parseOutcome,
+      authoritative_status_observed: authoritativeClosureObserved ? 1 : 0,
       closure_wake_queued: closureWakeQueued ? 1 : 0,
       alias_match_status: reconciliation.status,
       forward
@@ -680,6 +863,7 @@ module.exports = {
   extractEmailAddress,
   hmacHex,
   persistInboundEmail,
+  reconcileStoredEmailClosures,
   recipientParts,
   secureSignatureMatch,
   verifyRawSignature,

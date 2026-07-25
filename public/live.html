@@ -66,6 +66,47 @@
           </div>
         </section>
 
+        <section id="email-monitoring" class="email-monitoring" aria-labelledby="email-monitoring-title" aria-busy="true">
+          <header class="email-monitoring-header">
+            <div>
+              <span class="eyebrow">Email monitoring</span>
+              <h2 id="email-monitoring-title">NYC311 status delivery</h2>
+            </div>
+            <span id="email-monitoring-mode" class="monitoring-mode-badge">Checking mode…</span>
+          </header>
+          <div class="email-monitoring-lead">
+            <p><strong id="email-deliveries-total">—</strong><span>emails received</span></p>
+            <div>
+              <strong id="email-deliveries-usable">— usable</strong>
+              <small id="email-deliveries-last">Waiting for the first metrics refresh</small>
+            </div>
+          </div>
+          <dl class="email-delivery-breakdown" aria-label="Email delivery breakdown">
+            <div><dt>Submitted</dt><dd id="email-submitted-count">—</dd></div>
+            <div><dt>Updated</dt><dd id="email-updated-count">—</dd></div>
+            <div><dt>Closed</dt><dd id="email-closed-count">—</dd></div>
+            <div><dt>Issues</dt><dd id="email-issues-count">—</dd></div>
+          </dl>
+          <div class="email-monitoring-health">
+            <div>
+              <span>Subscriptions</span>
+              <strong id="email-subscriptions-count">—</strong>
+              <small id="email-subscriptions-note">Checking enrollment</small>
+            </div>
+            <div>
+              <span>Known Portal closure coverage</span>
+              <strong id="email-coverage-rate">—</strong>
+              <small id="email-coverage-note">Checking independently known closures</small>
+            </div>
+          </div>
+          <p id="email-coverage-limitation" class="email-coverage-limitation">
+            This measure only includes closures independently found in stored NYC311 Portal details.
+          </p>
+          <p id="email-metrics-status" class="email-metrics-status" role="status">
+            Loading email monitoring metrics…
+          </p>
+        </section>
+
         <section class="metrics" aria-label="Live collection statistics">
           <div class="metric-group">
             <header>
@@ -78,8 +119,8 @@
                 <small>Stored in database</small>
               </article>
               <article>
-                <strong id="monitored-count">0</strong><span>Open monitored</span>
-                <small>Checked every 24 hours</small>
+                <strong id="subscription-count">—</strong><span>Email subscribed</span>
+                <small id="subscription-note">Checking enrollment</small>
               </article>
               <article>
                 <strong id="closures-count">0</strong><span>Closures saved</span>
@@ -107,6 +148,71 @@
                 <small>Request numbers waiting</small>
               </article>
             </div>
+          </div>
+        </section>
+
+        <section id="response-time-metrics" class="response-times" aria-labelledby="response-times-title" aria-busy="true">
+          <header class="response-times-header">
+            <div>
+              <span class="eyebrow">Observed response time</span>
+              <h2 id="response-times-title">How quickly requests change</h2>
+            </div>
+            <time id="response-times-updated">Updating…</time>
+          </header>
+          <p id="response-time-definition" class="response-time-definition">
+            These are observed timings, not official agency SLAs or performance measures. First update is elapsed from request submission to the first usable “Updated” email. Closure is elapsed from request submission to the closure time published by the NYC311 Portal, and is included only when a usable “Closed” email was received. Closure email delay is elapsed from that Portal closure time until its email arrived. Median is the 50th percentile; P90 is the 90th percentile; n is the number of requests that reached and matched that event, not the full cohort.
+          </p>
+          <div class="response-time-overall">
+            <article>
+              <span>All updates</span>
+              <strong id="overall-update-median">—</strong>
+              <small id="overall-update-detail">P90 — · n=0</small>
+            </article>
+            <article>
+              <span>All closures</span>
+              <strong id="overall-closure-median">—</strong>
+              <small id="overall-closure-detail">P90 — · n=0</small>
+            </article>
+            <article>
+              <span>Closure email delay</span>
+              <strong id="overall-notification-median">—</strong>
+              <small id="overall-notification-detail">P90 — · n=0</small>
+            </article>
+          </div>
+          <p id="response-cohort-note" class="response-cohort-note">
+            Building the prospective subscription cohort…
+          </p>
+          <div class="response-table-grid">
+            <article class="response-table-card">
+              <header>
+                <h3>By agency</h3>
+                <span>Median · P90 · sample</span>
+              </header>
+              <div class="response-table-scroll">
+                <table>
+                  <caption>Response times grouped by agency</caption>
+                  <thead><tr><th scope="col">Agency</th><th scope="col">Update</th><th scope="col">Close</th></tr></thead>
+                  <tbody id="agency-response-times">
+                    <tr><td colspan="3" class="response-table-empty">Loading agency metrics…</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </article>
+            <article class="response-table-card">
+              <header>
+                <h3>By complaint type</h3>
+                <span>Median · P90 · sample</span>
+              </header>
+              <div class="response-table-scroll">
+                <table>
+                  <caption>Response times grouped by complaint type</caption>
+                  <thead><tr><th scope="col">Complaint</th><th scope="col">Update</th><th scope="col">Close</th></tr></thead>
+                  <tbody id="complaint-response-times">
+                    <tr><td colspan="3" class="response-table-empty">Loading complaint metrics…</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </article>
           </div>
         </section>
 

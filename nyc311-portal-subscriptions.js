@@ -15,6 +15,8 @@ const CONTACT_NAME =
   'ctl00$ContentContainer$MainContent$EntityFormControl$EntityFormControl_EntityFormView$n311_preferredmethodofcontact';
 const EMAIL_NAME =
   'ctl00$ContentContainer$MainContent$EntityFormControl$EntityFormControl_EntityFormView$n311_email';
+const DEFAULT_SUBSCRIPTION_TIMEOUT_MS = 15_000;
+const STALE_SUBSCRIPTION_PROCESSING_MS = 10 * 60 * 1000;
 
 function parseBidIds(value) {
   return [...new Set(String(value || '').split(',')
@@ -66,17 +68,44 @@ function formPayload(html, email) {
   return fields;
 }
 
-async function subscribeRequest({ portalId, email, fetchImpl = fetch }) {
+function subscriptionSubmitAccepted(html) {
+  const $ = cheerio.load(String(html || ''));
+  return $('#MessageLabel').toArray().some(element =>
+    $(element).text().replace(/\s+/g, ' ').trim().toLowerCase() === 'saved'
+  );
+}
+
+async function fetchTextWithTimeout(fetchImpl, url, options, timeoutMs) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetchImpl(url, { ...options, signal: controller.signal });
+    return { response, text: await response.text() };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function subscribeRequest({
+  portalId,
+  email,
+  fetchImpl = fetch,
+  timeoutMs = DEFAULT_SUBSCRIPTION_TIMEOUT_MS
+}) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new TypeError('timeoutMs must be a positive number');
+  }
   const url = modalUrl(portalId);
   const headers = {
     Accept: 'text/html,application/xhtml+xml',
     'User-Agent': 'Mozilla/5.0 (compatible; NYC-BID-311-Live/1.0)',
     Referer: `https://portal.311.nyc.gov/sr-details/?id=${portalId}`
   };
-  const initial = await fetchImpl(url, { headers });
+  const initialResult = await fetchTextWithTimeout(fetchImpl, url, { headers }, timeoutMs);
+  const initial = initialResult.response;
   if (!initial.ok) throw new Error(`NYC311 subscription form returned HTTP ${initial.status}`);
-  const body = formPayload(await initial.text(), email);
-  const submitted = await fetchImpl(url, {
+  const body = formPayload(initialResult.text, email);
+  const submittedResult = await fetchTextWithTimeout(fetchImpl, url, {
     method: 'POST',
     headers: {
       ...headers,
@@ -84,12 +113,18 @@ async function subscribeRequest({ portalId, email, fetchImpl = fetch }) {
       Cookie: cookieHeader(initial)
     },
     body: body.toString()
-  });
-  const responseText = await submitted.text();
+  }, timeoutMs);
+  const submitted = submittedResult.response;
+  const responseText = submittedResult.text;
   if (!submitted.ok) throw new Error(`NYC311 subscription submit returned HTTP ${submitted.status}`);
-  if (/validation-summary-errors|field-validation-error/i.test(responseText)
-      || /already exists for this service request/i.test(responseText)) {
+  if (/already exists for this service request|already subscribed/i.test(responseText)) {
+    return true;
+  }
+  if (/validation-summary-errors|field-validation-error/i.test(responseText)) {
     throw new Error('NYC311 rejected the subscription form');
+  }
+  if (!subscriptionSubmitAccepted(responseText)) {
+    throw new Error('NYC311 did not confirm the subscription');
   }
   return true;
 }
@@ -227,21 +262,55 @@ function enqueueAllSubscriptions(database, {
   return added;
 }
 
-function claimSubscription(database, now = new Date()) {
-  const row = database.prepare(`
-    SELECT job.*,alias.recipient_address,request.portal_id
-    FROM nyc311_email_subscription_jobs job
-    JOIN nyc311_email_aliases alias ON alias.id=job.alias_id
-    JOIN live_portal_requests request USING(srnumber)
-    WHERE job.state IN ('pending','retry') AND job.next_attempt_at<=?
-    ORDER BY job.next_attempt_at,job.created_at LIMIT 1
-  `).get(now.toISOString());
-  if (!row) return null;
-  database.prepare(`
+function recoverStaleProcessingSubscriptions(database, {
+  now = new Date(),
+  staleAfterMs = STALE_SUBSCRIPTION_PROCESSING_MS
+} = {}) {
+  const current = now instanceof Date ? now : new Date(now);
+  if (!Number.isFinite(current.getTime())) throw new TypeError('now must be a valid date');
+  if (!Number.isFinite(staleAfterMs) || staleAfterMs < 0) {
+    throw new TypeError('staleAfterMs must be a nonnegative number');
+  }
+  const nowIso = current.toISOString();
+  const staleBefore = new Date(current.getTime() - staleAfterMs).toISOString();
+  return Number(database.prepare(`
     UPDATE nyc311_email_subscription_jobs
-    SET state='processing',attempts=attempts+1,updated_at=? WHERE srnumber=?
-  `).run(now.toISOString(), row.srnumber);
-  return row;
+    SET state='retry',
+        next_attempt_at=?,
+        last_error='Recovered a stale subscription attempt',
+        updated_at=?
+    WHERE state='processing' AND updated_at<=?
+  `).run(nowIso, nowIso, staleBefore).changes || 0);
+}
+
+function claimSubscription(database, now = new Date()) {
+  const nowIso = now.toISOString();
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    recoverStaleProcessingSubscriptions(database, { now });
+    const row = database.prepare(`
+      SELECT job.*,alias.recipient_address,request.portal_id
+      FROM nyc311_email_subscription_jobs job
+      JOIN nyc311_email_aliases alias ON alias.id=job.alias_id
+      JOIN live_portal_requests request USING(srnumber)
+      WHERE job.state IN ('pending','retry') AND job.next_attempt_at<=?
+      ORDER BY job.next_attempt_at,job.created_at LIMIT 1
+    `).get(nowIso);
+    if (!row) {
+      database.exec('COMMIT');
+      return null;
+    }
+    const claimed = database.prepare(`
+      UPDATE nyc311_email_subscription_jobs
+      SET state='processing',attempts=attempts+1,updated_at=?
+      WHERE srnumber=? AND state IN ('pending','retry')
+    `).run(nowIso, row.srnumber);
+    database.exec('COMMIT');
+    return Number(claimed.changes || 0) > 0 ? row : null;
+  } catch (error) {
+    database.exec('ROLLBACK');
+    throw error;
+  }
 }
 
 function completeSubscription(database, job, now = new Date()) {
@@ -273,6 +342,7 @@ module.exports = {
   modalUrl,
   parseBidIds,
   precinctLabel,
+  recoverStaleProcessingSubscriptions,
   retrySubscription,
   subscribeRequest
 };

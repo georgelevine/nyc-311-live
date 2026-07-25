@@ -4,11 +4,13 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const { DatabaseSync } = require('node:sqlite');
 const {
+  claimSubscription,
   enqueueAllSubscriptions,
   enqueuePrecinctSubscriptions,
   formPayload,
   modalUrl,
   parseBidIds, precinctLabel,
+  recoverStaleProcessingSubscriptions,
   subscribeRequest
 } = require('../nyc311-portal-subscriptions');
 
@@ -137,7 +139,11 @@ test('submits the subscription with cookies from the form response', async () =>
         `
       };
     }
-    return { ok: true, status: 200, text: async () => '<div>Thank you</div>' };
+    return {
+      ok: true,
+      status: 200,
+      text: async () => '<span id="MessageLabel">\n  Saved \n</span>'
+    };
   };
   await subscribeRequest({
     portalId: 'a1704b26-ad86-f111-ab0f-000d3a154b1d',
@@ -147,4 +153,143 @@ test('submits the subscription with cookies from the form response', async () =>
   assert.equal(calls.length, 2);
   assert.equal(calls[1].options.method, 'POST');
   assert.equal(calls[1].options.headers.Cookie, 'session=abc');
+});
+
+test('treats an already-subscribed Portal response as success', async () => {
+  let callCount = 0;
+  const result = await subscribeRequest({
+    portalId: 'a1704b26-ad86-f111-ab0f-000d3a154b1d',
+    email: 'r28334446-token@track.opendata.support',
+    fetchImpl: async () => {
+      callCount += 1;
+      if (callCount === 1) {
+        return {
+          ok: true,
+          status: 200,
+          headers: { raw: () => ({ 'set-cookie': [] }) },
+          text: async () => `
+            <input type="hidden" name="__VIEWSTATE" value="state">
+            <input type="hidden" name="__EVENTVALIDATION" value="validation">
+          `
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        text: async () => `
+          <div class="validation-summary-errors">
+            This email address already exists for this service request.
+          </div>
+        `
+      };
+    }
+  });
+
+  assert.equal(result, true);
+  assert.equal(callCount, 2);
+});
+
+test('rejects a successful HTTP response without the Portal success marker', async () => {
+  let callCount = 0;
+  await assert.rejects(
+    subscribeRequest({
+      portalId: 'a1704b26-ad86-f111-ab0f-000d3a154b1d',
+      email: 'r28334446-token@track.opendata.support',
+      fetchImpl: async () => {
+        callCount += 1;
+        if (callCount === 1) {
+          return {
+            ok: true,
+            status: 200,
+            headers: { raw: () => ({ 'set-cookie': [] }) },
+            text: async () => `
+              <input type="hidden" name="__VIEWSTATE" value="state">
+              <input type="hidden" name="__EVENTVALIDATION" value="validation">
+            `
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          text: async () => '<div>Request received</div>'
+        };
+      }
+    }),
+    /NYC311 did not confirm the subscription/
+  );
+  assert.equal(callCount, 2);
+});
+
+test('aborts a Portal subscription request after its timeout', async () => {
+  await assert.rejects(
+    subscribeRequest({
+      portalId: 'a1704b26-ad86-f111-ab0f-000d3a154b1d',
+      email: 'r28334446-token@track.opendata.support',
+      timeoutMs: 10,
+      fetchImpl: async (_url, options) => new Promise((resolve, reject) => {
+        options.signal.addEventListener('abort', () => {
+          const error = new Error('request aborted');
+          error.name = 'AbortError';
+          reject(error);
+        }, { once: true });
+      })
+    }),
+    error => error && error.name === 'AbortError'
+  );
+});
+
+test('recovers only stale processing subscriptions and can claim the recovered job', () => {
+  const database = new DatabaseSync(':memory:');
+  database.exec(`
+    CREATE TABLE live_portal_requests (
+      srnumber TEXT PRIMARY KEY,portal_id TEXT
+    );
+    CREATE TABLE nyc311_email_aliases (
+      id INTEGER PRIMARY KEY,recipient_address TEXT
+    );
+    CREATE TABLE nyc311_email_subscription_jobs (
+      srnumber TEXT PRIMARY KEY,alias_id INTEGER,bid_id INTEGER,state TEXT,
+      attempts INTEGER,next_attempt_at TEXT,last_error TEXT,created_at TEXT,
+      updated_at TEXT,subscribed_at TEXT,scope_type TEXT,scope_id INTEGER,scope_label TEXT
+    );
+    INSERT INTO live_portal_requests VALUES
+      ('311-28300001','11111111-1111-1111-1111-111111111111'),
+      ('311-28300002','22222222-2222-2222-2222-222222222222');
+    INSERT INTO nyc311_email_aliases VALUES
+      (1,'first@track.opendata.support'),
+      (2,'second@track.opendata.support');
+    INSERT INTO nyc311_email_subscription_jobs VALUES
+      ('311-28300001',1,0,'processing',1,'2026-07-24T19:00:00.000Z',NULL,
+       '2026-07-24T19:00:00.000Z','2026-07-24T19:00:00.000Z',NULL,'all',0,'All NYC311'),
+      ('311-28300002',2,0,'processing',1,'2026-07-24T19:59:00.000Z',NULL,
+       '2026-07-24T19:59:00.000Z','2026-07-24T19:59:00.000Z',NULL,'all',0,'All NYC311');
+  `);
+  const now = new Date('2026-07-24T20:00:00.000Z');
+
+  assert.equal(recoverStaleProcessingSubscriptions(database, { now }), 1);
+  assert.deepEqual(database.prepare(`
+    SELECT srnumber,state,last_error FROM nyc311_email_subscription_jobs ORDER BY srnumber
+  `).all().map(row => ({ ...row })), [
+    {
+      srnumber: '311-28300001',
+      state: 'retry',
+      last_error: 'Recovered a stale subscription attempt'
+    },
+    {
+      srnumber: '311-28300002',
+      state: 'processing',
+      last_error: null
+    }
+  ]);
+
+  const claimed = claimSubscription(database, now);
+  assert.equal(claimed.srnumber, '311-28300001');
+  assert.equal(claimed.state, 'retry');
+  assert.equal(database.prepare(`
+    SELECT state,attempts FROM nyc311_email_subscription_jobs WHERE srnumber=?
+  `).get(claimed.srnumber).state, 'processing');
+  assert.equal(database.prepare(`
+    SELECT state,attempts FROM nyc311_email_subscription_jobs WHERE srnumber=?
+  `).get(claimed.srnumber).attempts, 2);
+  database.close();
 });

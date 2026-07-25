@@ -3,8 +3,8 @@
 const cheerio = require('cheerio');
 const { simpleParser } = require('mailparser');
 
-const SUBJECT_PATTERN = /^\s*SR\s+(Updated|Closed)\s*#\s*(311-\d+)\s*$/i;
-const BODY_EVENT_PATTERN = /\bService Request\s+(Updated|Closed)\b/i;
+const SUBJECT_PATTERN = /^\s*SR\s+(Submitted|Updated|Closed)\s*#\s*(311-\d+)\s*$/i;
+const BODY_EVENT_PATTERN = /\bService Request\s+(Submitted|Updated|Closed)\b/i;
 const SR_NUMBER_PATTERN = /\b311-\d+\b/;
 const NYC311_SENDER = 'srnotice@customercare.nyc.gov';
 const SUBMITTED_CLOCK_PATTERN =
@@ -63,6 +63,7 @@ function htmlToPlainText(value) {
 function titleCaseEvent(value) {
   if (!value) return null;
   const normalized = String(value).toLowerCase();
+  if (normalized === 'submitted') return 'Submitted';
   if (normalized === 'updated') return 'Updated';
   if (normalized === 'closed') return 'Closed';
   return null;
@@ -138,7 +139,7 @@ function splitRequestType(requestTypeRaw) {
 
 function extractAgency(text) {
   const statement = text.match(
-    /This Service Request has been\s+(?:updated|closed)\s+by\s+(?:the\s+)?([^\n]+?)(?:\.\s*(?:\n|$))/i
+    /(?:This|Your) Service Request has been\s+(?:(?:updated|closed)\s+by|submitted\s+to)\s+(?:the\s+)?([^\n]+?)(?:\.\s*(?:\n|$))/i
   );
   let agencyName = cleanInline(statement?.[1]);
   let agencyAcronym = null;
@@ -327,7 +328,7 @@ async function parseNyc311Notification(rawMessage, {
   const details = sectionBetween(
     text,
     /Your request details are\s*:/i,
-    /(?:^|\n)\s*(?:[A-Z][A-Z0-9&./-]{1,15}\s+)?provided the following information\s*:/i
+    /(?:^|\n)\s*(?:(?:[A-Z][A-Z0-9&./-]{1,15}\s+)?provided the following information\s*:|Thank you\s*,)/i
   );
   const requestTypeRaw = extractField(details, 'Type', 'Location');
   const location = extractField(details, 'Location', 'Date\\s+Submitted');

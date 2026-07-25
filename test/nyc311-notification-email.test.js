@@ -163,6 +163,43 @@ test(
   }
 );
 
+test('parses a submitted notice with agency routing and no response narrative', async () => {
+  const srNumber = '311-90000004';
+  const body = [
+    'Service Request Submitted',
+    '',
+    'Hello,',
+    '',
+    'Your Service Request has been submitted to the Department of Buildings.',
+    '',
+    'Your request details are:',
+    `Service Request Number: ${srNumber}`,
+    'Type: Construction Complaint - Contrary to Plan',
+    'Location: 743 EAST 5 STREET, BROOKLYN, NY, 11218',
+    'Date Submitted: 7/24/2026 10:04:03 AM',
+    '',
+    'Thank you,',
+    'NYC311'
+  ].join('\r\n');
+  const parsed = await parseNyc311Notification(syntheticNotice({
+    srNumber,
+    event: 'Submitted',
+    body
+  }));
+
+  assert.equal(parsed.isNyc311Notification, true);
+  assert.equal(parsed.eventKind, 'Submitted');
+  assert.equal(parsed.serviceRequestNumber, srNumber);
+  assert.equal(parsed.agencyName, 'Department of Buildings');
+  assert.equal(parsed.agencyAcronym, null);
+  assert.equal(parsed.requestType, 'Construction Complaint');
+  assert.equal(parsed.requestSubtype, 'Contrary to Plan');
+  assert.equal(parsed.location, '743 EAST 5 STREET, BROOKLYN, NY, 11218');
+  assert.equal(parsed.submittedAt, '2026-07-24T10:04:03');
+  assert.equal(parsed.responseText, null);
+  assert.equal(parsed.nextUpdateText, null);
+});
+
 test(
   'parses exactly one attached original and ignores outer-message authentication',
   sampleOptions(SAMPLE_FILES.closed),

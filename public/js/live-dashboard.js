@@ -48,7 +48,11 @@
   const detailEmailUpdates = document.getElementById('detail-email-updates');
   const detailEmailCount = document.getElementById('detail-email-count');
   const detailEmailEvents = document.getElementById('detail-email-events');
-  const { buildStatusUpdateModel } = window.NYC311StatusUpdateModel;
+  const {
+    buildEmailMetricsModel,
+    buildStatusUpdateModel,
+    formatMetricDuration
+  } = window.NYC311StatusUpdateModel;
   const {
     activeFilterLabel,
     exactSrnumberQuery: normalizeExactSrnumberQuery,
@@ -76,9 +80,41 @@
     status: document.getElementById('city-summary-status')
   };
   const hasSummaryElements = Object.values(summaryElements).every(Boolean);
+  const emailMetricElements = {
+    root: document.getElementById('email-monitoring'),
+    mode: document.getElementById('email-monitoring-mode'),
+    total: document.getElementById('email-deliveries-total'),
+    usable: document.getElementById('email-deliveries-usable'),
+    lastReceived: document.getElementById('email-deliveries-last'),
+    submitted: document.getElementById('email-submitted-count'),
+    updated: document.getElementById('email-updated-count'),
+    closed: document.getElementById('email-closed-count'),
+    issues: document.getElementById('email-issues-count'),
+    subscriptions: document.getElementById('email-subscriptions-count'),
+    subscriptionNote: document.getElementById('email-subscriptions-note'),
+    coverage: document.getElementById('email-coverage-rate'),
+    coverageNote: document.getElementById('email-coverage-note'),
+    coverageLimitation: document.getElementById('email-coverage-limitation'),
+    status: document.getElementById('email-metrics-status'),
+    archiveSubscriptions: document.getElementById('subscription-count'),
+    archiveSubscriptionNote: document.getElementById('subscription-note'),
+    responseRoot: document.getElementById('response-time-metrics'),
+    responseUpdated: document.getElementById('response-times-updated'),
+    overallUpdateMedian: document.getElementById('overall-update-median'),
+    overallUpdateDetail: document.getElementById('overall-update-detail'),
+    overallClosureMedian: document.getElementById('overall-closure-median'),
+    overallClosureDetail: document.getElementById('overall-closure-detail'),
+    overallNotificationMedian: document.getElementById('overall-notification-median'),
+    overallNotificationDetail: document.getElementById('overall-notification-detail'),
+    responseCohortNote: document.getElementById('response-cohort-note'),
+    agencies: document.getElementById('agency-response-times'),
+    complaintTypes: document.getElementById('complaint-response-times')
+  };
+  const hasEmailMetricElements = Object.values(emailMetricElements).every(Boolean);
   const MAX_VISIBLE_RECORDS = 750;
   const MAP_REFRESH_MS = 15_000;
   const EMAIL_UPDATES_REFRESH_MS = 15_000;
+  const EMAIL_METRICS_REFRESH_MS = 60_000;
   const STATUS_HISTORY_REFRESH_MS = 15_000;
   let records = [];
   let mapRecords = [];
@@ -116,6 +152,8 @@
   let highestObservedSuffix = null;
   let arrivingNumbers = new Set();
   let lastGoodSummary = null;
+  let lastGoodEmailMetrics = null;
+  let emailMetricsInFlight = false;
   let archiveSearchRecord = null;
   let archiveSearchState = 'idle';
   let archiveSearchSequence = 0;
@@ -621,6 +659,14 @@
     }
     if (String(update && update.event_kind || '').toLowerCase() !== 'closed') return null;
     const followupState = String(record && record.followup_state || '').toLowerCase();
+    const finalState = String(
+      record && record.current_cycle_final_state
+      || update && update.final_state
+      || ''
+    ).toLowerCase();
+    if (finalState === 'detail_unconfirmed') {
+      return { label: 'Portal detail did not confirm closure', state: 'unconfirmed' };
+    }
     if (followupState === 'closed') {
       return { label: 'Portal verified', state: 'verified' };
     }
@@ -631,7 +677,7 @@
       return { label: 'Portal verification queued', state: 'queued' };
     }
     if (followupState !== 'open' && isClosed(record && record.status)) {
-      return { label: 'Portal verified', state: 'verified' };
+      return { label: 'Portal status is closed; detail verification unavailable', state: 'waiting' };
     }
     return { label: 'Awaiting Portal verification', state: 'waiting' };
   }
@@ -642,9 +688,10 @@
 
     const heading = document.createElement('div');
     heading.className = 'detail-email-event-heading';
-    const eventKind = String(update && update.event_kind || '').toLowerCase() === 'closed'
+    const rawEventKind = String(update && update.event_kind || '').toLowerCase();
+    const eventKind = rawEventKind === 'closed'
       ? 'Closed'
-      : 'Updated';
+      : rawEventKind === 'submitted' ? 'Submitted' : 'Updated';
     const title = document.createElement('strong');
     title.textContent = update && update.title || eventKind;
     const received = document.createElement('time');
@@ -1477,10 +1524,232 @@
     document.getElementById('map-coverage-note').textContent = unmapped
       ? `${unmapped.toLocaleString()} without a pin`
       : 'All requests mapped';
-    document.getElementById('monitored-count').textContent = finiteStat(stats.open_followups_scheduled).toLocaleString();
     document.getElementById('pending-count').textContent = finiteStat(stats.pending).toLocaleString();
     document.getElementById('closures-count').textContent = finiteStat(stats.closures_finalized).toLocaleString();
     document.getElementById('closures-note').textContent = `${closing.toLocaleString()} ${closing === 1 ? 'check' : 'checks'} in progress`;
+  }
+
+  function emailMetricPercent(value) {
+    if (value == null || value === '') return '—';
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return '—';
+    return `${numeric.toLocaleString(undefined, { maximumFractionDigits: 1 })}%`;
+  }
+
+  function responseTimeDetail(p90Seconds, sampleSize) {
+    return `P90 ${formatMetricDuration(p90Seconds)} · n=${sampleSize.toLocaleString()}`;
+  }
+
+  function renderResponseTimeTable(element, rows, emptyMessage) {
+    element.replaceChildren();
+    if (!rows.length) {
+      const row = document.createElement('tr');
+      const cell = document.createElement('td');
+      cell.colSpan = 3;
+      cell.className = 'response-table-empty';
+      cell.textContent = emptyMessage;
+      row.append(cell);
+      element.append(row);
+      return;
+    }
+    const fragment = document.createDocumentFragment();
+    for (const metric of rows) {
+      const row = document.createElement('tr');
+      const label = document.createElement('th');
+      label.scope = 'row';
+      label.textContent = metric.label;
+      row.append(label);
+      for (const kind of ['update', 'closure']) {
+        const sampleSize = Number(metric[`${kind}_count`] || 0);
+        const cell = document.createElement('td');
+        const median = document.createElement('strong');
+        median.textContent = formatMetricDuration(metric[`${kind}_median_seconds`]);
+        const detail = document.createElement('small');
+        detail.textContent = responseTimeDetail(
+          metric[`${kind}_p90_seconds`],
+          sampleSize
+        );
+        cell.append(median, detail);
+        row.append(cell);
+      }
+      fragment.append(row);
+    }
+    element.append(fragment);
+  }
+
+  function showEmailMetricsUnavailable() {
+    if (!hasEmailMetricElements) return;
+    emailMetricElements.root.setAttribute('aria-busy', 'false');
+    emailMetricElements.responseRoot.setAttribute('aria-busy', 'false');
+    if (lastGoodEmailMetrics) {
+      emailMetricElements.status.textContent =
+        'Metrics refresh delayed. Showing the last successful email metrics refresh.';
+      return;
+    }
+    emailMetricElements.mode.textContent = 'Metrics unavailable';
+    emailMetricElements.mode.dataset.mode = 'unknown';
+    emailMetricElements.status.textContent =
+      'Email monitoring metrics are temporarily unavailable. Live requests are still updating.';
+    emailMetricElements.responseUpdated.textContent = 'Unavailable';
+    renderResponseTimeTable(
+      emailMetricElements.agencies,
+      [],
+      'Agency response metrics are temporarily unavailable.'
+    );
+    renderResponseTimeTable(
+      emailMetricElements.complaintTypes,
+      [],
+      'Complaint response metrics are temporarily unavailable.'
+    );
+  }
+
+  function renderEmailMetrics(payload) {
+    if (!hasEmailMetricElements) return false;
+    const model = buildEmailMetricsModel(payload);
+    if (!model.available) {
+      showEmailMetricsUnavailable();
+      return false;
+    }
+    const deliveries = model.deliveries;
+    const subscriptions = model.subscriptions;
+    const verification = model.verification;
+    const overall = model.response_times.overall;
+    const queueParts = [];
+    if (subscriptions.pending) {
+      queueParts.push(`${subscriptions.pending.toLocaleString()} pending`);
+    }
+    if (subscriptions.processing) {
+      queueParts.push(`${subscriptions.processing.toLocaleString()} processing`);
+    }
+    if (subscriptions.retry) {
+      queueParts.push(`${subscriptions.retry.toLocaleString()} retrying`);
+    }
+    const subscriptionNote = queueParts.length
+      ? queueParts.join(' · ')
+      : 'Enrollment queue is clear';
+    const asOf = portalDate(model.as_of);
+    const asOfLabel = asOf && !Number.isNaN(asOf.getTime())
+      ? `As of ${timeLabel(model.as_of)}`
+      : 'Latest available sample';
+
+    emailMetricElements.mode.textContent = model.monitoring_mode.label;
+    emailMetricElements.mode.dataset.mode = model.monitoring_mode.key;
+    emailMetricElements.total.textContent = deliveries.total.toLocaleString();
+    emailMetricElements.usable.textContent =
+      `${deliveries.usable.toLocaleString()} usable · ${emailMetricPercent(deliveries.usable_percent)}`;
+    emailMetricElements.lastReceived.textContent = deliveries.last_received_at
+      ? `Latest email ${fullTimeLabel(deliveries.last_received_at)}`
+      : 'No status email received yet';
+    emailMetricElements.submitted.textContent = deliveries.submitted.toLocaleString();
+    emailMetricElements.updated.textContent = deliveries.updated.toLocaleString();
+    emailMetricElements.closed.textContent = deliveries.closed.toLocaleString();
+    emailMetricElements.issues.textContent = deliveries.issues.toLocaleString();
+    emailMetricElements.subscriptions.textContent = subscriptions.subscribed.toLocaleString();
+    emailMetricElements.subscriptionNote.textContent = subscriptionNote;
+    emailMetricElements.archiveSubscriptions.textContent =
+      subscriptions.subscribed.toLocaleString();
+    emailMetricElements.archiveSubscriptionNote.textContent = subscriptionNote;
+    emailMetricElements.coverage.textContent =
+      emailMetricPercent(verification.coverage_percent);
+    const graceLabel = formatMetricDuration(verification.grace_seconds);
+    const graceText = graceLabel === '—' ? 'the grace period' : `${graceLabel} grace`;
+    const awaitingText = verification.awaiting_within_grace
+      ? ` · ${verification.awaiting_within_grace.toLocaleString()} still within grace`
+      : '';
+    emailMetricElements.coverageNote.textContent = verification.eligible_portal_closures
+      ? `${verification.closed_emails_received.toLocaleString()} of ${verification.eligible_portal_closures.toLocaleString()} independently known closures beyond ${graceText} · ${verification.missing.toLocaleString()} missing${awaitingText}`
+      : verification.awaiting_within_grace
+        ? `${verification.awaiting_within_grace.toLocaleString()} independently known ${verification.awaiting_within_grace === 1 ? 'closure is' : 'closures are'} still within ${graceText}`
+        : 'No independently known Portal closures are beyond the grace period yet';
+    emailMetricElements.coverageLimitation.textContent = verification.limitation
+      || 'Only closures independently present in stored Portal detail enter this measure; it cannot reveal a closure the Portal data never exposed.';
+    const deliveryNotes = [];
+    if (!deliveries.issues) {
+      deliveryNotes.push('No direct-delivery issues need review.');
+    } else if (
+      deliveries.unrecognized_submitted === deliveries.issues
+      && !deliveries.detail_issues
+    ) {
+      deliveryNotes.push(
+        `${deliveries.issues.toLocaleString()} earlier Submitted ${deliveries.issues === 1 ? 'notice uses' : 'notices use'} the previously unsupported template; Updated and Closed messages are parsed separately.`
+      );
+    } else {
+      deliveryNotes.push(
+        `${deliveries.issues.toLocaleString()} ${deliveries.issues === 1 ? 'direct email needs' : 'direct emails need'} review.`
+      );
+      if (deliveries.detail_issues) {
+        deliveryNotes.push(
+          `${deliveries.detail_issues.toLocaleString()} ${deliveries.detail_issues === 1 ? 'is' : 'are'} missing an expected agency, complaint type, or response.`
+        );
+      }
+      if (deliveries.authentication_issues) {
+        deliveryNotes.push(
+          `${deliveries.authentication_issues.toLocaleString()} failed sender authentication and ${deliveries.authentication_issues === 1 ? 'is' : 'are'} excluded from status evidence.`
+        );
+      }
+      if (deliveries.unrecognized_submitted) {
+        deliveryNotes.push(
+          `${deliveries.unrecognized_submitted.toLocaleString()} ${deliveries.unrecognized_submitted === 1 ? 'is an unparsed Submitted notice' : 'are unparsed Submitted notices'}.`
+        );
+      }
+    }
+    if (deliveries.excluded_non_direct) {
+      deliveryNotes.push(
+        `${deliveries.excluded_non_direct.toLocaleString()} forwarded ${deliveries.excluded_non_direct === 1 ? 'attachment is' : 'attachments are'} stored but excluded from authoritative subscription metrics.`
+      );
+    }
+    emailMetricElements.status.textContent =
+      `Usable means directly delivered, sender-authenticated, parsed, and matched. ${deliveryNotes.join(' ')}`;
+
+    emailMetricElements.overallUpdateMedian.textContent =
+      formatMetricDuration(overall.update_median_seconds);
+    emailMetricElements.overallUpdateDetail.textContent =
+      responseTimeDetail(overall.update_p90_seconds, overall.update_count);
+    emailMetricElements.overallClosureMedian.textContent =
+      formatMetricDuration(overall.closure_median_seconds);
+    emailMetricElements.overallClosureDetail.textContent =
+      responseTimeDetail(overall.closure_p90_seconds, overall.closure_count);
+    emailMetricElements.overallNotificationMedian.textContent =
+      formatMetricDuration(overall.closure_notification_median_seconds);
+    emailMetricElements.overallNotificationDetail.textContent =
+      responseTimeDetail(
+        overall.closure_notification_p90_seconds,
+        overall.closure_notification_count
+      );
+    const cohort = model.response_times.cohort;
+    const cohortWindow = formatMetricDuration(cohort.early_subscription_seconds);
+    emailMetricElements.responseCohortNote.textContent = cohort.requests
+      ? `Prospective cohort: ${cohort.requests.toLocaleString()} requests subscribed within ${cohortWindow} of submission. Right-censored: ${cohort.right_censored_without_first_updated.toLocaleString()} have no observed first “Updated” email and ${cohort.right_censored_without_observed_portal_closure.toLocaleString()} have no observed matched Portal closure. Medians include only requests that reached each event.`
+      : 'No requests have entered the prospective response-time cohort yet.';
+    emailMetricElements.responseUpdated.textContent = asOfLabel;
+    renderResponseTimeTable(
+      emailMetricElements.agencies,
+      model.response_times.by_agency,
+      'No agency response samples yet.'
+    );
+    renderResponseTimeTable(
+      emailMetricElements.complaintTypes,
+      model.response_times.by_complaint_type,
+      'No complaint response samples yet.'
+    );
+    emailMetricElements.root.setAttribute('aria-busy', 'false');
+    emailMetricElements.responseRoot.setAttribute('aria-busy', 'false');
+    lastGoodEmailMetrics = model;
+    return true;
+  }
+
+  async function refreshEmailMetrics() {
+    if (emailMetricsInFlight || !hasEmailMetricElements) return;
+    emailMetricsInFlight = true;
+    try {
+      const payload = await fetchJson('/api/email-metrics', 'Email metrics service');
+      renderEmailMetrics(payload);
+    } catch (error) {
+      showEmailMetricsUnavailable();
+      console.warn(error);
+    } finally {
+      emailMetricsInFlight = false;
+    }
   }
 
   function summaryCount(value) {
@@ -1882,7 +2151,9 @@
   loadBusinessImprovementDistricts();
   updateActiveFilterState();
   refresh();
+  refreshEmailMetrics();
   window.setInterval(refresh, 5000);
+  window.setInterval(refreshEmailMetrics, EMAIL_METRICS_REFRESH_MS);
   window.setInterval(() => {
     const now = new Date();
     document.getElementById('nyc-clock').textContent = new Intl.DateTimeFormat('en-US', {

@@ -20,6 +20,8 @@ const { inspectSqliteHealth } = require('./sqlite-health');
 const { originMatchesHost } = require('./request-security');
 const { normalizePortalTimestamp } = require('./portal-timestamp');
 const { loadSqliteLiveSummary } = require('./sqlite-live-summary');
+const { loadSqliteEmailMetrics } = require('./sqlite-email-metrics');
+const { presentEmailMetrics } = require('./email-metrics-presentation');
 const { readStoredPortalDetail } = require('./stored-portal-detail');
 const { readRequestEmailUpdates } = require('./nyc311-email-events');
 const {
@@ -40,8 +42,10 @@ const HOST = process.env.HOST || null;
 const dashboardAuth = dashboardAuthConfig();
 const LIVE_SUMMARY_CACHE_TTL_MS = 15_000;
 const ARCHIVE_QUALITY_CACHE_TTL_MS = 5 * 60_000;
+const EMAIL_METRICS_CACHE_TTL_MS = 60_000;
 const liveSummaryCache = new Map();
 const archiveQualityCache = new Map();
+let emailMetricsCache = null;
 
 function tableExists(database, name) {
   return Boolean(database.prepare(
@@ -207,6 +211,46 @@ function cachedLiveSummary(database, databasePath, scope = null) {
   }
   liveSummaryCache.set(cacheKey, { created_at: now, revision, summary });
   return summary;
+}
+
+function statusMonitoringMode(databasePath) {
+  if (!require('fs').existsSync(databasePath)) return 'unknown';
+  let database;
+  try {
+    const { DatabaseSync } = require('node:sqlite');
+    database = new DatabaseSync(databasePath, { readOnly: true });
+    const table = database.prepare(`
+      SELECT 1 FROM sqlite_master
+      WHERE type='table' AND name='live_monitor_state'
+    `).get();
+    if (!table) return 'unknown';
+    const row = database.prepare(`
+      SELECT value FROM live_monitor_state
+      WHERE key='status_monitoring_mode'
+    `).get();
+    return row && row.value ? String(row.value) : 'unknown';
+  } catch (_) {
+    return 'unknown';
+  } finally {
+    if (database) database.close();
+  }
+}
+
+function cachedEmailMetrics(databasePath) {
+  const now = Date.now();
+  if (emailMetricsCache
+      && emailMetricsCache.databasePath === databasePath
+      && now - emailMetricsCache.createdAt < EMAIL_METRICS_CACHE_TTL_MS) {
+    return emailMetricsCache.payload;
+  }
+  const metrics = loadSqliteEmailMetrics(databasePath, {
+    now: new Date(now),
+    minimumGroupSample: 5,
+    maxGroups: 50
+  });
+  const payload = presentEmailMetrics(metrics, statusMonitoringMode(databasePath));
+  emailMetricsCache = { databasePath, createdAt: now, payload };
+  return payload;
 }
 
 // This machine-to-machine webhook is authenticated with signatures over the
@@ -1053,6 +1097,24 @@ app.get('/api/live-summary', (req, res) => {
     });
   } finally {
     if (database) database.close();
+  }
+});
+
+// Read-only operational metrics for the email subscription pipeline. The
+// response deliberately separates Portal closure time from email delivery
+// delay so the dashboard does not present notification speed as agency speed.
+app.get('/api/email-metrics', (req, res) => {
+  const databasePath = process.env.DATABASE_PATH
+    || path.join(__dirname, 'data', 'portal-archive.sqlite');
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const payload = cachedEmailMetrics(databasePath);
+    return res.status(payload.database_available ? 200 : 503).json(payload);
+  } catch (error) {
+    console.error('Email metrics error:', error.message);
+    return res.status(503).json({
+      error: 'Email monitoring metrics are temporarily unavailable'
+    });
   }
 });
 
