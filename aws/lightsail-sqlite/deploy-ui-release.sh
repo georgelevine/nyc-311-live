@@ -76,10 +76,13 @@ if [[ "${expanded_release_sha}" != "${release_sha}" ]]; then
   exit 1
 fi
 
-# This fast path is deliberately limited to the browser UI. It cannot silently
-# deploy collector, database, infrastructure, dependency, or workflow changes.
+# This fast path is deliberately limited to browser assets, their tests, and
+# the two read-only metrics modules used only by server.js. It cannot silently
+# deploy collector, database, dependency, or general infrastructure changes.
 if non_ui_changes="$(diff --recursive --brief \
-  --exclude=public --exclude=.env --exclude=RELEASE_COMMIT \
+  --exclude=public --exclude=test --exclude=.env --exclude=RELEASE_COMMIT \
+  --exclude=sqlite-email-metrics.js --exclude=email-metrics-presentation.js \
+  --exclude=deploy-ui-release.sh --exclude=deploy-ui.sh \
   "${current_directory}" "${staging_directory}")"; then
   true
 else
@@ -88,7 +91,7 @@ else
     echo "Could not compare the current and proposed releases." >&2
     exit 1
   fi
-  echo "Refusing the UI fast path because non-public files changed:" >&2
+  echo "Refusing the web fast path because protected application files changed:" >&2
   printf '%s\n' "${non_ui_changes}" >&2
   exit 1
 fi
@@ -177,4 +180,4 @@ fi
 
 trap - ERR
 rm -f -- "${archive}"
-echo "UI release ${release_sha} is healthy. Collector and database were untouched."
+echo "Web release ${release_sha} is healthy. Collector and database were untouched."
