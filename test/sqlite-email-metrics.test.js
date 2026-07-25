@@ -253,6 +253,7 @@ test('returns a stable empty contract when email tables are absent', () => {
     result.observed_response_times.overall.portal_closure.sample_size,
     0
   );
+  assert.equal(result.observed_response_times.prospective_cohort.started_at, null);
   database.close();
 });
 
@@ -450,6 +451,7 @@ test('keeps first Updated timing distinct from exact Portal closure timing', () 
   });
   assert.deepEqual(result.observed_response_times.prospective_cohort, {
     requests: 4,
+    started_at: '2026-07-25T10:00:00.000Z',
     early_subscription_seconds: 900,
     right_censored_without_first_updated: 2,
     right_censored_without_observed_portal_closure: 2
@@ -471,6 +473,41 @@ test('keeps first Updated timing distinct from exact Portal closure timing', () 
   );
   assert.equal(noise.first_updated.sample_size, 2);
   assert.equal(noise.portal_closure.sample_size, 2);
+  database.close();
+});
+
+test('cohort start is the earliest canonical submission among successful early subscriptions', () => {
+  const database = new DatabaseSync(':memory:');
+  createSchema(database);
+  insertRequest(database, {
+    srnumber: '311-00000041',
+    liveSubmitted: '2026-07-25T08:00:00.000Z',
+    portalSubmitted: '2026-07-25T12:00:00.000Z',
+    subscribedAt: '2026-07-25T12:01:00.000Z'
+  });
+  insertRequest(database, {
+    srnumber: '311-00000042',
+    liveSubmitted: '2026-07-25T07:00:00-04:00',
+    portalSubmitted: '2026-07-25T07:00:00-04:00',
+    subscribedAt: '2026-07-25T07:05:00-04:00'
+  });
+  insertRequest(database, {
+    srnumber: '311-00000043',
+    liveSubmitted: '2026-07-25T09:00:00.000Z',
+    subscribedAt: '2026-07-25T09:20:00.000Z'
+  });
+  insertRequest(database, {
+    srnumber: '311-00000044',
+    liveSubmitted: '2026-07-25T07:00:00.000Z',
+    state: 'pending',
+    subscribedAt: null
+  });
+
+  const cohort = computeSqliteEmailMetrics(database, {
+    now: new Date('2026-07-25T15:00:00.000Z')
+  }).observed_response_times.prospective_cohort;
+  assert.equal(cohort.requests, 2);
+  assert.equal(cohort.started_at, '2026-07-25T11:00:00.000Z');
   database.close();
 });
 

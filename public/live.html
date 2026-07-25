@@ -16,19 +16,35 @@
     <aside class="sidebar">
       <header class="app-header">
         <div class="brand-mark">311</div>
-        <div>
+        <div class="brand-copy">
           <h1>NYC 311 Live</h1>
           <div class="live-state"><span class="live-dot"></span><span id="connection-label">Connecting</span></div>
         </div>
       </header>
 
       <nav class="mobile-view-tabs" aria-label="Dashboard view">
-        <button type="button" data-mobile-view="feed" aria-pressed="true">Requests</button>
-        <button type="button" data-mobile-view="map" aria-pressed="false">Map</button>
-        <button type="button" data-mobile-view="overview" aria-pressed="false">Overview</button>
+        <button type="button" data-mobile-view="feed" aria-pressed="true">
+          <span class="view-tab-icon request-tab-icon" aria-hidden="true"></span>
+          <span class="view-tab-copy"><strong>Requests</strong><small>Live stream</small></span>
+        </button>
+        <button type="button" data-mobile-view="map" aria-pressed="false">
+          <span class="view-tab-icon map-tab-icon" aria-hidden="true"></span>
+          <span class="view-tab-copy"><strong>Map</strong><small>Explore</small></span>
+        </button>
+        <button type="button" data-mobile-view="overview" aria-pressed="false">
+          <span class="view-tab-icon overview-tab-icon" aria-hidden="true"></span>
+          <span class="view-tab-copy"><strong>Overview</strong><small>Health &amp; trends</small></span>
+        </button>
       </nav>
 
       <div class="overview-view">
+        <header class="view-heading overview-heading">
+          <div>
+            <span class="eyebrow">City dashboard</span>
+            <h2>Overview</h2>
+          </div>
+          <p>Live demand, archive health, and observed response timing.</p>
+        </header>
         <section id="city-summary" class="city-summary" aria-labelledby="city-summary-title" aria-busy="true">
           <header class="city-summary-header">
             <div>
@@ -69,8 +85,8 @@
         <section id="email-monitoring" class="email-monitoring" aria-labelledby="email-monitoring-title" aria-busy="true">
           <header class="email-monitoring-header">
             <div>
-              <span class="eyebrow">Email monitoring</span>
-              <h2 id="email-monitoring-title">NYC311 status delivery</h2>
+              <span class="eyebrow">Monitoring health</span>
+              <h2 id="email-monitoring-title">Status subscription pipeline</h2>
             </div>
             <span id="email-monitoring-mode" class="monitoring-mode-badge">Checking mode…</span>
           </header>
@@ -100,14 +116,24 @@
             </div>
           </div>
           <p id="email-coverage-limitation" class="email-coverage-limitation">
-            This measure only includes closures independently found in stored NYC311 Portal details.
+            Known Portal closures only; this cannot detect closures not independently found in stored Portal data.
           </p>
-          <p id="email-metrics-status" class="email-metrics-status" role="status">
-            Loading email monitoring metrics…
-          </p>
+          <details class="email-quality-notes">
+            <summary>Delivery quality details</summary>
+            <p id="email-metrics-status" class="email-metrics-status" role="status">
+              Loading email monitoring metrics…
+            </p>
+          </details>
         </section>
 
         <section class="metrics" aria-label="Live collection statistics">
+          <header class="overview-section-header">
+            <div>
+              <span class="eyebrow">Archive health</span>
+              <h2>Collection &amp; coverage</h2>
+            </div>
+            <p>What is stored and how complete each record is.</p>
+          </header>
           <div class="metric-group">
             <header>
               <span class="eyebrow">Collection</span>
@@ -154,39 +180,42 @@
         <section id="response-time-metrics" class="response-times" aria-labelledby="response-times-title" aria-busy="true">
           <header class="response-times-header">
             <div>
-              <span class="eyebrow">Observed response time</span>
-              <h2 id="response-times-title">How quickly requests change</h2>
+              <span class="eyebrow">Observed timing</span>
+              <h2 id="response-times-title">Request response times</h2>
             </div>
             <time id="response-times-updated">Updating…</time>
           </header>
-          <p id="response-time-definition" class="response-time-definition">
-            These are observed timings, not official agency SLAs or performance measures. First update is elapsed from request submission to the first usable “Updated” email. Closure is elapsed from request submission to the closure time published by the NYC311 Portal, and is included only when a usable “Closed” email was received. Closure email delay is elapsed from that Portal closure time until its email arrived. Median is the 50th percentile; P90 is the 90th percentile; n is the number of requests that reached and matched that event, not the full cohort.
-          </p>
           <div class="response-time-overall">
             <article>
-              <span>All updates</span>
+              <span>Typical (median) first update</span>
               <strong id="overall-update-median">—</strong>
-              <small id="overall-update-detail">P90 — · n=0</small>
+              <small id="overall-update-detail">n=0</small>
             </article>
             <article>
-              <span>All closures</span>
+              <span>Typical (median) Portal closure</span>
               <strong id="overall-closure-median">—</strong>
-              <small id="overall-closure-detail">P90 — · n=0</small>
+              <small id="overall-closure-detail">n=0</small>
             </article>
             <article>
-              <span>Closure email delay</span>
+              <span>Typical (median) email delay</span>
               <strong id="overall-notification-median">—</strong>
-              <small id="overall-notification-detail">P90 — · n=0</small>
+              <small id="overall-notification-detail">n=0</small>
             </article>
           </div>
           <p id="response-cohort-note" class="response-cohort-note">
             Building the prospective subscription cohort…
           </p>
+          <details class="response-methodology">
+            <summary>How these timings are measured</summary>
+            <p id="response-time-definition" class="response-time-definition">
+              These are observed timings, not official agency SLAs or performance measures. First update runs from submission to the first usable “Updated” email. Closure runs from submission to the closure time published by the NYC311 Portal and requires a usable “Closed” email. Closure email delay measures how long that email took to arrive. Median is the 50th percentile; the “90% within” value is the 90th percentile; n is the number of requests that reached and matched that event.
+            </p>
+          </details>
           <div class="response-table-grid">
             <article class="response-table-card">
               <header>
                 <h3>By agency</h3>
-                <span>Median · P90 · sample</span>
+                <span>Typical (median) · 90% within · n</span>
               </header>
               <div class="response-table-scroll">
                 <table>
@@ -201,7 +230,7 @@
             <article class="response-table-card">
               <header>
                 <h3>By complaint type</h3>
-                <span>Median · P90 · sample</span>
+                <span>Typical (median) · 90% within · n</span>
               </header>
               <div class="response-table-scroll">
                 <table>
@@ -218,9 +247,9 @@
 
         <section class="monitor-strip" aria-labelledby="collector-settings-title">
           <div class="monitor-copy">
-            <span class="eyebrow">Collector settings</span>
-            <h2 id="collector-settings-title">Portal refresh</h2>
-            <p>This controls how often the collector looks for newly submitted requests.</p>
+            <span class="eyebrow">New request discovery</span>
+            <h2 id="collector-settings-title">Live feed refresh</h2>
+            <p>How often the newest NYC311 requests are checked.</p>
           </div>
           <label>
             <span>Check every</span>
@@ -240,6 +269,13 @@
       </div>
 
       <div class="requests-view">
+        <header class="view-heading requests-view-heading">
+          <div>
+            <span class="eyebrow">Live request stream</span>
+            <h2>Incoming requests <i class="continuous-spinner" aria-hidden="true"></i></h2>
+          </div>
+          <time id="last-updated">Waiting for data</time>
+        </header>
         <section class="toolbar" aria-label="Search and filter requests">
           <div class="search-wrap">
             <span aria-hidden="true">⌕</span>
@@ -273,10 +309,6 @@
           </details>
         </section>
 
-        <div class="feed-heading">
-          <span class="incoming-title">Incoming requests <i class="continuous-spinner" aria-hidden="true"></i></span>
-          <time id="last-updated">Waiting for data</time>
-        </div>
         <section id="request-feed" class="request-feed" aria-live="polite">
           <div class="empty-state"><span class="radar"></span><p>Waiting for the live Portal feed…</p></div>
         </section>
@@ -327,7 +359,7 @@
           <div id="detail-updated-row" class="detail-row hidden"><dt>Updated</dt><dd id="detail-updated"></dd></div>
           <div id="detail-closed-row" class="detail-row hidden"><dt>Closed</dt><dd id="detail-closed"></dd></div>
           <div id="detail-next-update-row" class="detail-row hidden"><dt>Next update</dt><dd id="detail-next-update"></dd></div>
-          <div id="detail-archive-row" class="detail-row hidden"><dt>Archive</dt><dd id="detail-archive"></dd></div>
+          <div id="detail-archive-row" class="detail-row hidden"><dt>Status tracking</dt><dd id="detail-archive"></dd></div>
         </dl>
         <details id="detail-email-updates" class="detail-email-updates" hidden>
           <summary>

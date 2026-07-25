@@ -51,7 +51,8 @@
   const {
     buildEmailMetricsModel,
     buildStatusUpdateModel,
-    formatMetricDuration
+    formatMetricDuration,
+    requestArchiveLabel
   } = window.NYC311StatusUpdateModel;
   const {
     activeFilterLabel,
@@ -154,6 +155,7 @@
   let lastGoodSummary = null;
   let lastGoodEmailMetrics = null;
   let emailMetricsInFlight = false;
+  const expandedResponseTables = new Set();
   let archiveSearchRecord = null;
   let archiveSearchState = 'idle';
   let archiveSearchSequence = 0;
@@ -235,9 +237,7 @@
     if (usesViewTabs) {
       appShell.dataset.mobileView = normalizedView;
       setPressedView(normalizedView);
-    }
-    if (view === 'map') {
-      scheduleMapLayout({ attemptBoundaryFit: true });
+      scheduleMapLayout({ attemptBoundaryFit: normalizedView === 'map' });
     }
     return usesViewTabs && normalizedView === 'map';
   }
@@ -602,18 +602,15 @@
     setDetailBadge(record.public_details_state === 'pending' ? 'pending' : null);
     const archiveRow = document.getElementById('detail-archive-row');
     const archiveValue = document.getElementById('detail-archive');
-    let archiveLabel = '';
-    if (record.followup_state === 'closing') {
-      archiveLabel = 'Verifying final details';
-    } else if (record.followup_state === 'closed') {
-      archiveLabel = record.finalized_at
-        ? `Final snapshot saved ${fullTimeLabel(record.finalized_at)}`
-        : 'Final snapshot saved';
-    } else if (record.followup_state === 'open') {
-      archiveLabel = record.next_check_at
-        ? `Monitoring · next ${fullTimeLabel(record.next_check_at)}`
-        : 'Monitoring';
-    }
+    const emailPayload = emailUpdatesByNumber.get(record.srnumber);
+    const archiveLabel = requestArchiveLabel(record, {
+      monitoringModeKey: lastGoodEmailMetrics
+        && lastGoodEmailMetrics.monitoring_mode
+        && lastGoodEmailMetrics.monitoring_mode.key,
+      subscription: emailPayload && emailPayload.subscription,
+      emailLookupComplete: emailUpdatesLoadedAt.has(record.srnumber),
+      formatTime: fullTimeLabel
+    });
     archiveValue.textContent = archiveLabel;
     archiveRow.classList.toggle('hidden', !archiveLabel);
     renderCoreDataWarning(record);
@@ -864,6 +861,7 @@
       emailUpdatesByNumber.set(record.srnumber, payload);
       emailUpdatesLoadedAt.set(record.srnumber, Date.now());
       if (sequence === emailUpdatesLoadSequence && selectedNumber === record.srnumber) {
+        renderDetail(record);
         renderStatusUpdates(record);
       }
     } catch (error) {
@@ -1537,7 +1535,15 @@
   }
 
   function responseTimeDetail(p90Seconds, sampleSize) {
-    return `P90 ${formatMetricDuration(p90Seconds)} · n=${sampleSize.toLocaleString()}`;
+    if (sampleSize < 10) return `n=${sampleSize.toLocaleString()}`;
+    const qualification = sampleSize < 20 ? 'Limited sample · ' : '';
+    return `${qualification}90% within ${formatMetricDuration(p90Seconds)} · n=${sampleSize.toLocaleString()}`;
+  }
+
+  function responseTimeHeadline(medianSeconds, sampleSize) {
+    return sampleSize < 10
+      ? 'Insufficient sample'
+      : formatMetricDuration(medianSeconds);
   }
 
   function renderResponseTimeTable(element, rows, emptyMessage) {
@@ -1552,8 +1558,11 @@
       element.append(row);
       return;
     }
+    const previewLimit = 12;
+    const expanded = expandedResponseTables.has(element.id);
+    const visibleRows = expanded ? rows : rows.slice(0, previewLimit);
     const fragment = document.createDocumentFragment();
-    for (const metric of rows) {
+    for (const metric of visibleRows) {
       const row = document.createElement('tr');
       const label = document.createElement('th');
       label.scope = 'row';
@@ -1563,7 +1572,11 @@
         const sampleSize = Number(metric[`${kind}_count`] || 0);
         const cell = document.createElement('td');
         const median = document.createElement('strong');
-        median.textContent = formatMetricDuration(metric[`${kind}_median_seconds`]);
+        median.textContent = sampleSize < 10
+          ? 'Insufficient sample'
+          : formatMetricDuration(metric[`${kind}_median_seconds`]);
+        if (sampleSize < 10) cell.classList.add('response-cell-insufficient');
+        else if (sampleSize < 20) cell.classList.add('response-cell-limited');
         const detail = document.createElement('small');
         detail.textContent = responseTimeDetail(
           metric[`${kind}_p90_seconds`],
@@ -1573,6 +1586,26 @@
         row.append(cell);
       }
       fragment.append(row);
+    }
+    if (rows.length > previewLimit) {
+      const toggleRow = document.createElement('tr');
+      toggleRow.className = 'response-table-toggle-row';
+      const toggleCell = document.createElement('td');
+      toggleCell.colSpan = 3;
+      const toggle = document.createElement('button');
+      toggle.type = 'button';
+      toggle.className = 'response-table-toggle';
+      toggle.textContent = expanded
+        ? `Show top ${previewLimit}`
+        : `Show all ${rows.length.toLocaleString()}`;
+      toggle.addEventListener('click', () => {
+        if (expanded) expandedResponseTables.delete(element.id);
+        else expandedResponseTables.add(element.id);
+        renderResponseTimeTable(element, rows, emptyMessage);
+      });
+      toggleCell.append(toggle);
+      toggleRow.append(toggleCell);
+      fragment.append(toggleRow);
     }
     element.append(fragment);
   }
@@ -1653,16 +1686,19 @@
       emailMetricPercent(verification.coverage_percent);
     const graceLabel = formatMetricDuration(verification.grace_seconds);
     const graceText = graceLabel === '—' ? 'the grace period' : `${graceLabel} grace`;
+    const matureAge = graceLabel === '—'
+      ? 'past the grace period'
+      : `at least ${graceLabel} old`;
     const awaitingText = verification.awaiting_within_grace
       ? ` · ${verification.awaiting_within_grace.toLocaleString()} still within grace`
       : '';
     emailMetricElements.coverageNote.textContent = verification.eligible_portal_closures
-      ? `${verification.closed_emails_received.toLocaleString()} of ${verification.eligible_portal_closures.toLocaleString()} independently known closures beyond ${graceText} · ${verification.missing.toLocaleString()} missing${awaitingText}`
+      ? `${verification.closed_emails_received.toLocaleString()} of ${verification.eligible_portal_closures.toLocaleString()} known closures ${matureAge} had a matched Closed email · ${verification.missing.toLocaleString()} missing${awaitingText}`
       : verification.awaiting_within_grace
-        ? `${verification.awaiting_within_grace.toLocaleString()} independently known ${verification.awaiting_within_grace === 1 ? 'closure is' : 'closures are'} still within ${graceText}`
-        : 'No independently known Portal closures are beyond the grace period yet';
-    emailMetricElements.coverageLimitation.textContent = verification.limitation
-      || 'Only closures independently present in stored Portal detail enter this measure; it cannot reveal a closure the Portal data never exposed.';
+        ? `${verification.awaiting_within_grace.toLocaleString()} known ${verification.awaiting_within_grace === 1 ? 'closure is' : 'closures are'} still within ${graceText}`
+        : 'No known Portal closures are beyond the grace period yet';
+    emailMetricElements.coverageLimitation.textContent =
+      'Coverage only includes closures independently found in stored Portal detail; it cannot measure closures absent from that data.';
     const deliveryNotes = [];
     if (!deliveries.issues) {
       deliveryNotes.push('No direct-delivery issues need review.');
@@ -1702,15 +1738,18 @@
       `Usable means directly delivered, sender-authenticated, parsed, and matched. ${deliveryNotes.join(' ')}`;
 
     emailMetricElements.overallUpdateMedian.textContent =
-      formatMetricDuration(overall.update_median_seconds);
+      responseTimeHeadline(overall.update_median_seconds, overall.update_count);
     emailMetricElements.overallUpdateDetail.textContent =
       responseTimeDetail(overall.update_p90_seconds, overall.update_count);
     emailMetricElements.overallClosureMedian.textContent =
-      formatMetricDuration(overall.closure_median_seconds);
+      responseTimeHeadline(overall.closure_median_seconds, overall.closure_count);
     emailMetricElements.overallClosureDetail.textContent =
       responseTimeDetail(overall.closure_p90_seconds, overall.closure_count);
     emailMetricElements.overallNotificationMedian.textContent =
-      formatMetricDuration(overall.closure_notification_median_seconds);
+      responseTimeHeadline(
+        overall.closure_notification_median_seconds,
+        overall.closure_notification_count
+      );
     emailMetricElements.overallNotificationDetail.textContent =
       responseTimeDetail(
         overall.closure_notification_p90_seconds,
@@ -1718,8 +1757,11 @@
       );
     const cohort = model.response_times.cohort;
     const cohortWindow = formatMetricDuration(cohort.early_subscription_seconds);
+    const cohortStart = cohort.started_at
+      ? ` Observed since ${fullTimeLabel(cohort.started_at)}.`
+      : '';
     emailMetricElements.responseCohortNote.textContent = cohort.requests
-      ? `Prospective cohort: ${cohort.requests.toLocaleString()} requests subscribed within ${cohortWindow} of submission. Right-censored: ${cohort.right_censored_without_first_updated.toLocaleString()} have no observed first “Updated” email and ${cohort.right_censored_without_observed_portal_closure.toLocaleString()} have no observed matched Portal closure. Medians include only requests that reached each event.`
+      ? `Cohort: ${cohort.requests.toLocaleString()} requests subscribed within ${cohortWindow} of submission.${cohortStart} Right-censored: ${cohort.right_censored_without_first_updated.toLocaleString()} without a first update · ${cohort.right_censored_without_observed_portal_closure.toLocaleString()} without an observed closure. Each median uses requests that reached that event.`
       : 'No requests have entered the prospective response-time cohort yet.';
     emailMetricElements.responseUpdated.textContent = asOfLabel;
     renderResponseTimeTable(
@@ -1735,6 +1777,10 @@
     emailMetricElements.root.setAttribute('aria-busy', 'false');
     emailMetricElements.responseRoot.setAttribute('aria-busy', 'false');
     lastGoodEmailMetrics = model;
+    if (selectedNumber) {
+      const selectedRecord = findRecord(selectedNumber);
+      if (selectedRecord) renderDetail(selectedRecord);
+    }
     return true;
   }
 

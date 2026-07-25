@@ -36,6 +36,10 @@ test('dashboard keeps requests, map, and overview as explicit responsive views',
   assert.equal($('button[data-mobile-view="feed"]').length, 1);
   assert.equal($('button[data-mobile-view="map"]').length, 1);
   assert.equal($('button[data-mobile-view="overview"]').length, 1);
+  assert.equal($('.mobile-view-tabs .view-tab-copy strong').length, 3);
+  assert.equal($('.mobile-view-tabs .view-tab-copy small').length, 3);
+  assert.equal($('.requests-view > .requests-view-heading').length, 1);
+  assert.equal($('.overview-view > .overview-heading').length, 1);
   assert.equal($('#request-filters > summary').length, 1);
 });
 
@@ -43,6 +47,8 @@ test('request detail is labelled and status history is collapsed by default', ()
   assert.equal($('#request-detail').attr('role'), 'dialog');
   assert.equal($('#request-detail').attr('aria-labelledby'), 'detail-problem');
   assert.equal($('#detail-email-updates').attr('open'), undefined);
+  assert.equal($('#detail-archive-row dt').text(), 'Status tracking');
+  assert.equal(dashboard.includes('Monitoring · next'), false);
 });
 
 test('overview exposes email delivery, enrollment, verification, and response-time metrics', () => {
@@ -69,6 +75,15 @@ test('overview exposes email delivery, enrollment, verification, and response-ti
   assert.match($('#response-time-definition').text(), /Closure email delay/i);
   assert.match($('#response-time-definition').text(), /Median is the 50th percentile/i);
   assert.match($('#response-time-definition').text(), /n is the number of requests that reached/i);
+  assert.equal($('.response-methodology').attr('open'), undefined);
+  assert.equal($('.email-quality-notes').attr('open'), undefined);
+  assert.match(dashboard, /90% within/);
+  assert.match(dashboard, /Insufficient sample/);
+  assert.match(dashboard, /Limited sample/);
+  assert.match(dashboard, /Show all/);
+  assert.match(dashboard, /Observed since/);
+  assert.match(dashboard, /known closures \$\{matureAge\} had a matched Closed email/);
+  assert.match(dashboard, /Each median uses requests that reached that event/);
 });
 
 test('email event rendering distinguishes Submitted, Updated, and Closed', () => {

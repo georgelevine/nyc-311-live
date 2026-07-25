@@ -86,8 +86,8 @@
   function monitoringMode(value) {
     const key = textOrNull(value)?.toLowerCase().replace(/[\s-]+/g, '_') || 'unknown';
     const labels = {
-      email_primary: 'Email-primary monitoring',
-      email_primary_with_scheduled_fallback: 'Email primary + scheduled fallback',
+      email_primary: 'Email subscriptions active',
+      email_primary_with_scheduled_fallback: 'Email + Portal fallback',
       subscription_only: 'Email subscriptions',
       subscriptions_only: 'Email subscriptions',
       email_only: 'Email subscriptions',
@@ -99,6 +99,65 @@
       unknown: 'Monitoring mode unavailable'
     };
     return { key, label: labels[key] || textOrNull(value) || labels.unknown };
+  }
+
+  function requestArchiveLabel(record, {
+    monitoringModeKey = 'unknown',
+    subscription = null,
+    emailLookupComplete = false,
+    formatTime = value => value
+  } = {}) {
+    if (!record || typeof record !== 'object') return '';
+    if (record.followup_state === 'closing') return 'Verifying final details';
+    if (record.followup_state === 'closed') {
+      return record.finalized_at
+        ? `Final snapshot saved ${formatTime(record.finalized_at)}`
+        : 'Final snapshot saved';
+    }
+    if (record.followup_state !== 'open') return '';
+
+    const modeKey = textOrNull(monitoringModeKey)?.toLowerCase() || 'unknown';
+    const subscriptionState = textOrNull(subscription && subscription.state)?.toLowerCase() || '';
+    const activeSubscription = ['active', 'subscribed'].includes(subscriptionState);
+    const scheduledFallback = new Set([
+      'email_primary_with_scheduled_fallback',
+      'hybrid',
+      'portal_and_email'
+    ]).has(modeKey);
+    const scheduledPrimary = new Set(['scheduled', 'portal_only']).has(modeKey);
+    const emailPrimary = new Set([
+      'email_primary',
+      'subscription_only',
+      'subscriptions_only',
+      'email_only'
+    ]).has(modeKey);
+
+    if (scheduledFallback) {
+      const fallback = record.next_check_at
+        ? `Portal fallback ${formatTime(record.next_check_at)}`
+        : 'Portal fallback active';
+      return activeSubscription ? `Email monitoring active · ${fallback}` : fallback;
+    }
+    if (scheduledPrimary) {
+      return record.next_check_at
+        ? `Portal monitoring · next ${formatTime(record.next_check_at)}`
+        : 'Portal monitoring active';
+    }
+    if (activeSubscription) return 'Email monitoring active';
+    if (emailPrimary) {
+      if (!emailLookupComplete) return 'Checking email subscription';
+      const stateLabels = {
+        created: 'Subscription pending',
+        paused: 'Monitoring paused',
+        retired: 'Monitoring retired',
+        error: 'Subscription error'
+      };
+      if (stateLabels[subscriptionState]) return stateLabels[subscriptionState];
+      return 'Not email-subscribed · scheduled checks off';
+    }
+    return emailLookupComplete && subscriptionState
+      ? `Email subscription ${subscriptionState}`
+      : 'Archived';
   }
 
   function buildEmailMetricsModel(payload) {
@@ -172,6 +231,7 @@
           : {},
         cohort: {
           requests: metricCount(cohortSource.requests),
+          started_at: textOrNull(cohortSource.started_at),
           early_subscription_seconds: finiteMetric(cohortSource.early_subscription_seconds),
           right_censored_without_first_updated: metricCount(
             cohortSource.right_censored_without_first_updated
@@ -396,6 +456,7 @@
     formatMetricDuration,
     isClosedStatus,
     meaningfulTransitions,
-    portalEvent
+    portalEvent,
+    requestArchiveLabel
   };
 }));

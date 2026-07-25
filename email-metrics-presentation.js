@@ -54,6 +54,7 @@ function presentEmailMetrics(metrics, monitoringMode = 'unknown') {
     'mature_coverage_percent'
   );
   const observed = metrics && metrics.observed_response_times || {};
+  const prospectiveCohort = observed.prospective_cohort || {};
   return {
     as_of: metrics && metrics.as_of || new Date().toISOString(),
     database_available: Boolean(metrics && metrics.database_available),
@@ -105,7 +106,10 @@ function presentEmailMetrics(metrics, monitoringMode = 'unknown') {
     },
     response_times: {
       definitions: observed.definitions || {},
-      cohort: observed.prospective_cohort || {},
+      cohort: {
+        ...prospectiveCohort,
+        started_at: prospectiveCohort.started_at || null
+      },
       overall: responseTimes(observed.overall),
       by_agency: (observed.by_agency || []).map(row => responseGroup(row, 'agency')),
       by_complaint_type: (observed.by_complaint_type || [])

@@ -41,7 +41,10 @@ test('presents internal email metrics in the stable dashboard contract', () => {
     },
     observed_response_times: {
       definitions: { portal_closure: 'definition' },
-      prospective_cohort: { requests: 90 },
+      prospective_cohort: {
+        requests: 90,
+        started_at: '2026-07-25T10:00:00.000Z'
+      },
       overall: {
         first_updated: { sample_size: 8, median_seconds: 120, p90_seconds: 600 },
         portal_closure: { sample_size: 40, median_seconds: 900, p90_seconds: 3600 },
@@ -98,6 +101,7 @@ test('presents internal email metrics in the stable dashboard contract', () => {
   assert.equal(result.subscriptions.subscribed, 117);
   assert.equal(result.verification.coverage_percent, 98);
   assert.equal(result.response_times.overall.update_count, 8);
+  assert.equal(result.response_times.cohort.started_at, '2026-07-25T10:00:00.000Z');
   assert.equal(result.response_times.overall.closure_median_seconds, 900);
   assert.equal(result.response_times.overall.closure_notification_median_seconds, 20);
   assert.equal(result.response_times.by_agency[0].label, 'NYPD');
@@ -119,6 +123,7 @@ test('presents a safe empty response for an unavailable database', () => {
   assert.equal(result.verification.coverage_percent, null);
   assert.equal(result.response_times.overall.update_median_seconds, null);
   assert.equal(result.response_times.overall.closure_median_seconds, null);
+  assert.equal(result.response_times.cohort.started_at, null);
   assert.deepEqual(result.response_times.by_agency, []);
 });
 

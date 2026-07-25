@@ -7,7 +7,8 @@ const {
   buildStatusUpdateModel,
   currentClosureSnapshot,
   formatMetricDuration,
-  portalEvent
+  portalEvent,
+  requestArchiveLabel
 } = require('../public/js/status-update-model');
 
 function closedRecord(overrides = {}) {
@@ -275,6 +276,7 @@ test('normalizes email monitoring totals, coverage, and response-time samples', 
     response_times: {
       cohort: {
         requests: 7800,
+        started_at: '2026-07-23T14:00:00.000Z',
         early_subscription_seconds: 900,
         right_censored_without_first_updated: 7375,
         right_censored_without_observed_portal_closure: 3890
@@ -328,6 +330,7 @@ test('normalizes email monitoring totals, coverage, and response-time samples', 
   assert.equal(model.verification.grace_seconds, 3600);
   assert.match(model.verification.limitation, /independently known Portal closures/);
   assert.equal(model.response_times.cohort.requests, 7800);
+  assert.equal(model.response_times.cohort.started_at, '2026-07-23T14:00:00.000Z');
   assert.equal(model.response_times.cohort.right_censored_without_first_updated, 7375);
   assert.equal(model.response_times.overall.closure_notification_median_seconds, 18);
   assert.equal(model.response_times.by_agency.length, 1);
@@ -341,13 +344,13 @@ test('email metric model labels email-primary monitoring modes clearly', () => {
     monitoring_mode: 'email_primary'
   }).monitoring_mode, {
     key: 'email_primary',
-    label: 'Email-primary monitoring'
+    label: 'Email subscriptions active'
   });
   assert.deepEqual(buildEmailMetricsModel({
     monitoring_mode: 'email_primary_with_scheduled_fallback'
   }).monitoring_mode, {
     key: 'email_primary_with_scheduled_fallback',
-    label: 'Email primary + scheduled fallback'
+    label: 'Email + Portal fallback'
   });
 });
 
@@ -365,4 +368,55 @@ test('email metric model handles absent data and formats compact durations', () 
   assert.equal(formatMetricDuration(3600), '1h');
   assert.equal(formatMetricDuration(9000), '2h 30m');
   assert.equal(formatMetricDuration(90000), '1d 1h');
+});
+
+test('tracking label uses per-request email evidence and ignores inactive dates in email-primary mode', () => {
+  const record = {
+    followup_state: 'open',
+    next_check_at: '2026-07-26T12:00:00.000Z'
+  };
+  assert.equal(requestArchiveLabel(record, {
+    monitoringModeKey: 'email_primary',
+    subscription: { state: 'active' },
+    emailLookupComplete: true
+  }), 'Email monitoring active');
+  assert.equal(requestArchiveLabel(record, {
+    monitoringModeKey: 'email_primary',
+    subscription: null,
+    emailLookupComplete: true
+  }), 'Not email-subscribed · scheduled checks off');
+  assert.equal(requestArchiveLabel(record, {
+    monitoringModeKey: 'email_primary',
+    subscription: null,
+    emailLookupComplete: false
+  }), 'Checking email subscription');
+  assert.equal(requestArchiveLabel(record, {
+    monitoringModeKey: 'email_primary',
+    subscription: { state: 'created' },
+    emailLookupComplete: true
+  }), 'Subscription pending');
+  assert.equal(requestArchiveLabel(record, {
+    monitoringModeKey: 'email_primary',
+    subscription: { state: 'paused' },
+    emailLookupComplete: true
+  }), 'Monitoring paused');
+});
+
+test('tracking label only presents a next check when scheduled fallback is active', () => {
+  const record = {
+    followup_state: 'open',
+    next_check_at: '2026-07-26T12:00:00.000Z'
+  };
+  assert.equal(requestArchiveLabel(record, {
+    monitoringModeKey: 'email_primary_with_scheduled_fallback',
+    subscription: { state: 'active' },
+    emailLookupComplete: true,
+    formatTime: value => `TIME(${value})`
+  }), 'Email monitoring active · Portal fallback TIME(2026-07-26T12:00:00.000Z)');
+  assert.equal(requestArchiveLabel(record, {
+    monitoringModeKey: 'portal_only',
+    subscription: null,
+    emailLookupComplete: true,
+    formatTime: value => `TIME(${value})`
+  }), 'Portal monitoring · next TIME(2026-07-26T12:00:00.000Z)');
 });

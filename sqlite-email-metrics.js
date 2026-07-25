@@ -124,6 +124,7 @@ function emptyMetrics(now = new Date(), databaseAvailable = true) {
       },
       prospective_cohort: {
         requests: 0,
+        started_at: null,
         early_subscription_seconds: DEFAULT_EARLY_SUBSCRIPTION_SECONDS,
         right_censored_without_first_updated: 0,
         right_censored_without_observed_portal_closure: 0
@@ -302,7 +303,8 @@ function loadSubscriptionMetrics(database, tables, earlySubscriptionSeconds, dat
         within_early_window: 0,
         early_window_seconds: earlySubscriptionSeconds
       },
-      prospectiveRequestNumbers: new Set()
+      prospectiveRequestNumbers: new Set(),
+      prospectiveStartedAt: null
     };
   }
 
@@ -332,7 +334,8 @@ function loadSubscriptionMetrics(database, tables, earlySubscriptionSeconds, dat
         within_early_window: 0,
         early_window_seconds: earlySubscriptionSeconds
       },
-      prospectiveRequestNumbers: new Set()
+      prospectiveRequestNumbers: new Set(),
+      prospectiveStartedAt: null
     };
   }
 
@@ -348,6 +351,7 @@ function loadSubscriptionMetrics(database, tables, earlySubscriptionSeconds, dat
 
   const lagValues = [];
   const prospectiveRequestNumbers = new Set();
+  let prospectiveStartedAt = null;
   let withinEarlyWindow = 0;
   for (const row of rows) {
     if (row.canonical_submitted_at == null || String(row.canonical_submitted_at).trim() === '') {
@@ -375,6 +379,10 @@ function loadSubscriptionMetrics(database, tables, earlySubscriptionSeconds, dat
     if (lag <= earlySubscriptionSeconds) {
       withinEarlyWindow += 1;
       prospectiveRequestNumbers.add(String(row.srnumber));
+      const submittedAt = isoTimestamp(row.canonical_submitted_at);
+      if (submittedAt && (!prospectiveStartedAt || submittedAt < prospectiveStartedAt)) {
+        prospectiveStartedAt = submittedAt;
+      }
     } else {
       dataQuality.late_subscriptions_excluded_from_response_times += 1;
     }
@@ -389,7 +397,8 @@ function loadSubscriptionMetrics(database, tables, earlySubscriptionSeconds, dat
       within_early_window: withinEarlyWindow,
       early_window_seconds: earlySubscriptionSeconds
     },
-    prospectiveRequestNumbers
+    prospectiveRequestNumbers,
+    prospectiveStartedAt
   };
 }
 
@@ -542,6 +551,7 @@ function loadResponseMetrics(
   database,
   tables,
   prospectiveRequestNumbers,
+  prospectiveStartedAt,
   earlySubscriptionSeconds,
   minimumGroupSample,
   maxGroups,
@@ -556,6 +566,7 @@ function loadResponseMetrics(
     },
     prospective_cohort: {
       requests: prospectiveRequestNumbers.size,
+      started_at: prospectiveStartedAt,
       early_subscription_seconds: earlySubscriptionSeconds,
       right_censored_without_first_updated: prospectiveRequestNumbers.size,
       right_censored_without_observed_portal_closure: prospectiveRequestNumbers.size
@@ -681,6 +692,7 @@ function loadResponseMetrics(
     ...empty,
     prospective_cohort: {
       requests: prospectiveRequestNumbers.size,
+      started_at: prospectiveStartedAt,
       early_subscription_seconds: earlySubscriptionSeconds,
       right_censored_without_first_updated: Math.max(
         0,
@@ -748,7 +760,11 @@ function computeSqliteEmailMetrics(database, {
     earlySeconds,
     result.data_quality
   );
-  const { prospectiveRequestNumbers, ...publicSubscriptionMetrics } = subscriptionMetrics;
+  const {
+    prospectiveRequestNumbers,
+    prospectiveStartedAt,
+    ...publicSubscriptionMetrics
+  } = subscriptionMetrics;
   result.subscriptions = publicSubscriptionMetrics;
   result.measured_closure_email_coverage = loadClosureCoverage(
     database,
@@ -760,6 +776,7 @@ function computeSqliteEmailMetrics(database, {
     database,
     tables,
     prospectiveRequestNumbers,
+    prospectiveStartedAt,
     earlySeconds,
     minimumSample,
     groupLimit,
