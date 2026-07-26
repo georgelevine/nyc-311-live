@@ -70,7 +70,7 @@ const EMAIL_SUBSCRIPTION_DELAY_MS = Math.max(
   Number(process.env.EMAIL_SUBSCRIPTION_DELAY_MS || 5000)
 );
 const configuredEmailSubscriptionWorkers = Number(
-  process.env.EMAIL_SUBSCRIPTION_WORKERS || 2
+  process.env.EMAIL_SUBSCRIPTION_WORKERS || 3
 );
 const EMAIL_SUBSCRIPTION_WORKERS = Number.isFinite(configuredEmailSubscriptionWorkers)
   ? Math.max(1, Math.min(4, Math.trunc(configuredEmailSubscriptionWorkers)))
@@ -540,7 +540,11 @@ function startEmailSubscriptions() {
     }
   };
   const runSubscriptionWorker = async (workerIndex) => {
-    const order = workerIndex === 0 ? 'newest' : 'oldest';
+    // Keep one lane draining the historical backlog and dedicate every
+    // additional lane to new requests so a burst cannot bury live records.
+    const order = workerIndex === EMAIL_SUBSCRIPTION_WORKERS - 1
+      ? 'oldest'
+      : 'newest';
     while (!detailHydrationStopping) {
       try {
         const job = claimSubscription(db, new Date(), { order });
