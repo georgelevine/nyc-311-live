@@ -101,11 +101,11 @@ test('overview exposes email delivery, enrollment, verification, and response-ti
 test('request detail exposes status evidence separately from the status history timeline', () => {
   assert.equal($('#detail-status-evidence').length, 1);
   assert.equal($('#detail-evidence-summary').length, 1);
-  assert.equal($('#detail-evidence-official').length, 1);
   assert.equal($('#detail-evidence-email').length, 1);
   assert.equal($('#detail-evidence-portal').length, 1);
-  assert.match(dashboard, /Closed and Portal verified/);
-  assert.match(dashboard, /Closure signal received/);
+  assert.equal($('#detail-email-updates > summary').text().includes('Update history'), true);
+  assert.match(dashboard, /NYC311 confirms this request is closed/);
+  assert.match(dashboard, /Portal confirmation is still in progress/);
 });
 
 test('email event rendering distinguishes Submitted, Updated, and Closed', () => {

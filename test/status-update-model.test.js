@@ -215,14 +215,13 @@ test('never labels a detail-unconfirmed closure as Portal verified', () => {
       received_at: '2026-07-23T20:05:00.000Z'
     }]
   });
-  assert.equal(model.events.length, 2);
-  for (const event of model.events) {
-    assert.equal(event.verification_state, 'unconfirmed');
-    assert.equal(event.verification_label, 'Portal detail did not confirm closure');
-  }
+  assert.equal(model.events.length, 1);
+  assert.equal(model.events[0].verification_state, 'unconfirmed');
+  assert.equal(model.events[0].verification_label, 'Portal detail did not confirm closure');
+  assert.equal(model.events[0].portal_evidence.verification_state, 'unconfirmed');
 });
 
-test('orders the newest email and Portal events first', () => {
+test('merges a Portal closure and its agency email into one status update', () => {
   const model = buildStatusUpdateModel(closedRecord(), closurePayload(), {
     total: 2,
     updates: [
@@ -232,9 +231,11 @@ test('orders the newest email and Portal events first', () => {
   });
   assert.deepEqual(model.events.map(event => event.id), [
     'email-2',
-    'portal-2',
     'email-1'
   ]);
+  assert.equal(model.events[0].portal_evidence.verification_state, 'verified');
+  assert.equal(model.events[0].portal_evidence.effective_at, '2026-07-23T16:39:18.000Z');
+  assert.equal(model.total, 2);
 });
 
 test('normalizes email monitoring totals, coverage, and response-time samples', () => {

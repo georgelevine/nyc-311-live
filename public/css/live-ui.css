@@ -1484,7 +1484,7 @@ a:focus-visible {
 
 .detail-evidence-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 7px;
   padding-top: 10px;
 }
@@ -1546,6 +1546,11 @@ a:focus-visible {
 }
 
 .detail-email-event-heading time {
+  font-size: var(--font-xs);
+}
+
+.detail-portal-confirmation strong,
+.detail-portal-confirmation span {
   font-size: var(--font-xs);
 }
 

@@ -170,7 +170,6 @@
   const detailEvidenceElements = {
     root: document.getElementById('detail-status-evidence'),
     summary: document.getElementById('detail-evidence-summary'),
-    official: document.getElementById('detail-evidence-official'),
     email: document.getElementById('detail-evidence-email'),
     portal: document.getElementById('detail-evidence-portal'),
     note: document.getElementById('detail-evidence-note')
@@ -874,6 +873,7 @@
   function appendEmailUpdate(record, update) {
     const item = document.createElement('li');
     item.className = 'detail-email-event';
+    const portalEvidence = update && update.portal_evidence || null;
 
     const heading = document.createElement('div');
     heading.className = 'detail-email-event-heading';
@@ -883,18 +883,22 @@
       : rawEventKind === 'submitted' ? 'Submitted' : 'Updated';
     const title = document.createElement('strong');
     title.textContent = update && update.title || eventKind;
-    const received = document.createElement('time');
-    received.textContent = fullTimeLabel(update && update.received_at);
-    if (update && update.received_at) received.dateTime = update.received_at;
-    heading.append(title, received);
+    const statusTimeValue = portalEvidence && portalEvidence.effective_at
+      || update && update.received_at;
+    const statusTime = document.createElement('time');
+    statusTime.textContent = fullTimeLabel(statusTimeValue);
+    if (statusTimeValue) statusTime.dateTime = statusTimeValue;
+    heading.append(title, statusTime);
 
     const agency = document.createElement('p');
     agency.className = 'detail-email-agency';
     const agencyLabel = emailAgencyLabel(update);
-    const sourceLabel = String(update && update.source_label || 'NYC311 email').trim();
+    const receivedLabel = update && update.received_at
+      ? ` · email received ${fullTimeLabel(update.received_at)}`
+      : '';
     agency.textContent = agencyLabel === 'NYC311'
-      ? sourceLabel
-      : `${sourceLabel} · ${agencyLabel}`;
+      ? `NYC311 email${receivedLabel}`
+      : `Agency response · ${agencyLabel}${receivedLabel}`;
     item.append(heading, agency);
 
     const type = String(update && update.request_type || '').trim();
@@ -904,6 +908,30 @@
       requestType.className = 'detail-email-request-type';
       requestType.textContent = [type, subtype].filter(Boolean).join(' · ');
       item.append(requestType);
+    }
+
+    if (portalEvidence) {
+      const confirmation = document.createElement('div');
+      confirmation.className = 'detail-portal-confirmation';
+      confirmation.dataset.state = portalEvidence.verification_state || 'waiting';
+      const confirmationLabel = document.createElement('strong');
+      confirmationLabel.textContent = portalEvidence.verification_label
+        || 'Recorded by NYC311 Portal';
+      confirmation.append(confirmationLabel);
+      const confirmationTimes = [];
+      if (portalEvidence.effective_at) {
+        confirmationTimes.push(`Status time ${fullTimeLabel(portalEvidence.effective_at)}`);
+      }
+      if (portalEvidence.observed_at) {
+        const action = portalEvidence.verification_state === 'verified' ? 'confirmed' : 'checked';
+        confirmationTimes.push(`${action} ${fullTimeLabel(portalEvidence.observed_at)}`);
+      }
+      if (confirmationTimes.length) {
+        const confirmationTime = document.createElement('span');
+        confirmationTime.textContent = confirmationTimes.join(' · ');
+        confirmation.append(confirmationTime);
+      }
+      item.append(confirmation);
     }
 
     const responseText = String(update && update.response_text || '').trim();
@@ -925,7 +953,7 @@
     }
 
     const verification = emailVerificationState(record, update);
-    if (verification) {
+    if (verification && !portalEvidence) {
       const state = document.createElement('span');
       state.className = 'detail-email-verification';
       state.dataset.state = verification.state;
@@ -1011,10 +1039,14 @@
 
   function evidenceEmailLabel(update, loaded) {
     if (!loaded) return 'Checking';
-    if (!update) return 'No email yet';
+    if (!update) return 'None received';
+    const agency = emailAgencyLabel(update);
     const kind = String(update.event_kind || '').trim() || 'Update';
+    const action = kind.toLowerCase() === 'submitted'
+      ? 'submission received'
+      : kind.toLowerCase() === 'closed' ? 'response received' : 'update received';
     const time = update.received_at ? ` · ${timeLabel(update.received_at)}` : '';
-    return `${kind}${time}`;
+    return `${agency} · ${action}${time}`;
   }
 
   function portalEvidence(record, statusPayload) {
@@ -1069,20 +1101,24 @@
       : []).find(update => String(update && update.event_kind || '').toLowerCase() === 'closed');
     const portal = portalEvidence(record, statusPayload);
     const officialStatus = String(record.status || 'Unknown').trim() || 'Unknown';
-    let summary = 'Tracking status';
-    if (portal.state === 'verified') summary = 'Closed and Portal verified';
-    else if (portal.state === 'checking') summary = 'Closure signal received';
-    else if (closedEmail) summary = 'Closed email received';
-    else if (isClosed(officialStatus)) summary = 'Closed in stored Portal data';
-    else if (latestEmail) summary = 'Latest NYC311 email saved';
-    else if (emailLoaded) summary = 'No status email yet';
+    let note = portal.note;
+    if (portal.state === 'verified' && closedEmail) {
+      note = `NYC311 confirms this request is closed. The ${emailAgencyLabel(closedEmail)} response is saved in Update history below.`;
+    } else if (portal.state === 'verified') {
+      note = 'NYC311 confirms this request is closed. No agency response email is saved.';
+    } else if (portal.state === 'checking' && closedEmail) {
+      note = `A ${emailAgencyLabel(closedEmail)} email reports closure. NYC311 Portal confirmation is still in progress.`;
+    } else if (portal.state === 'open' && latestEmail) {
+      note = `NYC311 currently lists this request as ${officialStatus}. The latest agency email is saved below.`;
+    } else if (portal.state === 'open' && emailLoaded) {
+      note = `NYC311 currently lists this request as ${officialStatus}. No agency status email has arrived yet.`;
+    }
 
     detailEvidenceElements.root.dataset.state = portal.state;
-    detailEvidenceElements.summary.textContent = summary;
-    detailEvidenceElements.official.textContent = officialStatus;
+    detailEvidenceElements.summary.textContent = officialStatus;
     detailEvidenceElements.email.textContent = evidenceEmailLabel(latestEmail, emailLoaded);
     detailEvidenceElements.portal.textContent = portal.label;
-    detailEvidenceElements.note.textContent = portal.note;
+    detailEvidenceElements.note.textContent = note;
   }
 
   function renderStatusUpdates(record, { resetDisclosure = false } = {}) {
@@ -1096,8 +1132,8 @@
     clearStatusUpdatesPanel({ resetDisclosure });
     if (!model.events.length) return;
     detailEmailCount.textContent = model.total > model.events.length
-      ? `${model.events.length} of ${model.total} events`
-      : `${model.events.length} ${model.events.length === 1 ? 'event' : 'events'}`;
+      ? `${model.events.length} of ${model.total} updates`
+      : `${model.events.length} ${model.events.length === 1 ? 'update' : 'updates'}`;
     for (const update of model.events) {
       if (update.source === 'portal') appendPortalUpdate(update);
       else appendEmailUpdate(record, update);

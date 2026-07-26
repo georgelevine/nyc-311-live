@@ -435,7 +435,34 @@
   function buildStatusUpdateModel(record, statusPayload, emailPayload) {
     const events = emailEvents(record, emailPayload, statusPayload);
     const portal = portalEvent(record, statusPayload);
-    if (portal) events.push(portal);
+    let portalMerged = false;
+    if (portal && isClosedStatus(portal.status)) {
+      const closureIndex = events.findIndex(event => (
+        event.source === 'email' && isClosedStatus(event.event_kind)
+      ));
+      if (closureIndex >= 0) {
+        const emailClosure = events[closureIndex];
+        events[closureIndex] = {
+          ...emailClosure,
+          status: portal.status,
+          effective_at: portal.effective_at,
+          verification_state: portal.verification_state || emailClosure.verification_state,
+          verification_label: portal.verification_label || emailClosure.verification_label,
+          final_state: portal.final_state || emailClosure.final_state,
+          portal_evidence: {
+            source_label: portal.source_label,
+            effective_at: portal.effective_at,
+            observed_at: portal.observed_at,
+            verification_state: portal.verification_state,
+            verification_label: portal.verification_label,
+            final_state: portal.final_state
+          },
+          sort_at: emailClosure.sort_at || portal.sort_at
+        };
+        portalMerged = true;
+      }
+    }
+    if (portal && !portalMerged) events.push(portal);
     events.sort((left, right) => (
       timestampValue(right.sort_at) - timestampValue(left.sort_at)
       || String(right.id || '').localeCompare(String(left.id || ''))
@@ -445,7 +472,7 @@
       official_status: textOrNull(record && record.status),
       events,
       total: (Number.isFinite(emailTotal) && emailTotal >= 0 ? emailTotal : 0)
-        + (portal ? 1 : 0)
+        + (portal && !portalMerged ? 1 : 0)
     };
   }
 
