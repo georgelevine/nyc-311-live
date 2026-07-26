@@ -76,11 +76,13 @@ if [[ "${expanded_release_sha}" != "${release_sha}" ]]; then
   exit 1
 fi
 
-# This fast path is deliberately limited to browser assets, their tests, and
-# the two read-only metrics modules used only by server.js. It cannot silently
-# deploy collector, database, dependency, or general infrastructure changes.
+# This fast path is deliberately limited to browser assets, their tests,
+# server.js dashboard endpoints, and read-only metrics modules. It cannot
+# silently deploy collector, database, dependency, or general infrastructure
+# changes.
 if non_ui_changes="$(diff --recursive --brief \
   --exclude=public --exclude=test --exclude=.env --exclude=RELEASE_COMMIT \
+  --exclude=server.js \
   --exclude=sqlite-email-metrics.js --exclude=email-metrics-presentation.js \
   --exclude=deploy-ui-release.sh --exclude=deploy-ui.sh \
   "${current_directory}" "${staging_directory}")"; then

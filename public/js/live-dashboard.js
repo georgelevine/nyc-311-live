@@ -51,6 +51,7 @@
   const {
     buildEmailMetricsModel,
     buildStatusUpdateModel,
+    currentClosureSnapshot,
     formatMetricDuration,
     requestArchiveLabel
   } = window.NYC311StatusUpdateModel;
@@ -112,10 +113,47 @@
     complaintTypes: document.getElementById('complaint-response-times')
   };
   const hasEmailMetricElements = Object.values(emailMetricElements).every(Boolean);
+  const statusClarityElements = {
+    root: document.getElementById('status-clarity'),
+    mode: document.getElementById('status-clarity-mode'),
+    tracked: document.getElementById('status-tracked-count'),
+    trackedNote: document.getElementById('status-tracked-note'),
+    emailCount: document.getElementById('status-email-count'),
+    emailNote: document.getElementById('status-email-note'),
+    closedEmailCount: document.getElementById('status-closed-email-count'),
+    closedEmailNote: document.getElementById('status-closed-email-note'),
+    portalClosedCount: document.getElementById('status-portal-closed-count'),
+    portalClosedNote: document.getElementById('status-portal-closed-note'),
+    note: document.getElementById('status-clarity-note')
+  };
+  const hasStatusClarityElements = Object.values(statusClarityElements).every(Boolean);
+  const releaseSpeedElements = {
+    root: document.getElementById('release-speed'),
+    updated: document.getElementById('release-speed-updated'),
+    total: document.getElementById('release-total-time'),
+    summary: document.getElementById('release-summary'),
+    tests: document.getElementById('release-tests-time'),
+    upload: document.getElementById('release-upload-time'),
+    activate: document.getElementById('release-activate-time'),
+    visible: document.getElementById('release-visible-time'),
+    note: document.getElementById('release-speed-note')
+  };
+  const hasReleaseSpeedElements = Object.values(releaseSpeedElements).every(Boolean);
+  const detailEvidenceElements = {
+    root: document.getElementById('detail-status-evidence'),
+    summary: document.getElementById('detail-evidence-summary'),
+    official: document.getElementById('detail-evidence-official'),
+    email: document.getElementById('detail-evidence-email'),
+    portal: document.getElementById('detail-evidence-portal'),
+    note: document.getElementById('detail-evidence-note')
+  };
+  const hasDetailEvidenceElements = Object.values(detailEvidenceElements).every(Boolean);
   const MAX_VISIBLE_RECORDS = 750;
   const MAP_REFRESH_MS = 15_000;
   const EMAIL_UPDATES_REFRESH_MS = 15_000;
   const EMAIL_METRICS_REFRESH_MS = 60_000;
+  const RELEASE_INFO_REFRESH_MS = 5 * 60_000;
+  const DASHBOARD_MIN_REFRESH_MS = 5_000;
   const STATUS_HISTORY_REFRESH_MS = 15_000;
   let records = [];
   let mapRecords = [];
@@ -154,7 +192,10 @@
   let arrivingNumbers = new Set();
   let lastGoodSummary = null;
   let lastGoodEmailMetrics = null;
+  let lastDashboardStats = null;
   let emailMetricsInFlight = false;
+  let releaseInfoInFlight = false;
+  let dashboardRefreshTimer = null;
   const expandedResponseTables = new Set();
   let archiveSearchRecord = null;
   let archiveSearchState = 'idle';
@@ -238,6 +279,7 @@
       appShell.dataset.mobileView = normalizedView;
       setPressedView(normalizedView);
       scheduleMapLayout({ attemptBoundaryFit: normalizedView === 'map' });
+      if (normalizedView === 'map') refreshMap(mapStats, true);
     }
     return usesViewTabs && normalizedView === 'map';
   }
@@ -613,6 +655,7 @@
     });
     archiveValue.textContent = archiveLabel;
     archiveRow.classList.toggle('hidden', !archiveLabel);
+    renderStatusEvidence(record);
     renderCoreDataWarning(record);
     const cachedDetail = portalDetailByNumber.get(record.srnumber);
     if (cachedDetail) {
@@ -806,6 +849,93 @@
     detailEmailEvents.append(item);
   }
 
+  function latestEmailUpdate(payload) {
+    const updates = Array.isArray(payload && payload.updates) ? payload.updates : [];
+    return updates.slice().sort((left, right) => (
+      (Number.isFinite(Date.parse(right && right.received_at || ''))
+        ? Date.parse(right && right.received_at || '') : 0)
+      - (Number.isFinite(Date.parse(left && left.received_at || ''))
+        ? Date.parse(left && left.received_at || '') : 0)
+      || Number(right && right.id || 0) - Number(left && left.id || 0)
+    ))[0] || null;
+  }
+
+  function evidenceEmailLabel(update, loaded) {
+    if (!loaded) return 'Checking';
+    if (!update) return 'No email yet';
+    const kind = String(update.event_kind || '').trim() || 'Update';
+    const time = update.received_at ? ` · ${timeLabel(update.received_at)}` : '';
+    return `${kind}${time}`;
+  }
+
+  function portalEvidence(record, statusPayload) {
+    const followupState = String(record && record.followup_state || '').toLowerCase();
+    const finalState = String(record && record.current_cycle_final_state || '').toLowerCase();
+    if (finalState === 'detail_unconfirmed') {
+      return {
+        state: 'warning',
+        label: 'Not confirmed',
+        note: 'A Closed email arrived, but the Portal detail did not confirm the closure.'
+      };
+    }
+    if (followupState === 'closed') {
+      return {
+        state: 'verified',
+        label: record.finalized_at ? `Verified · ${timeLabel(record.finalized_at)}` : 'Verified',
+        note: 'The final Portal snapshot is saved.'
+      };
+    }
+    if (followupState === 'closing') {
+      const snapshot = currentClosureSnapshot(record, statusPayload);
+      return {
+        state: 'checking',
+        label: 'Verifying',
+        note: snapshot && snapshot.fetched_at
+          ? `Portal was last checked ${timeLabel(snapshot.fetched_at)}.`
+          : 'A closure signal arrived and the Portal proof is being checked.'
+      };
+    }
+    if (isClosed(record && record.status)) {
+      return {
+        state: 'warning',
+        label: 'Closed signal',
+        note: 'The request reads as closed, but final Portal proof has not been saved yet.'
+      };
+    }
+    return {
+      state: 'open',
+      label: 'No closure yet',
+      note: 'The request is still being tracked for future updates.'
+    };
+  }
+
+  function renderStatusEvidence(record) {
+    if (!hasDetailEvidenceElements || !record) return;
+    const emailPayload = emailUpdatesByNumber.get(record.srnumber) || null;
+    const statusPayload = statusHistoryByNumber.get(record.srnumber) || null;
+    const emailLoaded = emailUpdatesLoadedAt.has(record.srnumber);
+    const latestEmail = latestEmailUpdate(emailPayload);
+    const closedEmail = (Array.isArray(emailPayload && emailPayload.updates)
+      ? emailPayload.updates
+      : []).find(update => String(update && update.event_kind || '').toLowerCase() === 'closed');
+    const portal = portalEvidence(record, statusPayload);
+    const officialStatus = String(record.status || 'Unknown').trim() || 'Unknown';
+    let summary = 'Tracking status';
+    if (portal.state === 'verified') summary = 'Closed and Portal verified';
+    else if (portal.state === 'checking') summary = 'Closure signal received';
+    else if (closedEmail) summary = 'Closed email received';
+    else if (isClosed(officialStatus)) summary = 'Closed in stored Portal data';
+    else if (latestEmail) summary = 'Latest NYC311 email saved';
+    else if (emailLoaded) summary = 'No status email yet';
+
+    detailEvidenceElements.root.dataset.state = portal.state;
+    detailEvidenceElements.summary.textContent = summary;
+    detailEvidenceElements.official.textContent = officialStatus;
+    detailEvidenceElements.email.textContent = evidenceEmailLabel(latestEmail, emailLoaded);
+    detailEvidenceElements.portal.textContent = portal.label;
+    detailEvidenceElements.note.textContent = portal.note;
+  }
+
   function renderStatusUpdates(record, { resetDisclosure = false } = {}) {
     if (!record || selectedNumber !== record.srnumber) return;
     const model = buildStatusUpdateModel(
@@ -813,6 +943,7 @@
       statusHistoryByNumber.get(record.srnumber) || null,
       emailUpdatesByNumber.get(record.srnumber) || null
     );
+    renderStatusEvidence(record);
     clearStatusUpdatesPanel({ resetDisclosure });
     if (!model.events.length) return;
     detailEmailCount.textContent = model.total > model.events.length
@@ -1527,6 +1658,114 @@
     document.getElementById('closures-note').textContent = `${closing.toLocaleString()} ${closing === 1 ? 'check' : 'checks'} in progress`;
   }
 
+  function renderStatusClarity(stats = {}, emailModel = lastGoodEmailMetrics) {
+    if (!hasStatusClarityElements) return;
+    const model = emailModel || {};
+    const deliveries = model.deliveries || {};
+    const subscriptions = model.subscriptions || {};
+    const verification = model.verification || {};
+    const subscribed = finiteStat(subscriptions.subscribed);
+    const pending = finiteStat(subscriptions.pending);
+    const processing = finiteStat(subscriptions.processing);
+    const retry = finiteStat(subscriptions.retry);
+    const closing = finiteStat(stats.closure_refreshes_pending);
+    const finalized = finiteStat(stats.closures_finalized);
+    const usableEmails = finiteStat(deliveries.usable);
+    const totalEmails = finiteStat(deliveries.total);
+    const closedEmails = finiteStat(deliveries.closed);
+    const mode = model.monitoring_mode || { label: 'Checking monitoring mode', key: 'unknown' };
+    const queue = [
+      pending ? `${pending.toLocaleString()} pending` : '',
+      processing ? `${processing.toLocaleString()} processing` : '',
+      retry ? `${retry.toLocaleString()} retrying` : ''
+    ].filter(Boolean);
+
+    statusClarityElements.mode.textContent = mode.label;
+    statusClarityElements.mode.dataset.mode = mode.key || 'unknown';
+    statusClarityElements.tracked.textContent = subscribed.toLocaleString();
+    statusClarityElements.trackedNote.textContent = queue.length
+      ? queue.join(' · ')
+      : 'New matching requests are subscribed';
+    statusClarityElements.emailCount.textContent = usableEmails.toLocaleString();
+    statusClarityElements.emailNote.textContent = totalEmails && usableEmails !== totalEmails
+      ? `${totalEmails.toLocaleString()} total accepted`
+      : 'Direct, matched, authenticated emails';
+    statusClarityElements.closedEmailCount.textContent = closedEmails.toLocaleString();
+    statusClarityElements.closedEmailNote.textContent = verification.awaiting_within_grace
+      ? `${verification.awaiting_within_grace.toLocaleString()} known closures still inside grace`
+      : 'Fast closure signal from NYC311 email';
+    statusClarityElements.portalClosedCount.textContent = finalized.toLocaleString();
+    statusClarityElements.portalClosedNote.textContent = closing
+      ? `${closing.toLocaleString()} ${closing === 1 ? 'closure is' : 'closures are'} being verified`
+      : 'No final verifications waiting';
+    statusClarityElements.note.textContent = mode.key === 'email_primary'
+      ? 'Email is the primary realtime signal. Closed emails are fast; Portal verification saves the final proof.'
+      : 'Email notices are the fast signal. Portal verification is the saved final proof.';
+    statusClarityElements.root.setAttribute('aria-busy', 'false');
+  }
+
+  function releasePhaseLabel(value) {
+    const seconds = Number(value);
+    if (!Number.isFinite(seconds) || seconds < 0) return '—';
+    return formatMetricDuration(seconds);
+  }
+
+  function showReleaseInfoUnavailable(message = 'No timed deployment has been recorded yet.') {
+    if (!hasReleaseSpeedElements) return;
+    releaseSpeedElements.root.setAttribute('aria-busy', 'false');
+    releaseSpeedElements.updated.textContent = 'Not recorded yet';
+    releaseSpeedElements.total.textContent = '—';
+    releaseSpeedElements.summary.textContent = message;
+    releaseSpeedElements.tests.textContent = '—';
+    releaseSpeedElements.upload.textContent = '—';
+    releaseSpeedElements.activate.textContent = '—';
+    releaseSpeedElements.visible.textContent = '—';
+    releaseSpeedElements.note.textContent =
+      'The next deployment will write timing data after production passes its health check.';
+  }
+
+  function renderReleaseInfo(payload) {
+    if (!hasReleaseSpeedElements) return false;
+    if (!payload || payload.available === false) {
+      showReleaseInfoUnavailable(payload && payload.message);
+      return false;
+    }
+    const phases = payload.phase_seconds && typeof payload.phase_seconds === 'object'
+      ? payload.phase_seconds
+      : {};
+    const deployedAt = portalDate(payload.deployed_at);
+    const shortSha = String(payload.short_sha || payload.release_sha || '').slice(0, 7);
+    releaseSpeedElements.root.setAttribute('aria-busy', 'false');
+    releaseSpeedElements.updated.textContent = deployedAt && !Number.isNaN(deployedAt.getTime())
+      ? `Deployed ${fullTimeLabel(payload.deployed_at)}`
+      : 'Latest timed deployment';
+    releaseSpeedElements.total.textContent = releasePhaseLabel(phases.total);
+    releaseSpeedElements.summary.textContent = shortSha
+      ? `Release ${shortSha} reached production.`
+      : 'Latest release reached production.';
+    releaseSpeedElements.tests.textContent = releasePhaseLabel(phases.tests);
+    releaseSpeedElements.upload.textContent = releasePhaseLabel(phases.package_upload);
+    releaseSpeedElements.activate.textContent = releasePhaseLabel(phases.remote_activate);
+    releaseSpeedElements.visible.textContent = releasePhaseLabel(phases.public_health_check);
+    releaseSpeedElements.note.textContent =
+      'Measured from local validation through the public production health check.';
+    return true;
+  }
+
+  async function refreshReleaseInfo() {
+    if (releaseInfoInFlight || !hasReleaseSpeedElements) return;
+    releaseInfoInFlight = true;
+    try {
+      const payload = await fetchJson('/api/release-info', 'Release timing service');
+      renderReleaseInfo(payload);
+    } catch (error) {
+      showReleaseInfoUnavailable('Release timing is temporarily unavailable.');
+      console.warn(error);
+    } finally {
+      releaseInfoInFlight = false;
+    }
+  }
+
   function emailMetricPercent(value) {
     if (value == null || value === '') return '—';
     const numeric = Number(value);
@@ -1777,6 +2016,7 @@
     emailMetricElements.root.setAttribute('aria-busy', 'false');
     emailMetricElements.responseRoot.setAttribute('aria-busy', 'false');
     lastGoodEmailMetrics = model;
+    renderStatusClarity(lastDashboardStats || {}, model);
     if (selectedNumber) {
       const selectedRecord = findRecord(selectedNumber);
       if (selectedRecord) renderDetail(selectedRecord);
@@ -2000,6 +2240,7 @@
   }
 
   async function refreshMap(dashboardStats, force = false) {
+    if (!force && !mapHasLayout()) return;
     const now = Date.now();
     if (force) {
       mapRequestSequence += 1;
@@ -2046,7 +2287,9 @@
       currentPollSeconds = Number(stats.poll_interval_seconds || 15);
       pollInterval.value = String(currentPollSeconds);
       lastPortalCheck = stats.last_seen_at ? new Date(stats.last_seen_at) : null;
+      lastDashboardStats = stats;
       renderOverviewStats(stats);
+      renderStatusClarity(stats);
       renderCitySummary(stats.summary);
       document.getElementById('frontier-number').textContent = stats.frontier ? `311-${String(stats.frontier).padStart(8, '0')}` : '—';
       document.getElementById('last-updated').textContent = lastPortalCheck
@@ -2072,6 +2315,34 @@
         dashboardAbortController = null;
       }
     }
+  }
+
+  function nextDashboardRefreshDelay(now = Date.now()) {
+    const intervalMs = Math.max(DASHBOARD_MIN_REFRESH_MS, currentPollSeconds * 1000);
+    if (!lastPortalCheck || Number.isNaN(lastPortalCheck.getTime())) return intervalMs;
+    const expectedNextPortalCheck = lastPortalCheck.getTime() + intervalMs + 750;
+    return Math.max(DASHBOARD_MIN_REFRESH_MS, expectedNextPortalCheck - now);
+  }
+
+  function clearDashboardRefreshTimer() {
+    if (dashboardRefreshTimer !== null) {
+      window.clearTimeout(dashboardRefreshTimer);
+      dashboardRefreshTimer = null;
+    }
+  }
+
+  function scheduleDashboardRefresh(delayMs = nextDashboardRefreshDelay()) {
+    clearDashboardRefreshTimer();
+    dashboardRefreshTimer = window.setTimeout(async () => {
+      await refresh();
+      scheduleDashboardRefresh();
+    }, Math.max(500, delayMs));
+  }
+
+  async function refreshNowAndReschedule(options = {}) {
+    clearDashboardRefreshTimer();
+    await refresh(options);
+    scheduleDashboardRefresh();
   }
 
   function openRequestFromFeed(number) {
@@ -2125,7 +2396,7 @@
     renderFeed({ resetScroll: true });
     renderMap();
     syncSelectedBoundaries();
-    refresh({ force: true });
+    refreshNowAndReschedule({ force: true });
     scheduleArchiveSearch();
   }
   precinctFilter.addEventListener('change', handleGeographyFilterChange);
@@ -2153,7 +2424,7 @@
       console.warn(error);
     } finally {
       pollInterval.disabled = false;
-      refresh();
+      refreshNowAndReschedule();
     }
   });
   const detailClose = document.getElementById('detail-close');
@@ -2196,10 +2467,11 @@
   loadPolicePrecincts();
   loadBusinessImprovementDistricts();
   updateActiveFilterState();
-  refresh();
+  refreshNowAndReschedule();
   refreshEmailMetrics();
-  window.setInterval(refresh, 5000);
+  refreshReleaseInfo();
   window.setInterval(refreshEmailMetrics, EMAIL_METRICS_REFRESH_MS);
+  window.setInterval(refreshReleaseInfo, RELEASE_INFO_REFRESH_MS);
   window.setInterval(() => {
     const now = new Date();
     document.getElementById('nyc-clock').textContent = new Intl.DateTimeFormat('en-US', {

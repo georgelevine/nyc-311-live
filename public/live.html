@@ -86,7 +86,7 @@
           <header class="email-monitoring-header">
             <div>
               <span class="eyebrow">Monitoring health</span>
-              <h2 id="email-monitoring-title">Status subscription pipeline</h2>
+              <h2 id="email-monitoring-title">Status &amp; closure tracking</h2>
             </div>
             <span id="email-monitoring-mode" class="monitoring-mode-badge">Checking mode…</span>
           </header>
@@ -124,6 +124,41 @@
               Loading email monitoring metrics…
             </p>
           </details>
+        </section>
+
+        <section id="status-clarity" class="status-clarity" aria-labelledby="status-clarity-title">
+          <header class="status-clarity-header">
+            <div>
+              <span class="eyebrow">Status clarity</span>
+              <h2 id="status-clarity-title">What is known right now</h2>
+            </div>
+            <span id="status-clarity-mode">Checking evidence…</span>
+          </header>
+          <div class="status-clarity-grid" aria-label="Status and closure evidence">
+            <article>
+              <span>Email-monitored requests</span>
+              <strong id="status-tracked-count">—</strong>
+              <small id="status-tracked-note">Checking subscriptions</small>
+            </article>
+            <article>
+              <span>Status emails received</span>
+              <strong id="status-email-count">—</strong>
+              <small id="status-email-note">Submitted, Updated, and Closed</small>
+            </article>
+            <article>
+              <span>Closed emails</span>
+              <strong id="status-closed-email-count">—</strong>
+              <small id="status-closed-email-note">Direct NYC311 closed notices</small>
+            </article>
+            <article>
+              <span>Portal-verified closures</span>
+              <strong id="status-portal-closed-count">—</strong>
+              <small id="status-portal-closed-note">Final snapshots saved</small>
+            </article>
+          </div>
+          <p id="status-clarity-note" class="status-clarity-note">
+            Email notices are the fast signal. Portal verification is the saved final proof.
+          </p>
         </section>
 
         <section class="metrics" aria-label="Live collection statistics">
@@ -266,6 +301,29 @@
             <span id="next-check">New York time</span>
           </div>
         </section>
+
+        <section id="release-speed" class="release-speed" aria-labelledby="release-speed-title" aria-busy="true">
+          <header class="release-speed-header">
+            <div>
+              <span class="eyebrow">Change speed</span>
+              <h2 id="release-speed-title">Site update timer</h2>
+            </div>
+            <time id="release-speed-updated">Measuring…</time>
+          </header>
+          <div class="release-speed-lead">
+            <p><strong id="release-total-time">—</strong><span>last live update</span></p>
+            <small id="release-summary">Waiting for the next timed deployment.</small>
+          </div>
+          <dl class="release-speed-phases" aria-label="Deployment timing breakdown">
+            <div><dt>Local tests</dt><dd id="release-tests-time">—</dd></div>
+            <div><dt>Package + upload</dt><dd id="release-upload-time">—</dd></div>
+            <div><dt>Server switch</dt><dd id="release-activate-time">—</dd></div>
+            <div><dt>Live check</dt><dd id="release-visible-time">—</dd></div>
+          </dl>
+          <p id="release-speed-note" class="release-speed-note">
+            This measures the deploy path from local validation through the production health check.
+          </p>
+        </section>
       </div>
 
       <div class="requests-view">
@@ -342,6 +400,27 @@
         <span id="detail-status" class="status-pill"></span>
         <h2 id="detail-problem"></h2>
         <p id="detail-address"></p>
+        <section id="detail-status-evidence" class="detail-status-evidence" aria-label="Status evidence">
+          <header>
+            <span>Status evidence</span>
+            <strong id="detail-evidence-summary">Checking status…</strong>
+          </header>
+          <div class="detail-evidence-grid">
+            <div>
+              <span>Official status</span>
+              <strong id="detail-evidence-official">—</strong>
+            </div>
+            <div>
+              <span>Latest email</span>
+              <strong id="detail-evidence-email">—</strong>
+            </div>
+            <div>
+              <span>Portal proof</span>
+              <strong id="detail-evidence-portal">—</strong>
+            </div>
+          </div>
+          <p id="detail-evidence-note"></p>
+        </section>
         <section class="detail-submission" aria-label="Submitted request details">
           <div class="detail-submission-heading">
             <span>Submitted details</span>

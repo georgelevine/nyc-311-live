@@ -60,6 +60,13 @@ test('overview exposes email delivery, enrollment, verification, and response-ti
   assert.equal($('#email-coverage-limitation').length, 1);
   assert.equal($('#subscription-count').length, 1);
   assert.equal($('#monitored-count').length, 0);
+  assert.equal($('#status-clarity').length, 1);
+  assert.equal($('#status-tracked-count').length, 1);
+  assert.equal($('#status-email-count').length, 1);
+  assert.equal($('#status-closed-email-count').length, 1);
+  assert.equal($('#status-portal-closed-count').length, 1);
+  assert.equal($('#release-speed').length, 1);
+  assert.equal($('#release-total-time').length, 1);
   assert.equal(html.includes('Checked every 24 hours'), false);
   assert.equal($('#agency-response-times').closest('table').length, 1);
   assert.equal($('#complaint-response-times').closest('table').length, 1);
@@ -84,6 +91,18 @@ test('overview exposes email delivery, enrollment, verification, and response-ti
   assert.match(dashboard, /Observed since/);
   assert.match(dashboard, /known closures \$\{matureAge\} had a matched Closed email/);
   assert.match(dashboard, /Each median uses requests that reached that event/);
+  assert.match(dashboard, /Closed emails are fast; Portal verification saves the final proof/);
+  assert.match(dashboard, /Release timing service/);
+});
+
+test('request detail exposes status evidence separately from the status history timeline', () => {
+  assert.equal($('#detail-status-evidence').length, 1);
+  assert.equal($('#detail-evidence-summary').length, 1);
+  assert.equal($('#detail-evidence-official').length, 1);
+  assert.equal($('#detail-evidence-email').length, 1);
+  assert.equal($('#detail-evidence-portal').length, 1);
+  assert.match(dashboard, /Closed and Portal verified/);
+  assert.match(dashboard, /Closure signal received/);
 });
 
 test('email event rendering distinguishes Submitted, Updated, and Closed', () => {
@@ -104,6 +123,9 @@ test('email metrics refresh independently once per minute and degrades independe
     dashboard,
     /window\.setInterval\(refreshEmailMetrics, EMAIL_METRICS_REFRESH_MS\)/
   );
+  assert.equal(dashboard.includes('window.setInterval(refresh, 5000)'), false);
+  assert.match(dashboard, /nextDashboardRefreshDelay/);
+  assert.match(dashboard, /scheduleDashboardRefresh/);
   assert.match(dashboard, /Showing the last successful email metrics refresh/);
   assert.match(dashboard, /Live requests are still updating/);
 });

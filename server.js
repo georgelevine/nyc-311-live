@@ -253,6 +253,27 @@ function cachedEmailMetrics(databasePath) {
   return payload;
 }
 
+function releaseInfoPath(databasePath) {
+  return process.env.RELEASE_INFO_PATH
+    || path.join(path.dirname(databasePath), 'release-info.json');
+}
+
+function readReleaseInfo(databasePath) {
+  const fs = require('fs');
+  const infoPath = releaseInfoPath(databasePath);
+  if (!fs.existsSync(infoPath)) {
+    return {
+      available: false,
+      message: 'No timed deployment has been recorded yet'
+    };
+  }
+  const parsed = JSON.parse(fs.readFileSync(infoPath, 'utf8'));
+  return {
+    available: true,
+    ...parsed
+  };
+}
+
 // This machine-to-machine webhook is authenticated with signatures over the
 // exact MIME bytes. It must run before JSON parsing and dashboard Basic Auth.
 app.post(
@@ -1114,6 +1135,21 @@ app.get('/api/email-metrics', (req, res) => {
     console.error('Email metrics error:', error.message);
     return res.status(503).json({
       error: 'Email monitoring metrics are temporarily unavailable'
+    });
+  }
+});
+
+app.get('/api/release-info', (req, res) => {
+  const databasePath = process.env.DATABASE_PATH
+    || path.join(__dirname, 'data', 'portal-archive.sqlite');
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    return res.json(readReleaseInfo(databasePath));
+  } catch (error) {
+    console.error('Release info read error:', error.message);
+    return res.status(503).json({
+      available: false,
+      error: 'Release timing is temporarily unavailable'
     });
   }
 });
