@@ -70,7 +70,6 @@ function requireDashboardLogin(req, res, next) {
   return res.status(401).send('Sign in to NYC 311 Live');
 }
 
-app.use(requireDashboardLogin);
 app.get('/', (_req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'live.html')));
 app.use(express.static(path.join(__dirname, '..', 'public'), {
   setHeaders: (res, filePath) => {
@@ -333,7 +332,7 @@ app.get('/api/portal-detail', async (req, res) => {
   }
 });
 
-app.post('/api/live-settings', async (req, res) => {
+app.post('/api/live-settings', requireDashboardLogin, async (req, res) => {
   const interval = Number((req.body && req.body.poll_interval_seconds) ?? req.query.poll_interval_seconds);
   if (![5, 10, 15, 30, 60].includes(interval)) {
     return res.status(400).json({ error: 'poll_interval_seconds must be 5, 10, 15, 30, or 60' });

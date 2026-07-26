@@ -1,6 +1,8 @@
 'use strict';
 
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const test = require('node:test');
 const {
   createDashboardAuth,
@@ -100,4 +102,21 @@ test('leaves only the liveness and collector-readiness paths public', () => {
 test('rejects malformed Basic headers', () => {
   assert.equal(credentialsFromHeader('Bearer token'), null);
   assert.equal(credentialsFromHeader('Basic bm9jb2xvbg=='), null);
+});
+
+test('production servers keep dashboard reads public and protect only settings writes', () => {
+  const root = path.join(__dirname, '..');
+  const sqliteServer = fs.readFileSync(path.join(root, 'server.js'), 'utf8');
+  const postgresServer = fs.readFileSync(path.join(root, 'cloud', 'server.js'), 'utf8');
+
+  assert.equal(sqliteServer.includes('app.use(createDashboardAuth(dashboardAuth))'), false);
+  assert.match(
+    sqliteServer,
+    /app\.post\('\/api\/live-settings', dashboardSettingsAuth,/
+  );
+  assert.equal(postgresServer.includes('app.use(requireDashboardLogin)'), false);
+  assert.match(
+    postgresServer,
+    /app\.post\('\/api\/live-settings', requireDashboardLogin,/
+  );
 });

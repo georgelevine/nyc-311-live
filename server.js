@@ -40,6 +40,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || null;
 const dashboardAuth = dashboardAuthConfig();
+const dashboardSettingsAuth = createDashboardAuth(dashboardAuth, { publicPaths: [] });
 const LIVE_SUMMARY_CACHE_TTL_MS = 15_000;
 const ARCHIVE_QUALITY_CACHE_TTL_MS = 5 * 60_000;
 const EMAIL_METRICS_CACHE_TTL_MS = 60_000;
@@ -288,7 +289,6 @@ app.post(
 );
 
 app.use(express.json({ limit: '16kb' }));
-app.use(createDashboardAuth(dashboardAuth));
 
 // Always revalidate the app shell so mobile browsers pick up versioned assets.
 app.use(express.static(path.join(__dirname, 'public'), {
@@ -1467,7 +1467,7 @@ app.get('/api/email-updates/:srnumber', (req, res) => {
   }
 });
 
-app.post('/api/live-settings', (req, res) => {
+app.post('/api/live-settings', dashboardSettingsAuth, (req, res) => {
   if (!req.is('application/json')) {
     return res.status(415).json({ error: 'application/json is required' });
   }
