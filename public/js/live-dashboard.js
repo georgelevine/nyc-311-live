@@ -1,16 +1,37 @@
 (() => {
   const map = L.map('map', { zoomControl: false, preferCanvas: true }).setView([40.7128, -74.0060], 11);
   L.control.zoom({ position: 'bottomleft' }).addTo(map);
-  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+  const primaryTiles = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
     maxZoom: 19,
     attribution: '&copy; OpenStreetMap &copy; CARTO'
-  }).addTo(map);
+  });
+  const fallbackTiles = L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; OpenStreetMap contributors'
+  });
+  let primaryTileErrors = 0;
+  let usingFallbackTiles = false;
+  primaryTiles.on('tileload', () => {
+    primaryTileErrors = 0;
+  });
+  primaryTiles.on('tileerror', () => {
+    primaryTileErrors += 1;
+    if (usingFallbackTiles || primaryTileErrors < 4) return;
+    usingFallbackTiles = true;
+    map.removeLayer(primaryTiles);
+    fallbackTiles.addTo(map);
+  });
+  primaryTiles.addTo(map);
   const GEOGRAPHY_PANE = 'boundary';
   const geographyPane = map.createPane(GEOGRAPHY_PANE);
   geographyPane.style.zIndex = '350';
   geographyPane.style.pointerEvents = 'none';
   const geographyRenderer = L.svg({ pane: GEOGRAPHY_PANE });
   const markerLayer = L.markerClusterGroup({
+    chunkedLoading: true,
+    chunkInterval: 100,
+    chunkDelay: 25,
+    removeOutsideVisibleBounds: true,
     maxClusterRadius: 42,
     showCoverageOnHover: false,
     iconCreateFunction: cluster => {
@@ -41,6 +62,7 @@
   const detail = document.getElementById('request-detail');
   const mapScopeControl = document.getElementById('map-scope');
   const mapCounts = document.getElementById('map-counts');
+  const mapLoadStatus = document.getElementById('map-load-status');
   const mapBoundaryKey = document.getElementById('map-boundary-key');
   const requestFilters = document.getElementById('request-filters');
   const activeFilterCount = document.getElementById('active-filter-count');
@@ -150,6 +172,8 @@
   const hasDetailEvidenceElements = Object.values(detailEvidenceElements).every(Boolean);
   const MAX_VISIBLE_RECORDS = 750;
   const MAP_REFRESH_MS = 15_000;
+  const MAP_REQUEST_TIMEOUT_MS = 15_000;
+  const MAP_RETRY_MS = 3_000;
   const EMAIL_UPDATES_REFRESH_MS = 15_000;
   const EMAIL_METRICS_REFRESH_MS = 60_000;
   const RELEASE_INFO_REFRESH_MS = 5 * 60_000;
@@ -170,6 +194,8 @@
   let mapRenderFrame = null;
   let refreshInFlight = false;
   let mapRefreshInFlight = false;
+  let mapAbortController = null;
+  let mapRetryTimer = null;
   let mapRequestSequence = 0;
   let dashboardRequestSequence = 0;
   let dashboardAbortController = null;
@@ -225,6 +251,26 @@
   let pendingBoundaryFit = false;
   let boundaryFitRevision = 0;
   let lastMapLayoutKey = '';
+
+  function setMapLoadState(state, message = '') {
+    if (!mapLoadStatus) return;
+    mapLoadStatus.dataset.state = state;
+    mapLoadStatus.textContent = message;
+  }
+
+  function clearMapRetry() {
+    if (mapRetryTimer === null) return;
+    window.clearTimeout(mapRetryTimer);
+    mapRetryTimer = null;
+  }
+
+  function scheduleMapRetry() {
+    if (mapRetryTimer !== null) return;
+    mapRetryTimer = window.setTimeout(() => {
+      mapRetryTimer = null;
+      refreshMap(mapStats, true);
+    }, MAP_RETRY_MS);
+  }
 
   const esc = value => String(value || '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
   const portalDate = value => {
@@ -2277,6 +2323,7 @@
     if (!force && !mapHasLayout()) return;
     const now = Date.now();
     if (force) {
+      if (mapAbortController) mapAbortController.abort();
       mapRequestSequence += 1;
       mapRefreshInFlight = false;
       lastMapRefreshStartedAt = 0;
@@ -2285,14 +2332,33 @@
     mapRefreshInFlight = true;
     lastMapRefreshStartedAt = now;
     const sequence = ++mapRequestSequence;
+    const controller = new AbortController();
+    mapAbortController = controller;
+    const timeout = window.setTimeout(() => controller.abort(), MAP_REQUEST_TIMEOUT_MS);
+    if (!mapRecords.length) setMapLoadState('loading', 'Loading map records…');
     try {
-      const payload = await fetchJson(scopedUrl('/api/live-map'), 'Map service');
+      const payload = await fetchJson(scopedUrl('/api/live-map'), 'Map service', {
+        signal: controller.signal
+      });
       if (sequence !== mapRequestSequence) return;
       updateMapRecords(payload, dashboardStats);
+      clearMapRetry();
+      setMapLoadState('ready');
     } catch (error) {
-      if (sequence === mapRequestSequence) console.warn(error);
+      if (sequence === mapRequestSequence) {
+        const message = error.name === 'AbortError'
+          ? 'Map data took too long. Retrying…'
+          : 'Map data is temporarily unavailable. Retrying…';
+        setMapLoadState('error', message);
+        scheduleMapRetry();
+        console.warn(error);
+      }
     } finally {
-      if (sequence === mapRequestSequence) mapRefreshInFlight = false;
+      window.clearTimeout(timeout);
+      if (sequence === mapRequestSequence) {
+        mapRefreshInFlight = false;
+        mapAbortController = null;
+      }
     }
   }
 

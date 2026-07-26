@@ -73,6 +73,20 @@ test('returns every and only valid stored coordinate pair with matching totals',
   assert.equal(payload.records.some(record => record.latitude == null || record.longitude == null), false);
 });
 
+test('accepts archive totals when the database query already omitted unmapped rows', () => {
+  const payload = buildLiveMapPayload([
+    { srnumber: '311-00000003', suffix: 3, latitude: 40.7, longitude: -73.9 },
+    { srnumber: '311-00000001', suffix: 1, latitude: 40.6, longitude: -74.1 }
+  ], {
+    total: 10,
+    mapped_total: 2,
+    unmapped_total: 8
+  });
+
+  assert.deepEqual(payload.stats, { total: 10, mapped_total: 2, unmapped_total: 8 });
+  assert.equal(payload.records.length, 2);
+});
+
 test('does not derive or geocode coordinates from any other field', () => {
   const record = projectLiveMapRow({
     srnumber: '311-00000001',

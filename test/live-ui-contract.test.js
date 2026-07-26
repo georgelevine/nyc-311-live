@@ -144,3 +144,18 @@ test('local dashboard styles and scripts resolve to committed files in load orde
     '/js/live-dashboard.js'
   ]);
 });
+
+test('map startup is self-hosted, bounded, and automatically recoverable', () => {
+  assert.equal($('script[src*="unpkg.com"], link[href*="unpkg.com"]').length, 0);
+  assert.equal($('script[src="/vendor/leaflet/leaflet.js"]').length, 1);
+  assert.equal(
+    $('script[src="/vendor/leaflet-markercluster/leaflet.markercluster.js"]').length,
+    1
+  );
+  assert.equal($('#map-load-status[role="status"]').length, 1);
+  assert.match(dashboard, /chunkedLoading:\s*true/);
+  assert.match(dashboard, /const MAP_REQUEST_TIMEOUT_MS = 15_000/);
+  assert.match(dashboard, /const MAP_RETRY_MS = 3_000/);
+  assert.match(dashboard, /Map data took too long\. Retrying/);
+  assert.match(dashboard, /tile\.openstreetmap\.org/);
+});

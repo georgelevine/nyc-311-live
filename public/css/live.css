@@ -203,6 +203,17 @@ button, input, select { font: inherit; }
 .map-scope button[aria-pressed="true"] { color: white; background: var(--blue); box-shadow: 0 3px 9px rgba(23,105,224,.23); }
 .map-scope button:focus-visible { outline: 2px solid #78aaf0; outline-offset: 2px; }
 .map-counts { margin: 9px 2px 0; color: #536473; font-size: 10px; font-variant-numeric: tabular-nums; font-weight: 650; }
+.map-load-status {
+  display: flex; align-items: center; gap: 6px; margin: 6px 2px 0;
+  color: #536473; font-size: 9px; font-weight: 700;
+}
+.map-load-status::before {
+  width: 8px; height: 8px; flex: none; border: 2px solid rgba(23,105,224,.18);
+  border-top-color: var(--blue); border-radius: 50%; content: "";
+  animation: continuous-live-spin 1.2s linear infinite;
+}
+.map-load-status[data-state="error"] { color: #9b6411; }
+.map-load-status[data-state="ready"] { display: none; }
 .bottom-right { right: 18px; bottom: 20px; }
 .legend { display: flex; gap: 14px; color: #52626f; font-size: 10px; font-weight: 650; }
 .legend span { display: flex; align-items: center; gap: 5px; }
@@ -402,6 +413,7 @@ button, input, select { font: inherit; }
   .map-overlay strong { font-size: 14px; }
   .map-scope button { min-height: 34px; padding: 6px 3px; font-size: 9px; }
   .map-counts { margin-top: 7px; font-size: 9px; line-height: 1.3; }
+  .map-load-status { margin-top: 5px; font-size: 8.5px; }
   .legend { display: none; }
   .leaflet-bottom.leaflet-left { bottom: max(8px, env(safe-area-inset-bottom)); }
   .request-detail {

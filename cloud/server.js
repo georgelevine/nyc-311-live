@@ -21,6 +21,21 @@ const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || '';
 
 app.disable('x-powered-by');
 app.use(express.json({ limit: '16kb' }));
+const immutableVendorAssets = {
+  immutable: true,
+  maxAge: '1y'
+};
+app.use(
+  '/vendor/leaflet',
+  express.static(path.join(__dirname, '..', 'node_modules', 'leaflet', 'dist'), immutableVendorAssets)
+);
+app.use(
+  '/vendor/leaflet-markercluster',
+  express.static(
+    path.join(__dirname, '..', 'node_modules', 'leaflet.markercluster', 'dist'),
+    immutableVendorAssets
+  )
+);
 
 app.get('/api/health/live', (_req, res) => {
   res.json({ status: 'ok', process: 'running', timestamp: new Date().toISOString() });
@@ -83,7 +98,8 @@ app.use(express.static(path.join(__dirname, '..', 'public'), {
 app.get('/api/live-map', async (_req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   try {
-    const result = await query(`
+    const [result, totalResult] = await Promise.all([
+      query(`
       SELECT live.srnumber,live.suffix,live.portal_id,live.problem,live.address,
              live.borough,live.incident_zip,
              live.latitude,live.longitude,live.submitted_at,live.status,
@@ -103,16 +119,18 @@ app.get('/api/live-map', async (_req, res) => {
       FROM live_portal_requests AS live
       LEFT JOIN portal_requests AS details ON details.srnumber=live.srnumber
       LEFT JOIN request_followup_queue AS followup ON followup.srnumber=live.srnumber
-      LEFT JOIN LATERAL (
-        SELECT snapshot.date_closed
-        FROM request_closure_snapshots AS snapshot
-        WHERE snapshot.srnumber=followup.srnumber
-          AND snapshot.closure_cycle=followup.closure_cycle
-          AND snapshot.is_final=TRUE
-        ORDER BY snapshot.id DESC LIMIT 1
-      ) AS current_final ON TRUE
-    `);
-    return res.json(buildLiveMapPayload(result.rows));
+      LEFT JOIN request_closure_snapshots AS current_final
+        ON current_final.srnumber=followup.srnumber
+       AND current_final.closure_cycle=followup.closure_cycle
+       AND current_final.is_final=TRUE
+      WHERE live.latitude IS NOT NULL AND live.longitude IS NOT NULL
+      ORDER BY live.suffix DESC
+    `),
+      query('SELECT COUNT(*) AS total FROM live_portal_requests')
+    ]);
+    return res.json(buildLiveMapPayload(result.rows, {
+      total: Number(totalResult.rows[0] && totalResult.rows[0].total || 0)
+    }));
   } catch (error) {
     console.error(JSON.stringify({ live_map_error: error.message }));
     return res.status(503).json(buildLiveMapPayload([]));

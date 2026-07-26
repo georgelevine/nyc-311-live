@@ -143,15 +143,29 @@ function compareMapRecords(first, second) {
  * payload too large, add a separate versioned PostGIS viewport/cluster contract;
  * do not silently truncate or change the meaning of this endpoint.
  */
-function buildLiveMapPayload(rows) {
+function nonNegativeCount(value, fallback) {
+  if (value == null || value === '') return fallback;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? Math.trunc(number) : fallback;
+}
+
+function buildLiveMapPayload(rows, suppliedStats = null) {
   const source = Array.isArray(rows) ? rows : [];
   const records = source.map(projectLiveMapRow).filter(Boolean).sort(compareMapRecords);
+  const total = nonNegativeCount(suppliedStats && suppliedStats.total, source.length);
+  const mappedTotal = nonNegativeCount(
+    suppliedStats && suppliedStats.mapped_total,
+    records.length
+  );
   return {
     records,
     stats: {
-      total: source.length,
-      mapped_total: records.length,
-      unmapped_total: source.length - records.length
+      total,
+      mapped_total: mappedTotal,
+      unmapped_total: nonNegativeCount(
+        suppliedStats && suppliedStats.unmapped_total,
+        Math.max(0, total - mappedTotal)
+      )
     }
   };
 }

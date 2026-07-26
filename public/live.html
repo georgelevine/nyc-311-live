@@ -3,11 +3,11 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline' https://unpkg.com; script-src 'self' https://unpkg.com; img-src 'self' data: https://*.basemaps.cartocdn.com https://unpkg.com; connect-src 'self'; font-src 'self' data:;">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: https://*.basemaps.cartocdn.com https://tile.openstreetmap.org; connect-src 'self'; font-src 'self' data:;">
   <title>NYC 311 Live</title>
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css">
-  <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css">
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="/vendor/leaflet-markercluster/MarkerCluster.css">
+  <link rel="stylesheet" href="/vendor/leaflet-markercluster/MarkerCluster.Default.css">
   <link rel="stylesheet" href="/css/live.css">
   <link rel="stylesheet" href="/css/live-ui.css">
 </head>
@@ -390,6 +390,7 @@
           <button type="button" data-map-scope="7d" aria-pressed="false">7 days</button>
         </div>
         <p id="map-counts" class="map-counts" aria-live="polite">0 shown · 0 without stored Portal coordinates · 0 captured</p>
+        <p id="map-load-status" class="map-load-status" role="status" aria-live="polite">Loading map records…</p>
       </div>
       <div class="map-overlay bottom-right legend">
         <span><i class="marker-swatch active"></i>In progress</span>
@@ -452,8 +453,8 @@
     </section>
   </main>
 
-  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+  <script src="/vendor/leaflet/leaflet.js"></script>
+  <script src="/vendor/leaflet-markercluster/leaflet.markercluster.js"></script>
   <script src="/js/status-update-model.js"></script>
   <script src="/js/live-dashboard-model.js"></script>
   <script src="/js/live-dashboard.js"></script>

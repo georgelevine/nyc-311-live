@@ -290,6 +290,22 @@ app.post(
 
 app.use(express.json({ limit: '16kb' }));
 
+const immutableVendorAssets = {
+  immutable: true,
+  maxAge: '1y'
+};
+app.use(
+  '/vendor/leaflet',
+  express.static(path.join(__dirname, 'node_modules', 'leaflet', 'dist'), immutableVendorAssets)
+);
+app.use(
+  '/vendor/leaflet-markercluster',
+  express.static(
+    path.join(__dirname, 'node_modules', 'leaflet.markercluster', 'dist'),
+    immutableVendorAssets
+  )
+);
+
 // Always revalidate the app shell so mobile browsers pick up versioned assets.
 app.use(express.static(path.join(__dirname, 'public'), {
   setHeaders: (res, filePath) => {
@@ -1061,16 +1077,23 @@ app.get('/api/live-map', (req, res) => {
          0 AS closure_cycle_tracking`;
     const currentClosureJoin = hasFollowUps && hasClosureSnapshots
       ? `LEFT JOIN request_closure_snapshots AS current_final
-           ON current_final.id=(
-             SELECT MAX(snapshot.id)
-             FROM request_closure_snapshots AS snapshot
-             WHERE snapshot.srnumber=followup.srnumber
-               AND snapshot.closure_cycle=followup.closure_cycle
-               AND snapshot.is_final=1
-           )`
+           ON current_final.srnumber=followup.srnumber
+          AND current_final.closure_cycle=followup.closure_cycle
+          AND current_final.is_final=1`
       : '';
     const livePredicates = scopePredicates('live', scope);
-    const liveWhere = livePredicates.length ? `WHERE ${livePredicates.join(' AND ')}` : '';
+    const scopeWhere = livePredicates.length ? `WHERE ${livePredicates.join(' AND ')}` : '';
+    const mappedPredicates = [
+      ...livePredicates,
+      'live.latitude IS NOT NULL',
+      'live.longitude IS NOT NULL'
+    ];
+    const mappedWhere = `WHERE ${mappedPredicates.join(' AND ')}`;
+    const total = Number(database.prepare(`
+      SELECT COUNT(*) AS count
+      FROM live_portal_requests AS live
+      ${scopeWhere}
+    `).get(scopeParameters(scope)).count || 0);
     const statement = database.prepare(`
       SELECT live.srnumber,live.suffix,live.portal_id,live.problem,live.address,
              live.borough,live.incident_zip,
@@ -1085,10 +1108,11 @@ app.get('/api/live-map', (req, res) => {
       ${detailJoin}
       ${followUpJoin}
       ${currentClosureJoin}
-      ${liveWhere}
+      ${mappedWhere}
+      ORDER BY live.suffix DESC
     `);
     const rows = statement.all(scopeParameters(scope));
-    return res.json(buildLiveMapPayload(rows));
+    return res.json(buildLiveMapPayload(rows, { total }));
   } catch (error) {
     console.error('Live map data error:', error.message);
     return res.status(error.statusCode || 503).json(
