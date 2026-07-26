@@ -144,6 +144,10 @@ function enqueueBidSubscriptions(database, bidIds, {
       ON version.version=membership.boundary_version AND version.active=1
     WHERE membership.bid_id IN (${placeholders})
       AND request.portal_id IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM nyc311_email_subscription_jobs AS existing
+        WHERE existing.srnumber=request.srnumber
+      )
   `).all(...bidIds);
   let added = 0;
   const insert = database.prepare(`
@@ -193,6 +197,10 @@ function enqueuePrecinctSubscriptions(database, precincts, {
     WHERE police_precinct IN (${placeholders})
       AND portal_id IS NOT NULL
       AND first_seen_at>=?
+      AND NOT EXISTS (
+        SELECT 1 FROM nyc311_email_subscription_jobs AS existing
+        WHERE existing.srnumber=live_portal_requests.srnumber
+      )
     ORDER BY suffix
   `).all(...precincts, cutoff.toISOString());
   const insert = database.prepare(`
@@ -236,6 +244,10 @@ function enqueueAllSubscriptions(database, {
     FROM live_portal_requests
     WHERE portal_id IS NOT NULL
       AND first_seen_at>=?
+      AND NOT EXISTS (
+        SELECT 1 FROM nyc311_email_subscription_jobs AS existing
+        WHERE existing.srnumber=live_portal_requests.srnumber
+      )
     ORDER BY suffix
   `).all(cutoff.toISOString());
   const insert = database.prepare(`

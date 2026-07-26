@@ -50,6 +50,10 @@ test('precinct enrollment honors the immutable first-seen cutoff', () => {
     startAt: '2026-07-23T19:30:11.000Z',
     now: new Date('2026-07-23T19:32:00.000Z')
   }), 1);
+  assert.equal(enqueuePrecinctSubscriptions(database, [1], {
+    startAt: '2026-07-23T19:30:11.000Z',
+    now: new Date('2026-07-23T19:33:00.000Z')
+  }), 0);
   const job = database.prepare(`
     SELECT srnumber,scope_type,scope_id,scope_label
     FROM nyc311_email_subscription_jobs
@@ -89,6 +93,10 @@ test('all-request enrollment includes only records at or after its immutable cut
     startAt: '2026-07-24T20:00:01.000Z',
     now: new Date('2026-07-24T20:01:00.000Z')
   }), 1);
+  assert.equal(enqueueAllSubscriptions(database, {
+    startAt: '2026-07-24T20:00:01.000Z',
+    now: new Date('2026-07-24T20:02:00.000Z')
+  }), 0);
   const job = database.prepare(`
     SELECT srnumber,scope_type,scope_id,scope_label
     FROM nyc311_email_subscription_jobs
