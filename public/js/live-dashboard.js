@@ -62,6 +62,7 @@
   const detail = document.getElementById('request-detail');
   const mapScopeControl = document.getElementById('map-scope');
   const mapCounts = document.getElementById('map-counts');
+  const mapDateRange = document.getElementById('map-date-range');
   const mapLoadStatus = document.getElementById('map-load-status');
   const mapBoundaryKey = document.getElementById('map-boundary-key');
   const requestFilters = document.getElementById('request-filters');
@@ -82,6 +83,7 @@
     exactSrnumberQuery: normalizeExactSrnumberQuery,
     feedCardModel,
     isClosed,
+    mapScopeAfterFilterChange,
     recordCoordinates,
     recordHasMapPin
   } = window.NYC311LiveDashboardModel;
@@ -336,6 +338,9 @@
     const date = portalDate(record && record.submitted_at);
     return date && !Number.isNaN(date.getTime()) ? date.getTime() : null;
   };
+  const mapRangeDateFormatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', month: 'short', day: 'numeric', year: 'numeric'
+  });
   const suffixOf = record => Number(String(record && record.srnumber || '').replace(/^311-/, '')) || 0;
   function exactSrnumberQuery() {
     return normalizeExactSrnumberQuery(search.value);
@@ -611,6 +616,49 @@
     if (mapCounts.textContent !== label) mapCounts.textContent = label;
   }
 
+  function mapScopeLabel() {
+    if (mapScope === '24h') return 'Last 24 hours';
+    if (mapScope === '7d') return 'Last 7 days';
+    return 'All captured dates';
+  }
+
+  function updateMapDateRange(desired) {
+    let earliest = null;
+    let latest = null;
+    for (const { record } of desired.values()) {
+      const timestamp = mapRecordTime(record);
+      if (timestamp === null) continue;
+      earliest = earliest === null ? timestamp : Math.min(earliest, timestamp);
+      latest = latest === null ? timestamp : Math.max(latest, timestamp);
+    }
+    if (earliest === null || latest === null) {
+      mapDateRange.textContent = `${mapScopeLabel()} · no matching dated pins`;
+      return;
+    }
+    const earliestLabel = mapRangeDateFormatter.format(new Date(earliest));
+    const latestLabel = mapRangeDateFormatter.format(new Date(latest));
+    mapDateRange.textContent = earliestLabel === latestLabel
+      ? `${mapScopeLabel()} · ${earliestLabel}`
+      : `${mapScopeLabel()} · ${earliestLabel} – ${latestLabel}`;
+  }
+
+  function setMapScope(nextScope) {
+    mapScope = ['all', '24h', '7d'].includes(nextScope) ? nextScope : 'all';
+    mapScopeControl.querySelectorAll('button[data-map-scope]').forEach(scopeButton => {
+      scopeButton.setAttribute('aria-pressed', String(scopeButton.dataset.mapScope === mapScope));
+    });
+  }
+
+  function showAllDatesForActiveFilters() {
+    const nextScope = mapScopeAfterFilterChange(mapScope, [
+      search.value,
+      statusFilter.value,
+      precinctFilter.value,
+      bidFilter.value
+    ]);
+    if (nextScope !== mapScope) setMapScope(nextScope);
+  }
+
   function renderMapNow() {
     mapRenderFrame = null;
     const desired = new Map();
@@ -655,6 +703,7 @@
 
     mapShownCount = desired.size;
     updateMapCountText();
+    updateMapDateRange(desired);
   }
 
   function renderMap() {
@@ -2509,13 +2558,18 @@
     const button = event.target.closest('button[data-mobile-view]');
     if (button) setMobileView(button.dataset.mobileView);
   });
-  search.addEventListener('input', scheduleArchiveSearch);
+  search.addEventListener('input', () => {
+    showAllDatesForActiveFilters();
+    scheduleArchiveSearch();
+  });
   statusFilter.addEventListener('change', () => {
+    showAllDatesForActiveFilters();
     updateActiveFilterState();
     renderFeed({ resetScroll: true });
     renderMap();
   });
   function handleGeographyFilterChange() {
+    showAllDatesForActiveFilters();
     lastGoodSummary = null;
     highestObservedSuffix = null;
     detailLoadSequence += 1;
@@ -2551,10 +2605,7 @@
   mapScopeControl.addEventListener('click', event => {
     const button = event.target.closest('button[data-map-scope]');
     if (!button || !mapScopeControl.contains(button)) return;
-    mapScope = button.dataset.mapScope;
-    mapScopeControl.querySelectorAll('button[data-map-scope]').forEach(scopeButton => {
-      scopeButton.setAttribute('aria-pressed', String(scopeButton === button));
-    });
+    setMapScope(button.dataset.mapScope);
     renderMap();
   });
   pollInterval.addEventListener('change', async () => {

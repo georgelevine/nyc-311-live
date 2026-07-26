@@ -163,3 +163,11 @@ test('map startup is self-hosted, bounded, and automatically recoverable', () =>
   assert.match(dashboard, /Map data took too long\. Retrying/);
   assert.match(dashboard, /tile\.openstreetmap\.org/);
 });
+
+test('map filters default to the complete captured date range and disclose its dates', () => {
+  assert.equal($('#map-scope button[data-map-scope="all"]').text().trim(), 'All dates');
+  assert.equal($('#map-date-range[aria-live="polite"]').length, 1);
+  assert.match(dashboard, /showAllDatesForActiveFilters/);
+  assert.match(dashboard, /All captured dates/);
+  assert.match(dashboard, /mapRangeDateFormatter/);
+});

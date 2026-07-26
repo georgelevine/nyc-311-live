@@ -64,12 +64,22 @@
     return `${count} active`;
   }
 
+  function mapScopeAfterFilterChange(currentScope, filterValues) {
+    const normalizedScope = ['all', '24h', '7d'].includes(currentScope)
+      ? currentScope
+      : 'all';
+    const hasActiveFilter = (Array.isArray(filterValues) ? filterValues : [])
+      .some(value => normalizedText(value));
+    return hasActiveFilter ? 'all' : normalizedScope;
+  }
+
   return {
     activeFilterLabel,
     coordinateNumber,
     exactSrnumberQuery,
     feedCardModel,
     isClosed,
+    mapScopeAfterFilterChange,
     normalizedText,
     recordCoordinates,
     recordHasMapPin
