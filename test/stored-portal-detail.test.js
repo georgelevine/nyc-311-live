@@ -6,7 +6,10 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 const { DatabaseSync } = require('node:sqlite');
-const { readStoredPortalDetail } = require('../stored-portal-detail');
+const {
+  readStoredPortalDetail,
+  storedPortalDetailFromRow
+} = require('../stored-portal-detail');
 
 const PORTAL_ID = '7b9074fa-8e64-4c6d-ab01-6eb36bf62a80';
 
@@ -94,6 +97,38 @@ test('keeps the stored detail usable when fields_json is malformed', t => {
 
   assert.equal(detail.problemDetails, 'Catch Basin Clogged');
   assert.deepEqual(detail.fields, {});
+});
+
+test('projects PostgreSQL rows without reparsing JSONB objects', () => {
+  const fields = {
+    'Problem Details': 'Loud Music/Party',
+    Agency: 'NYPD'
+  };
+  assert.deepEqual(storedPortalDetailFromRow({
+    srnumber: '311-28367645',
+    status: 'Closed',
+    problem: 'Noise - Street/Sidewalk',
+    problem_details: 'Loud Music/Party',
+    additional_details: null,
+    address: '1 CENTRE STREET, MANHATTAN, NY, 10007',
+    next_update: null,
+    date_reported: new Date('2026-07-26T05:45:00.000Z'),
+    updated_on: new Date('2026-07-26T05:52:04.000Z'),
+    date_closed: new Date('2026-07-26T05:52:04.000Z'),
+    fields_json: fields
+  }), {
+    srnumber: '311-28367645',
+    status: 'Closed',
+    problem: 'Noise - Street/Sidewalk',
+    problemDetails: 'Loud Music/Party',
+    additionalDetails: null,
+    address: '1 CENTRE STREET, MANHATTAN, NY, 10007',
+    nextUpdate: null,
+    dateReported: '2026-07-26T05:45:00.000Z',
+    updatedOn: '2026-07-26T05:52:04.000Z',
+    dateClosed: '2026-07-26T05:52:04.000Z',
+    fields
+  });
 });
 
 test('returns null when the database, table, or portal row is absent', t => {

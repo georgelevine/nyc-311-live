@@ -11,6 +11,7 @@ const {
   hasText
 } = require('../record-availability');
 const { buildLiveMapPayload } = require('../live-map-data');
+const { storedPortalDetailFromRow } = require('../stored-portal-detail');
 
 const app = express();
 const PORT = Number(process.env.PORT || 10000);
@@ -218,11 +219,24 @@ app.get('/api/portal-detail', async (req, res) => {
   if (!/^[0-9a-f-]{36}$/i.test(portalId)) return res.status(400).json({ error: 'valid id parameter required' });
   try {
     const requestResult = await query(
-      'SELECT srnumber, suffix FROM live_portal_requests WHERE portal_id=$1',
+      `SELECT live.srnumber, live.suffix, details.status, details.problem,
+              details.problem_details, details.additional_details, details.address,
+              details.next_update, details.date_reported, details.updated_on,
+              details.date_closed, details.fields_json, details.archived_at
+       FROM live_portal_requests AS live
+       LEFT JOIN portal_requests AS details ON details.srnumber=live.srnumber
+       WHERE live.portal_id=$1`,
       [portalId]
     );
     if (!requestResult.rowCount) return res.status(404).json({ error: 'request is not in the cloud archive' });
     const row = requestResult.rows[0];
+    if (req.query.preferArchive === '1') {
+      if (!row.archived_at) {
+        return res.status(404).json({ error: 'Submitted details are still being saved' });
+      }
+      res.setHeader('X-Detail-Source', 'archive');
+      return res.json(storedPortalDetailFromRow(row));
+    }
     const parsed = await fetchDetailById(row.srnumber, portalId);
     if (parsed.outcome !== 'found') throw new Error(parsed.error || 'Portal detail was not found');
     const detail = parsed.record.dateClosed && !isClosedStatus(parsed.record.status)

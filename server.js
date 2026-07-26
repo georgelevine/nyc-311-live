@@ -845,6 +845,7 @@ app.get('/api/portal-detail', async (req, res) => {
       res.setHeader('X-Detail-Source', 'archive');
       return res.json(storedDetail);
     }
+    return res.status(404).json({ error: 'Submitted details are still being saved' });
   }
 
   const ck = cacheKey({ endpoint: 'portal-detail', id });

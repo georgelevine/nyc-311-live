@@ -9,7 +9,15 @@ function textOrNull(value) {
   return text || null;
 }
 
+function timestampOrNull(value) {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  }
+  return textOrNull(value);
+}
+
 function safelyParseFields(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value;
   if (typeof value !== 'string' || !value.trim()) return {};
   try {
     const fields = JSON.parse(value);
@@ -19,6 +27,23 @@ function safelyParseFields(value) {
   } catch {
     return {};
   }
+}
+
+function storedPortalDetailFromRow(row) {
+  if (!row) return null;
+  return {
+    srnumber: textOrNull(row.srnumber),
+    status: textOrNull(row.status),
+    problem: textOrNull(row.problem),
+    problemDetails: textOrNull(row.problem_details),
+    additionalDetails: textOrNull(row.additional_details),
+    address: textOrNull(row.address),
+    nextUpdate: textOrNull(row.next_update),
+    dateReported: timestampOrNull(row.date_reported),
+    updatedOn: timestampOrNull(row.updated_on),
+    dateClosed: timestampOrNull(row.date_closed),
+    fields: safelyParseFields(row.fields_json)
+  };
 }
 
 function readStoredPortalDetail(databasePath, portalId, {
@@ -46,22 +71,10 @@ function readStoredPortalDetail(databasePath, portalId, {
     `).get(normalizedPortalId);
     if (!row) return null;
 
-    return {
-      srnumber: textOrNull(row.srnumber),
-      status: textOrNull(row.status),
-      problem: textOrNull(row.problem),
-      problemDetails: textOrNull(row.problem_details),
-      additionalDetails: textOrNull(row.additional_details),
-      address: textOrNull(row.address),
-      nextUpdate: textOrNull(row.next_update),
-      dateReported: textOrNull(row.date_reported),
-      updatedOn: textOrNull(row.updated_on),
-      dateClosed: textOrNull(row.date_closed),
-      fields: safelyParseFields(row.fields_json)
-    };
+    return storedPortalDetailFromRow(row);
   } finally {
     if (database) database.close();
   }
 }
 
-module.exports = { readStoredPortalDetail };
+module.exports = { readStoredPortalDetail, storedPortalDetailFromRow };

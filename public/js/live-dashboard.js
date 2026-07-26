@@ -671,6 +671,8 @@
       };
       portalDetailByNumber.set(record.srnumber, savedDetail);
       renderSubmittedDetails(savedDetail, 'stored');
+    } else if (record.public_details_state === 'pending') {
+      renderSubmittedDetails(null, 'pending');
     }
   }
 
@@ -1095,6 +1097,15 @@
     const updatedRow = document.getElementById('detail-updated-row');
     const closedRow = document.getElementById('detail-closed-row');
     const nextUpdateRow = document.getElementById('detail-next-update-row');
+    if (state === 'pending') {
+      setDetailBadge('pending');
+      problemDetails.textContent = 'Submitted details are still being saved.';
+      additionalDetails.textContent = '';
+      updatedRow.classList.add('hidden');
+      closedRow.classList.add('hidden');
+      nextUpdateRow.classList.add('hidden');
+      return;
+    }
     if (state === 'loading') {
       setDetailBadge('loading');
       problemDetails.textContent = 'Checking submitted details…';
@@ -1167,6 +1178,10 @@
       renderSubmittedDetails(cached, 'success');
       return;
     }
+    if (record.public_details_state === 'pending') {
+      renderSubmittedDetails(null, 'pending');
+      return;
+    }
     const portalId = portalIdFor(record);
     if (!portalId) {
       renderSubmittedDetails(null, 'error');
@@ -1175,6 +1190,12 @@
     renderSubmittedDetails(null, 'loading');
     try {
       const response = await fetch(`/api/portal-detail?id=${encodeURIComponent(portalId)}&preferArchive=1`, { cache: 'no-store' });
+      if (response.status === 404) {
+        if (sequence === detailLoadSequence && selectedNumber === record.srnumber) {
+          renderSubmittedDetails(null, 'pending');
+        }
+        return;
+      }
       if (!response.ok) throw new Error(`Detail service returned ${response.status}`);
       const responseSource = String(response.headers.get('X-Detail-Source') || '').toLowerCase();
       const portalDetail = await response.json();
