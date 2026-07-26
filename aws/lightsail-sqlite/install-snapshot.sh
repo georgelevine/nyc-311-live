@@ -92,6 +92,7 @@ declare -A allowed_env_keys=(
   [EMAIL_SUBSCRIBE_ALL_NEW]=1
   [EMAIL_ALL_START_AT]=1
   [EMAIL_SUBSCRIPTION_DELAY_MS]=1
+  [EMAIL_SUBSCRIPTION_WORKERS]=1
   [INITIAL_EMAIL_ENDPOINT]=1
   [SCHEDULED_OPEN_FOLLOWUPS_ENABLED]=1
 )
@@ -160,6 +161,10 @@ require_integer_range AUDIT_DELAY_MINUTES 30 1440
 require_integer_range DETAIL_REQUEST_DELAY_MS 2500 60000
 require_integer_range AUDIT_MAX_PARALLEL 1 8
 require_integer_range AUDIT_REQUEST_DELAY_MS 500 60000
+require_integer_range EMAIL_SUBSCRIPTION_DELAY_MS 1000 60000
+if [[ -n "${EMAIL_SUBSCRIPTION_WORKERS:-}" ]]; then
+  require_integer_range EMAIL_SUBSCRIPTION_WORKERS 1 4
+fi
 if [[ -n "${SITE_ADDRESS:-}" ]]; then
   if [[ ! "${SITE_ADDRESS}" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ || "${SITE_ADDRESS}" != *.* ]]; then
     echo "SITE_ADDRESS must be a DNS hostname without a scheme or path." >&2

@@ -1670,6 +1670,7 @@
     const retry = finiteStat(subscriptions.retry);
     const closing = finiteStat(stats.closure_refreshes_pending);
     const finalized = finiteStat(stats.closures_finalized);
+    const detailsPending = finiteStat(stats.details_pending);
     const usableEmails = finiteStat(deliveries.usable);
     const totalEmails = finiteStat(deliveries.total);
     const closedEmails = finiteStat(deliveries.closed);
@@ -1698,9 +1699,21 @@
     statusClarityElements.portalClosedNote.textContent = closing
       ? `${closing.toLocaleString()} ${closing === 1 ? 'closure is' : 'closures are'} being verified`
       : 'No final verifications waiting';
-    statusClarityElements.note.textContent = mode.key === 'email_primary'
-      ? 'Email is the primary realtime signal. Closed emails are fast; Portal verification saves the final proof.'
-      : 'Email notices are the fast signal. Portal verification is the saved final proof.';
+    const subscriptionBacklog = pending + processing + retry;
+    const catchup = [
+      subscriptionBacklog
+        ? `${subscriptionBacklog.toLocaleString()} email ${subscriptionBacklog === 1 ? 'subscription' : 'subscriptions'}`
+        : '',
+      detailsPending
+        ? `${detailsPending.toLocaleString()} submitted-detail ${detailsPending === 1 ? 'page' : 'pages'}`
+        : ''
+    ].filter(Boolean);
+    statusClarityElements.root.dataset.health = catchup.length ? 'catching-up' : 'current';
+    statusClarityElements.note.textContent = catchup.length
+      ? `Catching up: ${catchup.join(' and ')} queued. New requests are prioritized while older records drain in the background.`
+      : mode.key === 'email_primary'
+        ? 'Email is the primary realtime signal. Closed emails are fast; Portal verification saves the final proof.'
+        : 'Email notices are the fast signal. Portal verification is the saved final proof.';
     statusClarityElements.root.setAttribute('aria-busy', 'false');
   }
 

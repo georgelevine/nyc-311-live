@@ -6,12 +6,18 @@ deploy_host="${LIGHTSAIL_HOST:-34.201.212.109}"
 deploy_user="${LIGHTSAIL_USER:-ubuntu}"
 deploy_key="${LIGHTSAIL_KEY:-${HOME}/Downloads/LightsailDefaultKey-us-east-1.pem}"
 public_health_url="${PUBLIC_HEALTH_URL:-https://311.georgelevine.com/api/health}"
+deployment_scope="${DEPLOY_SCOPE:-web}"
 deploy_started_epoch="$(date +%s)"
 deploy_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
+if [[ "${deployment_scope}" != "web" && "${deployment_scope}" != "service" ]]; then
+  echo "DEPLOY_SCOPE must be web or service." >&2
+  exit 1
+fi
+
 cd "${repository_directory}"
 if [[ -n "$(git status --porcelain)" ]]; then
-  echo "Commit the web change before deploying it." >&2
+  echo "Commit the ${deployment_scope} change before deploying it." >&2
   exit 1
 fi
 if [[ "$(git branch --show-current)" != "main" ]]; then
@@ -76,7 +82,7 @@ ssh "${ssh_options[@]}" "${deploy_user}@${deploy_host}" \
      '/var/lib/nyc-311-live-releases/inbox/${release_sha}.tar.gz' && \
    rm -f '${remote_upload}' && \
    sudo /usr/local/sbin/nyc311-deploy-ui-release \
-     '${release_sha}' '${archive_sha256}'"
+     '${release_sha}' '${archive_sha256}' '${deployment_scope}'"
 remote_activate_seconds=$(($(date +%s) - phase_started_epoch))
 
 phase_started_epoch="$(date +%s)"
@@ -115,5 +121,5 @@ ssh "${ssh_options[@]}" "${deploy_user}@${deploy_host}" \
      /var/lib/nyc-311-live/release-info.json && \
    rm -f '${remote_release_info}'"
 
-echo "Deployed web release ${release_sha} to https://311.georgelevine.com"
+echo "Deployed ${deployment_scope} release ${release_sha} to https://311.georgelevine.com"
 echo "Deployment timing: total ${total_seconds}s (tests ${tests_seconds}s, package+upload ${package_upload_seconds}s, server switch ${remote_activate_seconds}s, live check ${visible_seconds}s)"

@@ -283,8 +283,16 @@ function recoverStaleProcessingSubscriptions(database, {
   `).run(nowIso, nowIso, staleBefore).changes || 0);
 }
 
-function claimSubscription(database, now = new Date()) {
+function claimSubscription(database, now = new Date(), {
+  order = 'oldest'
+} = {}) {
+  if (!['oldest', 'newest'].includes(order)) {
+    throw new TypeError('order must be oldest or newest');
+  }
   const nowIso = now.toISOString();
+  const orderSql = order === 'newest'
+    ? 'request.suffix DESC,job.next_attempt_at,job.created_at'
+    : 'job.next_attempt_at,job.created_at';
   database.exec('BEGIN IMMEDIATE');
   try {
     recoverStaleProcessingSubscriptions(database, { now });
@@ -294,7 +302,7 @@ function claimSubscription(database, now = new Date()) {
       JOIN nyc311_email_aliases alias ON alias.id=job.alias_id
       JOIN live_portal_requests request USING(srnumber)
       WHERE job.state IN ('pending','retry') AND job.next_attempt_at<=?
-      ORDER BY job.next_attempt_at,job.created_at LIMIT 1
+      ORDER BY ${orderSql} LIMIT 1
     `).get(nowIso);
     if (!row) {
       database.exec('COMMIT');

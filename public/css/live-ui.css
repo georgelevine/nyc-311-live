@@ -781,6 +781,12 @@ a:focus-visible {
   line-height: 1.45;
 }
 
+.status-clarity[data-health="catching-up"] .status-clarity-note {
+  border-color: #efd19e;
+  color: #765116;
+  background: #fff8e9;
+}
+
 .response-times-header time {
   flex: none;
   padding-top: 3px;

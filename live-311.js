@@ -69,6 +69,12 @@ const EMAIL_SUBSCRIPTION_DELAY_MS = Math.max(
   1000,
   Number(process.env.EMAIL_SUBSCRIPTION_DELAY_MS || 5000)
 );
+const configuredEmailSubscriptionWorkers = Number(
+  process.env.EMAIL_SUBSCRIPTION_WORKERS || 2
+);
+const EMAIL_SUBSCRIPTION_WORKERS = Number.isFinite(configuredEmailSubscriptionWorkers)
+  ? Math.max(1, Math.min(4, Math.trunc(configuredEmailSubscriptionWorkers)))
+  : 2;
 const SCHEDULED_OPEN_FOLLOWUPS_ENABLED = scheduledOpenFollowupsEnabled(process.env);
 const SQLITE_SYNCHRONOUS = resolveSynchronousMode(process.env.SQLITE_SYNCHRONOUS);
 const DATABASE_PATH = process.env.DATABASE_PATH
@@ -280,7 +286,10 @@ const nextDetailRequest = db.prepare(`
     AND NOT EXISTS (
       SELECT 1 FROM request_followup_queue AS followup
       WHERE followup.srnumber = queue.srnumber
-        AND followup.last_checked_at IS NOT NULL
+        AND (
+          followup.state = 'closing'
+          OR followup.last_checked_at IS NOT NULL
+        )
     )
   ORDER BY live.suffix DESC
   LIMIT 1
@@ -466,7 +475,7 @@ function startEmailSubscriptions() {
       && !EMAIL_SUBSCRIBE_PRECINCTS.length
       && !EMAIL_SUBSCRIBE_ALL_NEW)
       || emailSubscriptionPromise) return;
-  emailSubscriptionPromise = (async () => {
+  const enqueueAndSendInitialAlerts = async () => {
     while (!detailHydrationStopping) {
       try {
         const added = enqueueBidSubscriptions(db, EMAIL_SUBSCRIBE_BID_IDS);
@@ -524,9 +533,19 @@ function startEmailSubscriptions() {
           await sleep(EMAIL_SUBSCRIPTION_DELAY_MS);
           continue;
         }
-        const job = claimSubscription(db);
+      } catch (error) {
+        console.error(JSON.stringify({ email_subscription_enqueue_error: error.message }));
+      }
+      await sleep(5000);
+    }
+  };
+  const runSubscriptionWorker = async (workerIndex) => {
+    const order = workerIndex === 0 ? 'newest' : 'oldest';
+    while (!detailHydrationStopping) {
+      try {
+        const job = claimSubscription(db, new Date(), { order });
         if (!job) {
-          await sleep(5000);
+          await sleep(2000);
           continue;
         }
         try {
@@ -545,13 +564,17 @@ function startEmailSubscriptions() {
           console.log(JSON.stringify({
             email_subscription: 'subscribed',
             srnumber: job.srnumber,
-            bid_id: job.bid_id
+            bid_id: job.bid_id,
+            worker: workerIndex + 1,
+            queue_order: order
           }));
         } catch (error) {
           retrySubscription(db, job, error);
           console.error(JSON.stringify({
             email_subscription: 'retry',
             srnumber: job.srnumber,
+            worker: workerIndex + 1,
+            queue_order: order,
             error: error.message
           }));
         }
@@ -560,7 +583,14 @@ function startEmailSubscriptions() {
       }
       await sleep(EMAIL_SUBSCRIPTION_DELAY_MS);
     }
-  })();
+  };
+  emailSubscriptionPromise = Promise.all([
+    enqueueAndSendInitialAlerts(),
+    ...Array.from(
+      { length: EMAIL_SUBSCRIPTION_WORKERS },
+      (_, workerIndex) => runSubscriptionWorker(workerIndex)
+    )
+  ]);
 }
 
 function suffixOf(number) {
@@ -825,15 +855,13 @@ async function fetchLiveDetail(row) {
   }
 }
 
-function nextDetailWork(now) {
+function nextFollowUpDetailWork(now) {
   const closing = nextClosingFollowUp.get(now);
-  const initial = closing ? null : nextDetailRequest.get(now);
-  const open = closing || initial || !SCHEDULED_OPEN_FOLLOWUPS_ENABLED
+  const open = closing || !SCHEDULED_OPEN_FOLLOWUPS_ENABLED
     ? null
     : nextOpenFollowUp.get(now);
   return chooseDetailWork({
     closing,
-    initial,
     open,
     scheduledOpenFollowups: SCHEDULED_OPEN_FOLLOWUPS_ENABLED
   });
@@ -842,139 +870,150 @@ function nextDetailWork(now) {
 let detailHydrationPromise = null;
 let detailHydrationPaused = false;
 
+async function processDetailWork(row) {
+  let workTimestamp = new Date().toISOString();
+  try {
+    const fetchedDetail = await fetchLiveDetail(row);
+    workTimestamp = new Date().toISOString();
+    const currentJob = closureTracker.getFollowUp.get(row.srnumber);
+    const currentStatusVersion = latestStatusVersion.get(row.srnumber).version;
+    const statusChangedInFlight = Number(currentStatusVersion) !== Number(row.status_version);
+    const followUpChangedInFlight = row.work_kind !== 'initial'
+      && (!currentJob || currentJob.state !== row.state
+        || Number(currentJob.closure_cycle) !== Number(row.closure_cycle)
+        || currentJob.updated_at !== row.updated_at);
+    if (statusChangedInFlight || followUpChangedInFlight) {
+      console.log(JSON.stringify({
+        stale_detail_work_ignored: row.srnumber,
+        selected_state: row.state || 'initial',
+        selected_cycle: row.closure_cycle || 0,
+        selected_status_version: row.status_version,
+        current_state: currentJob && currentJob.state,
+        current_cycle: currentJob && currentJob.closure_cycle,
+        current_status_version: currentStatusVersion
+      }));
+      return;
+    }
+    const detail = fetchedDetail.dateClosed && !isClosedStatus(fetchedDetail.status)
+      ? { ...fetchedDetail, status: 'Closed' }
+      : fetchedDetail;
+    db.exec('BEGIN');
+    try {
+      const current = getLiveRequest.get(row.srnumber);
+      const followUp = closureTracker.getFollowUp.get(row.srnumber);
+      const preserveMapClosure = current
+        && isClosedStatus(current.status)
+        && !isClosedStatus(detail.status)
+        && followUp
+        && followUp.state === 'closing';
+      const effectiveStatus = preserveMapClosure
+        ? current.status
+        : (detail.status || (current && current.status) || null);
+
+      if (current && detail.status && !preserveMapClosure
+          && !statusesMatch(current.status, detail.status)) {
+        closureTracker.observeStatus({
+          srnumber: row.srnumber,
+          previousStatus: current.status,
+          status: detail.status,
+          source: 'detail',
+          effectiveAt: isClosedStatus(detail.status)
+            ? (detail.dateClosed || detail.updatedOn)
+            : detail.updatedOn,
+          observedAt: workTimestamp,
+          snapshot: detail
+        });
+        updateLiveStatus.run(detail.status, row.srnumber);
+      }
+
+      const detailPortalUrl = detail.portalId
+        ? `https://portal.311.nyc.gov/sr-details/?id=${detail.portalId}`
+        : `https://portal.311.nyc.gov/sr-details/?srnum=${detail.srnumber}`;
+      saveDetailedRequest.run(
+        detail.srnumber,
+        row.suffix,
+        detail.portalId,
+        detail.status,
+        detail.problem,
+        detail.problemDetails,
+        detail.additionalDetails,
+        detail.address,
+        detail.nextUpdate,
+        detail.dateReported,
+        detail.updatedOn,
+        detail.dateClosed,
+        JSON.stringify(detail.fields),
+        detailPortalUrl,
+        workTimestamp
+      );
+      markDetailFound.run(workTimestamp, row.srnumber);
+      const followUpResult = closureTracker.scheduleAfterDetail({
+        srnumber: row.srnumber,
+        portalId: detail.portalId,
+        effectiveStatus,
+        detail,
+        source: row.work_kind === 'closing' ? 'closure_followup' : 'detail',
+        checkedAt: workTimestamp
+      });
+      db.exec('COMMIT');
+      if (followUpResult.snapshotAdded || followUpResult.finalized) {
+        console.log(JSON.stringify({
+          closure_refresh: row.srnumber,
+          source: row.work_kind,
+          status: detail.status,
+          date_closed: detail.dateClosed,
+          finalized: followUpResult.finalized,
+          snapshot_added: followUpResult.snapshotAdded
+        }));
+      }
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+  } catch (error) {
+    workTimestamp = new Date().toISOString();
+    const retryDelay = Math.min(
+      15 * 60_000,
+      30_000 * (2 ** Math.min(Number(row.attempts || 0), 5))
+    );
+    const retryAt = new Date(Date.now() + retryDelay).toISOString();
+    if (row.work_kind === 'closing' || row.work_kind === 'followup') {
+      const currentJob = closureTracker.getFollowUp.get(row.srnumber);
+      const currentStatusVersion = latestStatusVersion.get(row.srnumber).version;
+      if (currentJob && currentJob.state === row.state
+          && Number(currentJob.closure_cycle) === Number(row.closure_cycle)
+          && currentJob.updated_at === row.updated_at
+          && Number(currentStatusVersion) === Number(row.status_version)) {
+        closureTracker.markFollowUpError(row, error, workTimestamp);
+      }
+    } else {
+      markDetailRetry.run(retryAt, error.message, workTimestamp, row.srnumber);
+    }
+  }
+}
+
+async function runDetailHydrationLane(nextWork) {
+  while (!detailHydrationStopping) {
+    if (detailHydrationPaused) {
+      await sleep(1000);
+      continue;
+    }
+    const row = nextWork(new Date().toISOString());
+    if (!row) {
+      await sleep(3000);
+      continue;
+    }
+    await processDetailWork(row);
+    await sleep(DETAIL_REQUEST_DELAY_MS);
+  }
+}
+
 function startDetailHydration() {
   if (detailHydrationPromise) return;
-  detailHydrationPromise = (async () => {
-    while (!detailHydrationStopping) {
-      if (detailHydrationPaused) {
-        await sleep(1000);
-        continue;
-      }
-      const row = nextDetailWork(new Date().toISOString());
-      if (!row) {
-        await sleep(3000);
-        continue;
-      }
-      let workTimestamp = new Date().toISOString();
-      try {
-        const fetchedDetail = await fetchLiveDetail(row);
-        workTimestamp = new Date().toISOString();
-        const currentJob = closureTracker.getFollowUp.get(row.srnumber);
-        const currentStatusVersion = latestStatusVersion.get(row.srnumber).version;
-        const statusChangedInFlight = Number(currentStatusVersion) !== Number(row.status_version);
-        const followUpChangedInFlight = row.work_kind !== 'initial'
-          && (!currentJob || currentJob.state !== row.state
-            || Number(currentJob.closure_cycle) !== Number(row.closure_cycle)
-            || currentJob.updated_at !== row.updated_at);
-        if (statusChangedInFlight || followUpChangedInFlight) {
-          console.log(JSON.stringify({
-            stale_detail_work_ignored: row.srnumber,
-            selected_state: row.state || 'initial',
-            selected_cycle: row.closure_cycle || 0,
-            selected_status_version: row.status_version,
-            current_state: currentJob && currentJob.state,
-            current_cycle: currentJob && currentJob.closure_cycle,
-            current_status_version: currentStatusVersion
-          }));
-          await sleep(DETAIL_REQUEST_DELAY_MS);
-          continue;
-        }
-        const detail = fetchedDetail.dateClosed && !isClosedStatus(fetchedDetail.status)
-          ? { ...fetchedDetail, status: 'Closed' }
-          : fetchedDetail;
-        db.exec('BEGIN');
-        try {
-          const current = getLiveRequest.get(row.srnumber);
-          const followUp = closureTracker.getFollowUp.get(row.srnumber);
-          const preserveMapClosure = current
-            && isClosedStatus(current.status)
-            && !isClosedStatus(detail.status)
-            && followUp
-            && followUp.state === 'closing';
-          const effectiveStatus = preserveMapClosure
-            ? current.status
-            : (detail.status || (current && current.status) || null);
-
-          if (current && detail.status && !preserveMapClosure
-              && !statusesMatch(current.status, detail.status)) {
-            closureTracker.observeStatus({
-              srnumber: row.srnumber,
-              previousStatus: current.status,
-              status: detail.status,
-              source: 'detail',
-              effectiveAt: isClosedStatus(detail.status)
-                ? (detail.dateClosed || detail.updatedOn)
-                : detail.updatedOn,
-              observedAt: workTimestamp,
-              snapshot: detail
-            });
-            updateLiveStatus.run(detail.status, row.srnumber);
-          }
-
-          const detailPortalUrl = detail.portalId
-            ? `https://portal.311.nyc.gov/sr-details/?id=${detail.portalId}`
-            : `https://portal.311.nyc.gov/sr-details/?srnum=${detail.srnumber}`;
-          saveDetailedRequest.run(
-            detail.srnumber,
-            row.suffix,
-            detail.portalId,
-            detail.status,
-            detail.problem,
-            detail.problemDetails,
-            detail.additionalDetails,
-            detail.address,
-            detail.nextUpdate,
-            detail.dateReported,
-            detail.updatedOn,
-            detail.dateClosed,
-            JSON.stringify(detail.fields),
-            detailPortalUrl,
-            workTimestamp
-          );
-          markDetailFound.run(workTimestamp, row.srnumber);
-          const followUpResult = closureTracker.scheduleAfterDetail({
-            srnumber: row.srnumber,
-            portalId: detail.portalId,
-            effectiveStatus,
-            detail,
-            source: row.work_kind === 'closing' ? 'closure_followup' : 'detail',
-            checkedAt: workTimestamp
-          });
-          db.exec('COMMIT');
-          if (followUpResult.snapshotAdded || followUpResult.finalized) {
-            console.log(JSON.stringify({
-              closure_refresh: row.srnumber,
-              source: row.work_kind,
-              status: detail.status,
-              date_closed: detail.dateClosed,
-              finalized: followUpResult.finalized,
-              snapshot_added: followUpResult.snapshotAdded
-            }));
-          }
-        } catch (error) {
-          db.exec('ROLLBACK');
-          throw error;
-        }
-      } catch (error) {
-        workTimestamp = new Date().toISOString();
-        const retryDelay = Math.min(15 * 60_000, 30_000 * (2 ** Math.min(Number(row.attempts || 0), 5)));
-        const retryAt = new Date(Date.now() + retryDelay).toISOString();
-        if (row.work_kind === 'closing' || row.work_kind === 'followup') {
-          const currentJob = closureTracker.getFollowUp.get(row.srnumber);
-          const currentStatusVersion = latestStatusVersion.get(row.srnumber).version;
-          if (currentJob && currentJob.state === row.state
-              && Number(currentJob.closure_cycle) === Number(row.closure_cycle)
-              && currentJob.updated_at === row.updated_at
-              && Number(currentStatusVersion) === Number(row.status_version)) {
-            closureTracker.markFollowUpError(row, error, workTimestamp);
-          }
-        } else {
-          markDetailRetry.run(retryAt, error.message, workTimestamp, row.srnumber);
-        }
-      }
-      await sleep(DETAIL_REQUEST_DELAY_MS);
-    }
-  })();
+  detailHydrationPromise = Promise.all([
+    runDetailHydrationLane(now => nextDetailRequest.get(now)),
+    runDetailHydrationLane(nextFollowUpDetailWork)
+  ]);
 }
 
 async function fetchLatest() {
@@ -1318,12 +1357,20 @@ async function main() {
     monitoringStateAt
   );
   setState.run('status_monitoring_mode', monitoringMode(process.env), monitoringStateAt);
+  setState.run(
+    'email_subscription_workers',
+    String(EMAIL_SUBSCRIPTION_WORKERS),
+    monitoringStateAt
+  );
+  setState.run('detail_hydration_lanes', '2', monitoringStateAt);
   console.log(JSON.stringify({
     database: DATABASE_PATH,
     poll_interval_seconds: currentPollIntervalSeconds(),
     duration_seconds: LIVE_DURATION_SECONDS || null,
     delayed_audit_minutes: AUDIT_DELAY_MINUTES,
     detail_request_delay_ms: DETAIL_REQUEST_DELAY_MS,
+    detail_hydration_lanes: 2,
+    email_subscription_workers: EMAIL_SUBSCRIPTION_WORKERS,
     sqlite_synchronous: SQLITE_SYNCHRONOUS,
     audit_discoveries_reconciled: startupPromotion.promoted,
     audit_promotion_conflicts: startupPromotion.conflicts,

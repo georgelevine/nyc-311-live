@@ -9,6 +9,7 @@
     "start": "node server.js",
     "dev": "node server.js",
     "deploy:ui": "./scripts/deploy-ui.sh",
+    "deploy:service": "DEPLOY_SCOPE=service ./scripts/deploy-ui.sh",
     "collect:trial": "node collect-311.js",
     "probe:area": "node probe-311-area.js",
     "archive:scan": "node archive-311.js",

@@ -855,7 +855,10 @@ app.get('/api/portal-detail', async (req, res) => {
   }
 
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 7000);
+  // Portal detail pages occasionally take longer than seven seconds even when
+  // the map feed is healthy. Match the collector's tolerance so a dashboard
+  // click can still hydrate and persist a detail row during a slow response.
+  const timeout = setTimeout(() => controller.abort(), 15_000);
   try {
     res.setHeader('X-Detail-Source', 'portal');
     const response = await fetch(`https://portal.311.nyc.gov/sr-details/?id=${encodeURIComponent(id)}`, {

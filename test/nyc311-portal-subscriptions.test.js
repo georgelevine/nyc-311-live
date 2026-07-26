@@ -293,3 +293,46 @@ test('recovers only stale processing subscriptions and can claim the recovered j
   `).get(claimed.srnumber).attempts, 2);
   database.close();
 });
+
+test('newest subscription claims keep live arrivals ahead of an older catch-up backlog', () => {
+  const database = new DatabaseSync(':memory:');
+  database.exec(`
+    CREATE TABLE live_portal_requests (
+      srnumber TEXT PRIMARY KEY,portal_id TEXT,suffix INTEGER
+    );
+    CREATE TABLE nyc311_email_aliases (
+      id INTEGER PRIMARY KEY,recipient_address TEXT
+    );
+    CREATE TABLE nyc311_email_subscription_jobs (
+      srnumber TEXT PRIMARY KEY,alias_id INTEGER,bid_id INTEGER,state TEXT,
+      attempts INTEGER,next_attempt_at TEXT,last_error TEXT,created_at TEXT,
+      updated_at TEXT,subscribed_at TEXT,scope_type TEXT,scope_id INTEGER,scope_label TEXT
+    );
+    INSERT INTO live_portal_requests VALUES
+      ('311-28300001','11111111-1111-1111-1111-111111111111',28300001),
+      ('311-28300002','22222222-2222-2222-2222-222222222222',28300002),
+      ('311-28300003','33333333-3333-3333-3333-333333333333',28300003);
+    INSERT INTO nyc311_email_aliases VALUES
+      (1,'first@track.opendata.support'),
+      (2,'second@track.opendata.support'),
+      (3,'third@track.opendata.support');
+    INSERT INTO nyc311_email_subscription_jobs VALUES
+      ('311-28300001',1,0,'pending',0,'2026-07-24T19:00:00.000Z',NULL,
+       '2026-07-24T19:00:00.000Z','2026-07-24T19:00:00.000Z',NULL,'all',0,'All NYC311'),
+      ('311-28300002',2,0,'pending',0,'2026-07-24T19:00:00.000Z',NULL,
+       '2026-07-24T19:01:00.000Z','2026-07-24T19:01:00.000Z',NULL,'all',0,'All NYC311'),
+      ('311-28300003',3,0,'pending',0,'2026-07-24T19:00:00.000Z',NULL,
+       '2026-07-24T19:02:00.000Z','2026-07-24T19:02:00.000Z',NULL,'all',0,'All NYC311');
+  `);
+  const now = new Date('2026-07-24T20:00:00.000Z');
+
+  assert.equal(claimSubscription(database, now, { order: 'newest' }).srnumber,
+    '311-28300003');
+  assert.equal(claimSubscription(database, now, { order: 'oldest' }).srnumber,
+    '311-28300001');
+  assert.throws(
+    () => claimSubscription(database, now, { order: 'sideways' }),
+    /order must be oldest or newest/
+  );
+  database.close();
+});

@@ -6,19 +6,24 @@ if [[ ${EUID} -ne 0 ]]; then
   exit 1
 fi
 
-if [[ $# -ne 2 ]]; then
-  echo "Usage: deploy-ui-release.sh GIT_SHA ARCHIVE_SHA256" >&2
+if [[ $# -lt 2 || $# -gt 3 ]]; then
+  echo "Usage: deploy-ui-release.sh GIT_SHA ARCHIVE_SHA256 [web|service]" >&2
   exit 1
 fi
 
 release_sha="$1"
 archive_sha256="$2"
+deployment_scope="${3:-web}"
 if [[ ! "${release_sha}" =~ ^[0-9a-f]{40}$ ]]; then
   echo "The release must be identified by a full lowercase Git SHA." >&2
   exit 1
 fi
 if [[ ! "${archive_sha256}" =~ ^[0-9a-f]{64}$ ]]; then
   echo "The archive checksum must be a lowercase SHA-256 digest." >&2
+  exit 1
+fi
+if [[ "${deployment_scope}" != "web" && "${deployment_scope}" != "service" ]]; then
+  echo "Deployment scope must be web or service." >&2
   exit 1
 fi
 
@@ -80,22 +85,24 @@ fi
 # server.js dashboard endpoints, and read-only metrics modules. It cannot
 # silently deploy collector, database, dependency, or general infrastructure
 # changes.
-if non_ui_changes="$(diff --recursive --brief \
-  --exclude=public --exclude=test --exclude=.env --exclude=RELEASE_COMMIT \
-  --exclude=server.js \
-  --exclude=sqlite-email-metrics.js --exclude=email-metrics-presentation.js \
-  --exclude=deploy-ui-release.sh --exclude=deploy-ui.sh \
-  "${current_directory}" "${staging_directory}")"; then
-  true
-else
-  diff_status=$?
-  if [[ ${diff_status} -ne 1 ]]; then
-    echo "Could not compare the current and proposed releases." >&2
+if [[ "${deployment_scope}" == "web" ]]; then
+  if non_ui_changes="$(diff --recursive --brief \
+    --exclude=public --exclude=test --exclude=.env --exclude=RELEASE_COMMIT \
+    --exclude=server.js \
+    --exclude=sqlite-email-metrics.js --exclude=email-metrics-presentation.js \
+    --exclude=deploy-ui-release.sh --exclude=deploy-ui.sh \
+    "${current_directory}" "${staging_directory}")"; then
+    true
+  else
+    diff_status=$?
+    if [[ ${diff_status} -ne 1 ]]; then
+      echo "Could not compare the current and proposed releases." >&2
+      exit 1
+    fi
+    echo "Refusing the web fast path because protected application files changed:" >&2
+    printf '%s\n' "${non_ui_changes}" >&2
     exit 1
   fi
-  echo "Refusing the web fast path because protected application files changed:" >&2
-  printf '%s\n' "${non_ui_changes}" >&2
-  exit 1
 fi
 
 current_env="${current_directory}/aws/lightsail-sqlite/.env"
@@ -131,6 +138,8 @@ if [[ "${image_version}" != "${release_sha}" ]]; then
 fi
 
 collector_before="$(cd "${current_directory}/aws/lightsail-sqlite" && docker compose ps -q collector)"
+baseline_poll="$(sqlite3 /var/lib/nyc-311-live/portal-archive.sqlite \
+  "SELECT value FROM live_monitor_state WHERE key='last_successful_poll_at';")"
 mv -- "${current_directory}" "${previous_directory}"
 mv -- "${staging_directory}" "${current_directory}"
 
@@ -142,14 +151,22 @@ rollback() {
   if [[ -d "${previous_directory}" ]]; then
     mv -- "${previous_directory}" "${current_directory}"
     cd "${current_directory}/aws/lightsail-sqlite"
-    docker compose up -d --no-build web
+    if [[ "${deployment_scope}" == "service" ]]; then
+      docker compose up -d --no-build web collector
+    else
+      docker compose up -d --no-build web
+    fi
   fi
-  echo "UI deployment failed and the previous release was restored." >&2
+  echo "${deployment_scope} deployment failed and the previous release was restored." >&2
 }
 trap rollback ERR
 
 cd "${current_directory}/aws/lightsail-sqlite"
-docker compose up -d --no-build web
+if [[ "${deployment_scope}" == "service" ]]; then
+  docker compose up -d --no-build web collector
+else
+  docker compose up -d --no-build web
+fi
 
 healthy=0
 for _attempt in $(seq 1 30); do
@@ -175,11 +192,47 @@ if [[ "${running_image_version}" != "${release_sha}" ]]; then
   false
 fi
 collector_after="$(docker compose ps -q collector)"
-if [[ -n "${collector_before}" && "${collector_after}" != "${collector_before}" ]]; then
+if [[ "${deployment_scope}" == "web"
+    && -n "${collector_before}" && "${collector_after}" != "${collector_before}" ]]; then
   echo "The collector changed during a UI-only deployment." >&2
   false
+fi
+if [[ "${deployment_scope}" == "service" ]]; then
+  collector_image_version="$(docker inspect \
+    --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' \
+    "${collector_after}")"
+  if [[ "${collector_image_version}" != "${release_sha}" ]]; then
+    echo "The running collector is not the requested release." >&2
+    false
+  fi
+  collector_started_at="$(docker inspect \
+    --format '{{ .State.StartedAt }}' "${collector_after}")"
+  collector_started_epoch="$(date --date "${collector_started_at}" +%s)"
+  fresh_poll=""
+  for _attempt in $(seq 1 60); do
+    current_poll="$(sqlite3 /var/lib/nyc-311-live/portal-archive.sqlite \
+      "SELECT value FROM live_monitor_state WHERE key='last_successful_poll_at';")"
+    current_poll_epoch="$(date --date "${current_poll}" +%s 2>/dev/null || true)"
+    if [[ -n "${current_poll}" && "${current_poll}" != "${baseline_poll}"
+        && -n "${current_poll_epoch}"
+        && "${current_poll_epoch}" -ge "${collector_started_epoch}" ]]; then
+      fresh_poll="${current_poll}"
+      break
+    fi
+    sleep 2
+  done
+  if [[ -z "${fresh_poll}" ]]; then
+    echo "The updated collector did not complete a fresh Portal poll." >&2
+    false
+  fi
+  curl --fail --silent --show-error \
+    http://127.0.0.1:10000/api/health/collector >/dev/null
 fi
 
 trap - ERR
 rm -f -- "${archive}"
-echo "Web release ${release_sha} is healthy. Collector and database were untouched."
+if [[ "${deployment_scope}" == "service" ]]; then
+  echo "Service release ${release_sha} is healthy. Web and collector are current; the database was preserved."
+else
+  echo "Web release ${release_sha} is healthy. Collector and database were untouched."
+fi
