@@ -20,6 +20,7 @@ const MAP_RECORD_FIELDS = Object.freeze([
   'portal_url',
   'first_seen_at',
   'last_seen_at',
+  'details_fetched_at',
   'followup_state',
   'next_check_at',
   'finalized_at'
@@ -42,6 +43,19 @@ function timestampValue(...values) {
     return String(value).trim();
   }
   return null;
+}
+
+function mapSubmittedSince(value) {
+  if (value == null || String(value).trim() === '') return null;
+  const text = String(value).trim();
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(text)) {
+    throw new TypeError('submitted_since must be an ISO UTC timestamp');
+  }
+  const date = new Date(text);
+  if (Number.isNaN(date.getTime()) || date.toISOString() !== text) {
+    throw new TypeError('submitted_since must be an ISO UTC timestamp');
+  }
+  return text;
 }
 
 function suffixValue(value) {
@@ -123,6 +137,7 @@ function projectLiveMapRow(row) {
     portal_url: portalUrl(row),
     first_seen_at: timestampValue(row.first_seen_at),
     last_seen_at: timestampValue(row.last_seen_at),
+    details_fetched_at: timestampValue(row.details_fetched_at),
     followup_state: textValue(row.followup_state),
     next_check_at: timestampValue(row.next_check_at),
     finalized_at: timestampValue(row.finalized_at)
@@ -137,11 +152,9 @@ function compareMapRecords(first, second) {
 }
 
 /**
- * `/api/live-map` deliberately means the complete coordinate-bearing archive.
- * At the current data size, projecting the full lightweight set is simpler and
- * less error-prone than clusters or viewport pagination. If growth makes that
- * payload too large, add a separate versioned PostGIS viewport/cluster contract;
- * do not silently truncate or change the meaning of this endpoint.
+ * `/api/live-map` projects coordinate-bearing archive rows. The endpoint may
+ * apply an explicit caller-supplied submitted-time floor and cursor, but it
+ * never invents coordinates or silently caps the requested window.
  */
 function nonNegativeCount(value, fallback) {
   if (value == null || value === '') return fallback;
@@ -175,6 +188,7 @@ module.exports = {
   businessImprovementDistrictIds,
   buildLiveMapPayload,
   coordinateValue,
+  mapSubmittedSince,
   projectLiveMapRow,
   suffixValue,
   timestampValue

@@ -41,6 +41,9 @@ test('dashboard keeps requests, map, and overview as explicit responsive views',
   assert.equal($('.requests-view > .requests-view-heading').length, 1);
   assert.equal($('.overview-view > .overview-heading').length, 1);
   assert.equal($('#request-filters > summary').length, 1);
+  assert.equal($('#details-pending[aria-live="polite"]').length, 1);
+  assert.equal($('#details-pending-count').length, 1);
+  assert.equal($('#details-pending-items').length, 1);
 });
 
 test('request detail is labelled and status history is collapsed by default', () => {
@@ -158,7 +161,10 @@ test('map startup is self-hosted, bounded, and automatically recoverable', () =>
   assert.match(dashboard, /const MAP_REFRESH_MS = 5 \* 60_000/);
   assert.match(dashboard, /const MAP_REQUEST_TIMEOUT_MS = 15_000/);
   assert.match(dashboard, /const MAP_RETRY_MS = 3_000/);
+  assert.match(dashboard, /const MAX_VISIBLE_RECORDS = 300/);
+  assert.match(dashboard, /live-dashboard', \{ limit: 300 \}/);
   assert.match(dashboard, /before_suffix:\s*beforeSuffix/);
+  assert.match(dashboard, /submitted_since:\s*submittedSince/);
   assert.match(dashboard, /mergeMapRecords\(records\)/);
   assert.match(dashboard, /Map data took too long\. Retrying/);
   assert.match(dashboard, /tile\.openstreetmap\.org/);
@@ -174,4 +180,10 @@ test('map starts recent, expands filters to all captured dates, and discloses th
   assert.match(dashboard, /showAllDatesForActiveFilters/);
   assert.match(dashboard, /All captured dates/);
   assert.match(dashboard, /mapRangeDateFormatter/);
+});
+
+test('pending details stay separate from complete request cards and map pins', () => {
+  assert.match(dashboard, /recordDetailsPending/);
+  assert.match(dashboard, /renderPendingDetails/);
+  assert.match(dashboard, /Complete requests will appear here/);
 });

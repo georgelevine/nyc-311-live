@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const {
   MAP_RECORD_FIELDS,
   buildLiveMapPayload,
+  mapSubmittedSince,
   projectLiveMapRow
 } = require('../live-map-data');
 
@@ -24,6 +25,7 @@ test('projects the exact lightweight map record contract across database types',
     portal_url: null,
     first_seen_at: '2026-07-20T12:00:01.000Z',
     last_seen_at: new Date('2026-07-20T12:05:00.000Z'),
+    details_fetched_at: new Date('2026-07-20T12:06:00.000Z'),
     followup_state: 'open',
     next_check_at: new Date('2026-07-21T12:05:00.000Z'),
     business_improvement_district_ids: '[10,8,10]',
@@ -50,6 +52,7 @@ test('projects the exact lightweight map record contract across database types',
     portal_url: 'https://portal.311.nyc.gov/sr-details/?id=99999999-1111-2222-3333-444444444444',
     first_seen_at: '2026-07-20T12:00:01.000Z',
     last_seen_at: '2026-07-20T12:05:00.000Z',
+    details_fetched_at: '2026-07-20T12:06:00.000Z',
     followup_state: 'open',
     next_check_at: '2026-07-21T12:05:00.000Z',
     finalized_at: null
@@ -96,6 +99,16 @@ test('does not derive or geocode coordinates from any other field', () => {
   });
 
   assert.equal(record, null);
+});
+
+test('accepts only a strict UTC timestamp for a recent map window', () => {
+  assert.equal(mapSubmittedSince(null), null);
+  assert.equal(
+    mapSubmittedSince('2026-07-25T15:30:00.000Z'),
+    '2026-07-25T15:30:00.000Z'
+  );
+  assert.throws(() => mapSubmittedSince('2026-07-25 15:30:00'), /ISO UTC timestamp/);
+  assert.throws(() => mapSubmittedSince('2026-02-30T15:30:00.000Z'), /ISO UTC timestamp/);
 });
 
 test('projects lifecycle status consistently for closing, closed, and reopened requests', () => {

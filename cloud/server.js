@@ -10,7 +10,7 @@ const {
   currentLifecycleProjection,
   hasText
 } = require('../record-availability');
-const { buildLiveMapPayload } = require('../live-map-data');
+const { buildLiveMapPayload, mapSubmittedSince } = require('../live-map-data');
 const { storedPortalDetailFromRow } = require('../stored-portal-detail');
 
 const app = express();
@@ -92,16 +92,17 @@ app.use(express.static(path.join(__dirname, '..', 'public'), {
   }
 }));
 
-// Complete marker contract. Keep this unbounded endpoint lightweight at the
-// current archive size; a future viewport/cluster API should be additive and use
-// PostGIS rather than silently changing or truncating `/api/live-map`.
+// Marker contract with explicit cursor and submitted-time filtering. A future
+// viewport/cluster API should remain additive and use PostGIS.
 app.get('/api/live-map', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   try {
     const rawPageLimit = req.query && req.query.limit;
     const rawBeforeSuffix = req.query && req.query.before_suffix;
+    const rawSubmittedSince = req.query && req.query.submitted_since;
     let pageLimit = null;
     let beforeSuffix = null;
+    let submittedSince = null;
     if (rawPageLimit != null && String(rawPageLimit).trim() !== '') {
       pageLimit = Number(rawPageLimit);
       if (!Number.isSafeInteger(pageLimit) || pageLimit < 1 || pageLimit > 5000) {
@@ -114,6 +115,11 @@ app.get('/api/live-map', async (req, res) => {
         return res.status(400).json({ error: 'before_suffix must be a positive request suffix' });
       }
     }
+    try {
+      submittedSince = mapSubmittedSince(rawSubmittedSince);
+    } catch (error) {
+      return res.status(400).json({ error: error.message });
+    }
     const parameters = [];
     const predicates = [
       'live.latitude BETWEEN -90 AND 90',
@@ -122,6 +128,10 @@ app.get('/api/live-map', async (req, res) => {
     if (beforeSuffix != null) {
       parameters.push(beforeSuffix);
       predicates.push(`live.suffix < $${parameters.length}`);
+    }
+    if (submittedSince != null) {
+      parameters.push(submittedSince);
+      predicates.push(`live.submitted_at >= $${parameters.length}::timestamptz`);
     }
     let pageClause = '';
     if (pageLimit != null) {
@@ -141,6 +151,7 @@ app.get('/api/live-map', async (req, res) => {
              details.portal_url AS detail_portal_url,
              details.date_reported AS detail_date_reported,
              details.date_closed AS detail_date_closed,
+             details.archived_at AS details_fetched_at,
              followup.state AS followup_state,
              followup.next_check_at AS next_check_at,
              followup.finalized_at AS finalized_at,

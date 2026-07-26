@@ -67,6 +67,9 @@
   const mapBoundaryKey = document.getElementById('map-boundary-key');
   const requestFilters = document.getElementById('request-filters');
   const activeFilterCount = document.getElementById('active-filter-count');
+  const detailsPending = document.getElementById('details-pending');
+  const detailsPendingCount = document.getElementById('details-pending-count');
+  const detailsPendingItems = document.getElementById('details-pending-items');
   const detailPendingBadge = document.getElementById('detail-pending-badge');
   const detailEmailUpdates = document.getElementById('detail-email-updates');
   const detailEmailCount = document.getElementById('detail-email-count');
@@ -85,6 +88,7 @@
     isClosed,
     mapScopeAfterFilterChange,
     recordCoordinates,
+    recordDetailsPending,
     recordHasMapPin
   } = window.NYC311LiveDashboardModel;
   const compactLayout = window.matchMedia('(max-width: 900px)');
@@ -172,7 +176,7 @@
     note: document.getElementById('detail-evidence-note')
   };
   const hasDetailEvidenceElements = Object.values(detailEvidenceElements).every(Boolean);
-  const MAX_VISIBLE_RECORDS = 750;
+  const MAX_VISIBLE_RECORDS = 300;
   const MAP_PAGE_SIZE = 5_000;
   const MAP_REFRESH_MS = 5 * 60_000;
   const MAP_REQUEST_TIMEOUT_MS = 15_000;
@@ -434,17 +438,47 @@
   }
 
   function filteredRecords() {
-    const visible = records.filter(matchesFilters);
+    const visible = records.filter(record => !recordDetailsPending(record) && matchesFilters(record));
     const exact = exactSrnumberQuery();
     if (!exact) return visible;
     const archived = archiveSearchRecord && archiveSearchRecord.srnumber === exact
       ? archiveSearchRecord
       : mapByNumber.get(exact);
-    if (archived && matchesFilters(archived)
+    if (archived && !recordDetailsPending(archived) && matchesFilters(archived)
         && !visible.some(record => record.srnumber === archived.srnumber)) {
       visible.unshift(archived);
     }
     return visible;
+  }
+
+  function pendingRecords() {
+    const visible = records.filter(record => recordDetailsPending(record) && matchesFilters(record));
+    const exact = exactSrnumberQuery();
+    if (!exact || !archiveSearchRecord || archiveSearchRecord.srnumber !== exact
+        || !recordDetailsPending(archiveSearchRecord) || !matchesFilters(archiveSearchRecord)
+        || visible.some(record => record.srnumber === archiveSearchRecord.srnumber)) {
+      return visible;
+    }
+    return [archiveSearchRecord, ...visible];
+  }
+
+  function renderPendingDetails() {
+    const pending = pendingRecords();
+    detailsPending.hidden = pending.length === 0;
+    if (!pending.length) {
+      detailsPendingCount.textContent = '0 requests loading details';
+      detailsPendingItems.replaceChildren();
+      return;
+    }
+    detailsPendingCount.textContent = `${pending.length.toLocaleString()} ${pending.length === 1 ? 'request is' : 'requests are'} loading submitted details`;
+    const fragment = document.createDocumentFragment();
+    for (const record of pending.slice(0, 4)) {
+      const item = document.createElement('span');
+      item.className = 'details-pending-item';
+      item.textContent = `${record.srnumber} · ${timeLabel(record.submitted_at)}`;
+      fragment.append(item);
+    }
+    detailsPendingItems.replaceChildren(fragment);
   }
 
   function captureFeedScroll() {
@@ -513,6 +547,7 @@
   }
 
   function renderFeed({ resetScroll = false } = {}) {
+    renderPendingDetails();
     const scrollSnapshot = resetScroll ? null : captureFeedScroll();
     const visible = filteredRecords();
     if (!visible.length) {
@@ -523,7 +558,9 @@
           ? `${exact} is not in the captured archive.`
           : exact && archiveSearchState === 'error'
             ? 'The full archive search is temporarily unavailable.'
-            : 'No requests match the current filters.';
+            : pendingRecords().length
+              ? 'Complete requests will appear here as soon as submitted details finish loading.'
+              : 'No requests match the current filters.';
       feedCardByNumber.clear();
       feedCardSignatureByNumber.clear();
       feed.innerHTML = `<div class="empty-state"><p>${esc(message)}</p></div>`;
@@ -622,6 +659,14 @@
     return 'All captured dates';
   }
 
+  function mapSubmittedSince(now = Date.now()) {
+    if (mapScope === 'all') return null;
+    const duration = mapScope === '7d'
+      ? 7 * 24 * 60 * 60 * 1000
+      : 24 * 60 * 60 * 1000;
+    return new Date(now - duration).toISOString();
+  }
+
   function updateMapDateRange(desired) {
     let earliest = null;
     let latest = null;
@@ -643,7 +688,9 @@
   }
 
   function setMapScope(nextScope) {
-    mapScope = ['all', '24h', '7d'].includes(nextScope) ? nextScope : 'all';
+    const normalizedScope = ['all', '24h', '7d'].includes(nextScope) ? nextScope : 'all';
+    if (normalizedScope !== mapScope) mapArchiveLoaded = false;
+    mapScope = normalizedScope;
     mapScopeControl.querySelectorAll('button[data-map-scope]').forEach(scopeButton => {
       scopeButton.setAttribute('aria-pressed', String(scopeButton.dataset.mapScope === mapScope));
     });
@@ -656,7 +703,9 @@
       precinctFilter.value,
       bidFilter.value
     ]);
-    if (nextScope !== mapScope) setMapScope(nextScope);
+    if (nextScope === mapScope) return false;
+    setMapScope(nextScope);
+    return true;
   }
 
   function renderMapNow() {
@@ -673,7 +722,8 @@
           ? archiveSearchRecord
           : mapRecord);
       const coordinates = recordCoordinates(record);
-      if (!coordinates || !matchesFilters(record) || !matchesMapScope(record, now)) continue;
+      if (!coordinates || recordDetailsPending(record)
+          || !matchesFilters(record) || !matchesMapScope(record, now)) continue;
       desired.set(record.srnumber, {
         record,
         coordinates,
@@ -1390,6 +1440,9 @@
       if (previous && previous.details_fetched_at !== record.details_fetched_at) {
         portalDetailByNumber.delete(record.srnumber);
       }
+      if (previous && recordDetailsPending(previous) && !recordDetailsPending(record)) {
+        arrivingNumbers.add(record.srnumber);
+      }
     }
 
     const changed = !recordsMatch(nextRecords, records);
@@ -1472,6 +1525,7 @@
         if (!mapHasLayout()) return;
         map.invalidateSize({ pan: false, debounceMoveend: true });
         renderMap();
+        if (!mapArchiveLoaded) refreshMap(mapStats, true);
         if (attemptBoundaryFit) fitSelectedBoundaryUnion(fitRevision);
       });
     });
@@ -2385,7 +2439,7 @@
   }
 
   async function refreshMap(dashboardStats, force = false) {
-    if (!force && !mapHasLayout()) return;
+    if (!mapHasLayout()) return;
     const now = Date.now();
     if (force) {
       if (mapAbortController) mapAbortController.abort();
@@ -2397,6 +2451,8 @@
     mapRefreshInFlight = true;
     lastMapRefreshStartedAt = now;
     const sequence = ++mapRequestSequence;
+    const submittedSince = mapSubmittedSince(now);
+    let recordsLoadedForRequest = 0;
     setMapLoadState('loading', mapArchiveLoaded ? 'Refreshing map records…' : 'Loading map records…');
     try {
       let beforeSuffix = null;
@@ -2410,6 +2466,7 @@
         try {
           payload = await fetchJson(scopedUrl('/api/live-map', {
             limit: MAP_PAGE_SIZE,
+            ...(submittedSince != null ? { submitted_since: submittedSince } : {}),
             ...(beforeSuffix != null ? { before_suffix: beforeSuffix } : {})
           }), 'Map service', {
             signal: controller.signal
@@ -2419,6 +2476,9 @@
         }
         if (sequence !== mapRequestSequence) return;
         updateMapRecords(payload, dashboardStats);
+        recordsLoadedForRequest += Array.isArray(payload && payload.records)
+          ? payload.records.length
+          : 0;
         pagesLoaded += 1;
 
         const page = payload && payload.page;
@@ -2430,10 +2490,9 @@
         }
         beforeSuffix = hasMore ? nextSuffix : null;
         if (hasMore) {
-          const mappedTotal = finiteStat(payload.stats && payload.stats.mapped_total);
           setMapLoadState(
             'loading',
-            `Loading map records… ${Math.min(mapRecords.length, mappedTotal).toLocaleString()} of ${mappedTotal.toLocaleString()} pins`
+            `Loading ${mapScopeLabel().toLowerCase()}… ${recordsLoadedForRequest.toLocaleString()} pins`
           );
         }
       }
@@ -2466,7 +2525,7 @@
     const sequence = ++dashboardRequestSequence;
     refreshInFlight = true;
     try {
-      const data = await fetchJson(scopedUrl('/api/live-dashboard', { limit: 750 }), 'Data service', {
+      const data = await fetchJson(scopedUrl('/api/live-dashboard', { limit: 300 }), 'Data service', {
         signal: controller.signal
       });
       if (sequence !== dashboardRequestSequence) return;
@@ -2559,17 +2618,20 @@
     if (button) setMobileView(button.dataset.mobileView);
   });
   search.addEventListener('input', () => {
-    showAllDatesForActiveFilters();
+    const scopeChanged = showAllDatesForActiveFilters();
     scheduleArchiveSearch();
+    if (scopeChanged) refreshMap(mapStats, true);
   });
   statusFilter.addEventListener('change', () => {
-    showAllDatesForActiveFilters();
+    const scopeChanged = showAllDatesForActiveFilters();
     updateActiveFilterState();
     renderFeed({ resetScroll: true });
     renderMap();
+    if (scopeChanged) refreshMap(mapStats, true);
   });
   function handleGeographyFilterChange() {
     showAllDatesForActiveFilters();
+    mapArchiveLoaded = false;
     lastGoodSummary = null;
     highestObservedSuffix = null;
     detailLoadSequence += 1;
@@ -2605,8 +2667,10 @@
   mapScopeControl.addEventListener('click', event => {
     const button = event.target.closest('button[data-map-scope]');
     if (!button || !mapScopeControl.contains(button)) return;
+    if (button.dataset.mapScope === mapScope) return;
     setMapScope(button.dataset.mapScope);
     renderMap();
+    refreshMap(mapStats, true);
   });
   pollInterval.addEventListener('change', async () => {
     pollInterval.disabled = true;

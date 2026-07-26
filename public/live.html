@@ -367,6 +367,17 @@
           </details>
         </section>
 
+        <section id="details-pending" class="details-pending" aria-live="polite" hidden>
+          <div class="details-pending-heading">
+            <i class="details-pending-spinner" aria-hidden="true"></i>
+            <div>
+              <strong id="details-pending-count">0 requests loading details</strong>
+              <small>Saved in the database. Complete records appear below automatically.</small>
+            </div>
+          </div>
+          <div id="details-pending-items" class="details-pending-items"></div>
+        </section>
+
         <section id="request-feed" class="request-feed" aria-live="polite">
           <div class="empty-state"><span class="radar"></span><p>Waiting for the live Portal feed…</p></div>
         </section>

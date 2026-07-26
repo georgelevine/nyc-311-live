@@ -132,6 +132,23 @@ button, input, select { font: inherit; }
   box-shadow: 0 0 0 3px rgba(23,105,224,.05); animation: continuous-live-spin 1.9s linear infinite;
 }
 @keyframes continuous-live-spin { to { transform: rotate(360deg); } }
+.details-pending {
+  flex: 0 0 auto; margin: 0 18px 10px; padding: 10px 11px;
+  color: #685126; border: 1px solid #ead5ad; border-radius: 11px; background: #fff9ee;
+}
+.details-pending[hidden] { display: none; }
+.details-pending-heading { display: flex; min-width: 0; align-items: center; gap: 9px; }
+.details-pending-heading > div { min-width: 0; }
+.details-pending-heading strong { display: block; font-size: 10px; line-height: 1.3; }
+.details-pending-heading small { display: block; margin-top: 1px; color: #8a754e; font-size: 8.5px; line-height: 1.35; }
+.details-pending-spinner {
+  width: 14px; height: 14px; flex: none; border: 2px solid rgba(181,116,17,.18);
+  border-top-color: #b57411; border-radius: 50%; animation: continuous-live-spin 1.4s linear infinite;
+}
+.details-pending-items { display: flex; min-width: 0; flex-wrap: wrap; gap: 4px 7px; margin: 7px 0 0 23px; }
+.details-pending-items:empty { display: none; }
+.details-pending-item { color: #86601f; font-size: 8.5px; font-variant-numeric: tabular-nums; font-weight: 700; }
+.details-pending-item:not(:last-child)::after { margin-left: 7px; color: #c9aa72; content: "·"; }
 .request-feed {
   position: relative; flex: 1 1 0; width: 100%; min-height: 0;
   overflow-x: hidden; overflow-y: auto; padding-bottom: 18px;
@@ -392,6 +409,9 @@ button, input, select { font: inherit; }
   .feed-heading { flex: none; padding: 7px 14px 10px; }
   .feed-heading span { font-size: 11px; }
   .feed-heading time { font-size: 10px; }
+  .details-pending { margin: 0 10px 8px; padding: 9px 10px; }
+  .details-pending-heading strong { font-size: 10.5px; }
+  .details-pending-heading small, .details-pending-item { font-size: 9px; }
   .request-feed { padding-bottom: calc(20px + env(safe-area-inset-bottom)); scrollbar-gutter: auto; }
   .request-card { grid-template-columns: 10px minmax(0, 1fr); gap: 10px; min-height: 82px; padding: 15px 14px; }
   .request-topline strong { font-size: 14px; }
@@ -446,5 +466,5 @@ button, input, select { font: inherit; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .continuous-spinner, .request-card.arriving, .city-summary-loading span { animation: none; }
+  .continuous-spinner, .details-pending-spinner, .request-card.arriving, .city-summary-loading span { animation: none; }
 }

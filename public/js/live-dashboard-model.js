@@ -40,6 +40,13 @@
       : Boolean(recordCoordinates(record));
   }
 
+  function recordDetailsPending(record) {
+    const state = normalizedText(record && record.public_details_state).toLowerCase();
+    if (state) return state === 'pending';
+    return Boolean(record && Object.prototype.hasOwnProperty.call(record, 'details_fetched_at')
+      && !normalizedText(record.details_fetched_at));
+  }
+
   function feedCardModel(record) {
     const problem = normalizedText(record && record.problem) || 'Service Request';
     const problemDetails = normalizedText(record && record.problem_details);
@@ -67,10 +74,10 @@
   function mapScopeAfterFilterChange(currentScope, filterValues) {
     const normalizedScope = ['all', '24h', '7d'].includes(currentScope)
       ? currentScope
-      : 'all';
+      : '24h';
     const hasActiveFilter = (Array.isArray(filterValues) ? filterValues : [])
       .some(value => normalizedText(value));
-    return hasActiveFilter ? 'all' : normalizedScope;
+    return hasActiveFilter ? 'all' : normalizedScope === 'all' ? '24h' : normalizedScope;
   }
 
   return {
@@ -82,6 +89,7 @@
     mapScopeAfterFilterChange,
     normalizedText,
     recordCoordinates,
+    recordDetailsPending,
     recordHasMapPin
   };
 }));

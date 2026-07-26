@@ -12,7 +12,11 @@ const {
   currentLifecycleProjection,
   hasText
 } = require('./record-availability');
-const { buildLiveMapPayload, businessImprovementDistrictIds } = require('./live-map-data');
+const {
+  buildLiveMapPayload,
+  businessImprovementDistrictIds,
+  mapSubmittedSince
+} = require('./live-map-data');
 const { buildCatchupStatus, parseState } = require('./catchup-status');
 const { reconcileStoredDetails } = require('./detail-queue');
 const { createDashboardAuth, dashboardAuthConfig } = require('./dashboard-auth');
@@ -1040,8 +1044,10 @@ app.get('/api/live-map', (req, res) => {
     const scope = requestGeographyScope(req, database);
     const rawPageLimit = req.query && req.query.limit;
     const rawBeforeSuffix = req.query && req.query.before_suffix;
+    const rawSubmittedSince = req.query && req.query.submitted_since;
     let pageLimit = null;
     let beforeSuffix = null;
+    let submittedSince = null;
     if (rawPageLimit != null && String(rawPageLimit).trim() !== '') {
       if (!/^\d{1,5}$/.test(String(rawPageLimit).trim())) {
         const error = new Error('limit must be an integer from 1 through 5000');
@@ -1068,6 +1074,12 @@ app.get('/api/live-map', (req, res) => {
         throw error;
       }
     }
+    try {
+      submittedSince = mapSubmittedSince(rawSubmittedSince);
+    } catch (error) {
+      error.statusCode = 400;
+      throw error;
+    }
 
     const hasDetails = tables.has('portal_requests');
     const hasFollowUps = tables.has('request_followup_queue');
@@ -1079,14 +1091,16 @@ app.get('/api/live-map', (req, res) => {
          details.status AS detail_status,
          details.portal_url AS detail_portal_url,
          details.date_reported AS detail_date_reported,
-         details.date_closed AS detail_date_closed`
+         details.date_closed AS detail_date_closed,
+         details.archived_at AS details_fetched_at`
       : `NULL AS detail_portal_id,
          NULL AS detail_problem,
          NULL AS detail_address,
          NULL AS detail_status,
          NULL AS detail_portal_url,
          NULL AS detail_date_reported,
-         NULL AS detail_date_closed`;
+         NULL AS detail_date_closed,
+         NULL AS details_fetched_at`;
     const detailJoin = hasDetails
       ? 'LEFT JOIN portal_requests AS details ON details.srnumber=live.srnumber'
       : '';
@@ -1119,6 +1133,12 @@ app.get('/api/live-map', (req, res) => {
       'live.longitude BETWEEN -180 AND 180'
     ];
     if (beforeSuffix != null) mappedPredicates.push('live.suffix < @before_suffix');
+    if (submittedSince != null) {
+      mappedPredicates.push(
+        "live.submitted_at GLOB '????-??-??T??:??:??.???Z'",
+        'live.submitted_at >= @submitted_since'
+      );
+    }
     const mappedWhere = `WHERE ${mappedPredicates.join(' AND ')}`;
     const totals = database.prepare(`
       SELECT
@@ -1133,6 +1153,7 @@ app.get('/api/live-map', (req, res) => {
     const queryParameters = {
       ...scopeParameters(scope),
       ...(beforeSuffix != null ? { before_suffix: beforeSuffix } : {}),
+      ...(submittedSince != null ? { submitted_since: submittedSince } : {}),
       ...(pageLimit != null ? { map_limit: pageLimit } : {})
     };
     const pageClause = pageLimit != null ? 'LIMIT @map_limit' : '';

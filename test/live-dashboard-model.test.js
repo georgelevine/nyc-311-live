@@ -8,6 +8,7 @@ const {
   feedCardModel,
   mapScopeAfterFilterChange,
   recordCoordinates,
+  recordDetailsPending,
   recordHasMapPin
 } = require('../public/js/live-dashboard-model');
 
@@ -58,5 +59,14 @@ test('shows all captured dates when a request filter changes', () => {
   assert.equal(mapScopeAfterFilterChange('24h', ['', 'Closed', '', '']), 'all');
   assert.equal(mapScopeAfterFilterChange('7d', ['Hudson Square']), 'all');
   assert.equal(mapScopeAfterFilterChange('24h', ['', null, '']), '24h');
-  assert.equal(mapScopeAfterFilterChange('unknown', []), 'all');
+  assert.equal(mapScopeAfterFilterChange('all', []), '24h');
+  assert.equal(mapScopeAfterFilterChange('unknown', []), '24h');
+});
+
+test('distinguishes a captured request whose submitted details are still pending', () => {
+  assert.equal(recordDetailsPending({ public_details_state: 'pending' }), true);
+  assert.equal(recordDetailsPending({ public_details_state: 'loaded' }), false);
+  assert.equal(recordDetailsPending({ details_fetched_at: null }), true);
+  assert.equal(recordDetailsPending({ details_fetched_at: '2026-07-26T15:00:00.000Z' }), false);
+  assert.equal(recordDetailsPending({}), false);
 });
