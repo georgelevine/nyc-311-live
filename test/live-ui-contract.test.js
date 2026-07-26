@@ -154,8 +154,12 @@ test('map startup is self-hosted, bounded, and automatically recoverable', () =>
   );
   assert.equal($('#map-load-status[role="status"]').length, 1);
   assert.match(dashboard, /chunkedLoading:\s*true/);
+  assert.match(dashboard, /const MAP_PAGE_SIZE = 5_000/);
+  assert.match(dashboard, /const MAP_REFRESH_MS = 5 \* 60_000/);
   assert.match(dashboard, /const MAP_REQUEST_TIMEOUT_MS = 15_000/);
   assert.match(dashboard, /const MAP_RETRY_MS = 3_000/);
+  assert.match(dashboard, /before_suffix:\s*beforeSuffix/);
+  assert.match(dashboard, /mergeMapRecords\(records\)/);
   assert.match(dashboard, /Map data took too long\. Retrying/);
   assert.match(dashboard, /tile\.openstreetmap\.org/);
 });

@@ -95,9 +95,39 @@ app.use(express.static(path.join(__dirname, '..', 'public'), {
 // Complete marker contract. Keep this unbounded endpoint lightweight at the
 // current archive size; a future viewport/cluster API should be additive and use
 // PostGIS rather than silently changing or truncating `/api/live-map`.
-app.get('/api/live-map', async (_req, res) => {
+app.get('/api/live-map', async (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   try {
+    const rawPageLimit = req.query && req.query.limit;
+    const rawBeforeSuffix = req.query && req.query.before_suffix;
+    let pageLimit = null;
+    let beforeSuffix = null;
+    if (rawPageLimit != null && String(rawPageLimit).trim() !== '') {
+      pageLimit = Number(rawPageLimit);
+      if (!Number.isSafeInteger(pageLimit) || pageLimit < 1 || pageLimit > 5000) {
+        return res.status(400).json({ error: 'limit must be an integer from 1 through 5000' });
+      }
+    }
+    if (rawBeforeSuffix != null && String(rawBeforeSuffix).trim() !== '') {
+      beforeSuffix = Number(rawBeforeSuffix);
+      if (!Number.isSafeInteger(beforeSuffix) || beforeSuffix < 1) {
+        return res.status(400).json({ error: 'before_suffix must be a positive request suffix' });
+      }
+    }
+    const parameters = [];
+    const predicates = [
+      'live.latitude BETWEEN -90 AND 90',
+      'live.longitude BETWEEN -180 AND 180'
+    ];
+    if (beforeSuffix != null) {
+      parameters.push(beforeSuffix);
+      predicates.push(`live.suffix < $${parameters.length}`);
+    }
+    let pageClause = '';
+    if (pageLimit != null) {
+      parameters.push(pageLimit);
+      pageClause = `LIMIT $${parameters.length}`;
+    }
     const [result, totalResult] = await Promise.all([
       query(`
       SELECT live.srnumber,live.suffix,live.portal_id,live.problem,live.address,
@@ -123,14 +153,37 @@ app.get('/api/live-map', async (_req, res) => {
         ON current_final.srnumber=followup.srnumber
        AND current_final.closure_cycle=followup.closure_cycle
        AND current_final.is_final=TRUE
-      WHERE live.latitude IS NOT NULL AND live.longitude IS NOT NULL
+      WHERE ${predicates.join(' AND ')}
       ORDER BY live.suffix DESC
-    `),
-      query('SELECT COUNT(*) AS total FROM live_portal_requests')
+      ${pageClause}
+    `, parameters),
+      query(`
+        SELECT
+          COUNT(*) AS total,
+          COUNT(*) FILTER (
+            WHERE latitude BETWEEN -90 AND 90
+              AND longitude BETWEEN -180 AND 180
+          ) AS mapped_total
+        FROM live_portal_requests
+      `)
     ]);
-    return res.json(buildLiveMapPayload(result.rows, {
-      total: Number(totalResult.rows[0] && totalResult.rows[0].total || 0)
-    }));
+    const total = Number(totalResult.rows[0] && totalResult.rows[0].total || 0);
+    const mappedTotal = Number(totalResult.rows[0] && totalResult.rows[0].mapped_total || 0);
+    const payload = buildLiveMapPayload(result.rows, {
+      total,
+      mapped_total: mappedTotal,
+      unmapped_total: Math.max(0, total - mappedTotal)
+    });
+    if (pageLimit != null) {
+      const lastRecord = payload.records[payload.records.length - 1];
+      payload.page = {
+        limit: pageLimit,
+        returned: payload.records.length,
+        has_more: payload.records.length === pageLimit,
+        next_before_suffix: lastRecord ? lastRecord.suffix : null
+      };
+    }
+    return res.json(payload);
   } catch (error) {
     console.error(JSON.stringify({ live_map_error: error.message }));
     return res.status(503).json(buildLiveMapPayload([]));

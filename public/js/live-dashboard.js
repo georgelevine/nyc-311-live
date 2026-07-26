@@ -171,7 +171,8 @@
   };
   const hasDetailEvidenceElements = Object.values(detailEvidenceElements).every(Boolean);
   const MAX_VISIBLE_RECORDS = 750;
-  const MAP_REFRESH_MS = 15_000;
+  const MAP_PAGE_SIZE = 5_000;
+  const MAP_REFRESH_MS = 5 * 60_000;
   const MAP_REQUEST_TIMEOUT_MS = 15_000;
   const MAP_RETRY_MS = 3_000;
   const EMAIL_UPDATES_REFRESH_MS = 15_000;
@@ -196,6 +197,7 @@
   let mapRefreshInFlight = false;
   let mapAbortController = null;
   let mapRetryTimer = null;
+  let mapArchiveLoaded = false;
   let mapRequestSequence = 0;
   let dashboardRequestSequence = 0;
   let dashboardAbortController = null;
@@ -325,7 +327,7 @@
       appShell.dataset.mobileView = normalizedView;
       setPressedView(normalizedView);
       scheduleMapLayout({ attemptBoundaryFit: normalizedView === 'map' });
-      if (normalizedView === 'map') refreshMap(mapStats, true);
+      if (normalizedView === 'map' && !mapArchiveLoaded) refreshMap(mapStats, true);
     }
     return usesViewTabs && normalizedView === 'map';
   }
@@ -1344,9 +1346,10 @@
     const changed = !recordsMatch(nextRecords, records);
     records = nextRecords;
     feedByNumber = new Map(records.map(record => [record.srnumber, record]));
-    if (!changed) return;
+    const mapChanged = mergeMapRecords(records);
+    if (!changed && !mapChanged) return;
     syncStatuses();
-    renderFeed();
+    if (changed) renderFeed();
     renderMap();
     if (selectedNumber) renderDetail(findRecord(selectedNumber));
   }
@@ -1663,11 +1666,24 @@
     }
   }
 
+  function mergeMapRecords(incoming) {
+    let changed = false;
+    for (const incomingRecord of incoming) {
+      if (!incomingRecord || !incomingRecord.srnumber || !recordCoordinates(incomingRecord)) continue;
+      const record = feedByNumber.get(incomingRecord.srnumber) || incomingRecord;
+      const previous = mapByNumber.get(record.srnumber);
+      if (previous && recordSignature(previous) === recordSignature(record)) continue;
+      mapByNumber.set(record.srnumber, record);
+      changed = true;
+    }
+    if (changed) mapRecords = [...mapByNumber.values()];
+    return changed;
+  }
+
   function updateMapRecords(payload, dashboardStats) {
     const incoming = Array.isArray(payload) ? payload : payload.records || [];
     const stats = Array.isArray(payload) ? {} : payload.stats || {};
-    mapRecords = incoming.filter(record => record && record.srnumber && recordCoordinates(record));
-    mapByNumber = new Map(mapRecords.map(record => [record.srnumber, record]));
+    mergeMapRecords(incoming);
     const total = finiteStat(stats.total, finiteStat(dashboardStats.total, mapRecords.length));
     const mapped = finiteStat(stats.mapped_total, mapRecords.length);
     mapStats = {
@@ -2332,16 +2348,48 @@
     mapRefreshInFlight = true;
     lastMapRefreshStartedAt = now;
     const sequence = ++mapRequestSequence;
-    const controller = new AbortController();
-    mapAbortController = controller;
-    const timeout = window.setTimeout(() => controller.abort(), MAP_REQUEST_TIMEOUT_MS);
-    if (!mapRecords.length) setMapLoadState('loading', 'Loading map records…');
+    setMapLoadState('loading', mapArchiveLoaded ? 'Refreshing map records…' : 'Loading map records…');
     try {
-      const payload = await fetchJson(scopedUrl('/api/live-map'), 'Map service', {
-        signal: controller.signal
-      });
-      if (sequence !== mapRequestSequence) return;
-      updateMapRecords(payload, dashboardStats);
+      let beforeSuffix = null;
+      let pagesLoaded = 0;
+      let hasMore = true;
+      while (hasMore && pagesLoaded < 100) {
+        const controller = new AbortController();
+        mapAbortController = controller;
+        const timeout = window.setTimeout(() => controller.abort(), MAP_REQUEST_TIMEOUT_MS);
+        let payload;
+        try {
+          payload = await fetchJson(scopedUrl('/api/live-map', {
+            limit: MAP_PAGE_SIZE,
+            ...(beforeSuffix != null ? { before_suffix: beforeSuffix } : {})
+          }), 'Map service', {
+            signal: controller.signal
+          });
+        } finally {
+          window.clearTimeout(timeout);
+        }
+        if (sequence !== mapRequestSequence) return;
+        updateMapRecords(payload, dashboardStats);
+        pagesLoaded += 1;
+
+        const page = payload && payload.page;
+        const nextSuffix = Number(page && page.next_before_suffix);
+        hasMore = Boolean(page && page.has_more);
+        if (hasMore && (!Number.isSafeInteger(nextSuffix) || nextSuffix < 1
+            || (beforeSuffix != null && nextSuffix >= beforeSuffix))) {
+          throw new Error('Map service returned an invalid page cursor');
+        }
+        beforeSuffix = hasMore ? nextSuffix : null;
+        if (hasMore) {
+          const mappedTotal = finiteStat(payload.stats && payload.stats.mapped_total);
+          setMapLoadState(
+            'loading',
+            `Loading map records… ${Math.min(mapRecords.length, mappedTotal).toLocaleString()} of ${mappedTotal.toLocaleString()} pins`
+          );
+        }
+      }
+      if (hasMore) throw new Error('Map service returned too many pages');
+      mapArchiveLoaded = true;
       clearMapRetry();
       setMapLoadState('ready');
     } catch (error) {
@@ -2354,7 +2402,6 @@
         console.warn(error);
       }
     } finally {
-      window.clearTimeout(timeout);
       if (sequence === mapRequestSequence) {
         mapRefreshInFlight = false;
         mapAbortController = null;

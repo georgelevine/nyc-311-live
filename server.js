@@ -1038,6 +1038,36 @@ app.get('/api/live-map', (req, res) => {
     `).all().map(row => row.name));
     if (!tables.has('live_portal_requests')) return res.json(buildLiveMapPayload([]));
     const scope = requestGeographyScope(req, database);
+    const rawPageLimit = req.query && req.query.limit;
+    const rawBeforeSuffix = req.query && req.query.before_suffix;
+    let pageLimit = null;
+    let beforeSuffix = null;
+    if (rawPageLimit != null && String(rawPageLimit).trim() !== '') {
+      if (!/^\d{1,5}$/.test(String(rawPageLimit).trim())) {
+        const error = new Error('limit must be an integer from 1 through 5000');
+        error.statusCode = 400;
+        throw error;
+      }
+      pageLimit = Number(rawPageLimit);
+      if (pageLimit < 1 || pageLimit > 5000) {
+        const error = new Error('limit must be an integer from 1 through 5000');
+        error.statusCode = 400;
+        throw error;
+      }
+    }
+    if (rawBeforeSuffix != null && String(rawBeforeSuffix).trim() !== '') {
+      if (!/^\d{1,12}$/.test(String(rawBeforeSuffix).trim())) {
+        const error = new Error('before_suffix must be a positive request suffix');
+        error.statusCode = 400;
+        throw error;
+      }
+      beforeSuffix = Number(rawBeforeSuffix);
+      if (!Number.isSafeInteger(beforeSuffix) || beforeSuffix < 1) {
+        const error = new Error('before_suffix must be a positive request suffix');
+        error.statusCode = 400;
+        throw error;
+      }
+    }
 
     const hasDetails = tables.has('portal_requests');
     const hasFollowUps = tables.has('request_followup_queue');
@@ -1085,15 +1115,27 @@ app.get('/api/live-map', (req, res) => {
     const scopeWhere = livePredicates.length ? `WHERE ${livePredicates.join(' AND ')}` : '';
     const mappedPredicates = [
       ...livePredicates,
-      'live.latitude IS NOT NULL',
-      'live.longitude IS NOT NULL'
+      'live.latitude BETWEEN -90 AND 90',
+      'live.longitude BETWEEN -180 AND 180'
     ];
+    if (beforeSuffix != null) mappedPredicates.push('live.suffix < @before_suffix');
     const mappedWhere = `WHERE ${mappedPredicates.join(' AND ')}`;
-    const total = Number(database.prepare(`
-      SELECT COUNT(*) AS count
+    const totals = database.prepare(`
+      SELECT
+        COUNT(*) AS total,
+        COALESCE(SUM(
+          live.latitude BETWEEN -90 AND 90
+          AND live.longitude BETWEEN -180 AND 180
+        ), 0) AS mapped_total
       FROM live_portal_requests AS live
       ${scopeWhere}
-    `).get(scopeParameters(scope)).count || 0);
+    `).get(scopeParameters(scope));
+    const queryParameters = {
+      ...scopeParameters(scope),
+      ...(beforeSuffix != null ? { before_suffix: beforeSuffix } : {}),
+      ...(pageLimit != null ? { map_limit: pageLimit } : {})
+    };
+    const pageClause = pageLimit != null ? 'LIMIT @map_limit' : '';
     const statement = database.prepare(`
       SELECT live.srnumber,live.suffix,live.portal_id,live.problem,live.address,
              live.borough,live.incident_zip,
@@ -1110,9 +1152,26 @@ app.get('/api/live-map', (req, res) => {
       ${currentClosureJoin}
       ${mappedWhere}
       ORDER BY live.suffix DESC
+      ${pageClause}
     `);
-    const rows = statement.all(scopeParameters(scope));
-    return res.json(buildLiveMapPayload(rows, { total }));
+    const rows = statement.all(queryParameters);
+    const total = Number(totals.total || 0);
+    const mappedTotal = Number(totals.mapped_total || 0);
+    const payload = buildLiveMapPayload(rows, {
+      total,
+      mapped_total: mappedTotal,
+      unmapped_total: Math.max(0, total - mappedTotal)
+    });
+    if (pageLimit != null) {
+      const lastRecord = payload.records[payload.records.length - 1];
+      payload.page = {
+        limit: pageLimit,
+        returned: payload.records.length,
+        has_more: payload.records.length === pageLimit,
+        next_before_suffix: lastRecord ? lastRecord.suffix : null
+      };
+    }
+    return res.json(payload);
   } catch (error) {
     console.error('Live map data error:', error.message);
     return res.status(error.statusCode || 503).json(
