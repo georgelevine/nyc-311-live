@@ -191,7 +191,7 @@
   let selectedNumber = null;
   let markerByNumber = new Map();
   let markerSignatureByNumber = new Map();
-  let mapScope = 'all';
+  let mapScope = '24h';
   let mapStats = { total: 0, mapped_total: 0, unmapped_total: 0 };
   let mapShownCount = 0;
   let mapRenderFrame = null;

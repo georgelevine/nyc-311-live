@@ -164,9 +164,13 @@ test('map startup is self-hosted, bounded, and automatically recoverable', () =>
   assert.match(dashboard, /tile\.openstreetmap\.org/);
 });
 
-test('map filters default to the complete captured date range and disclose its dates', () => {
+test('map starts recent, expands filters to all captured dates, and discloses the range', () => {
   assert.equal($('#map-scope button[data-map-scope="all"]').text().trim(), 'All dates');
+  assert.equal($('#map-scope button[data-map-scope="all"]').attr('aria-pressed'), 'false');
+  assert.equal($('#map-scope button[data-map-scope="24h"]').attr('aria-pressed'), 'true');
   assert.equal($('#map-date-range[aria-live="polite"]').length, 1);
+  assert.match($('#map-date-range').text(), /Last 24 hours/);
+  assert.match(dashboard, /let mapScope = '24h'/);
   assert.match(dashboard, /showAllDatesForActiveFilters/);
   assert.match(dashboard, /All captured dates/);
   assert.match(dashboard, /mapRangeDateFormatter/);
