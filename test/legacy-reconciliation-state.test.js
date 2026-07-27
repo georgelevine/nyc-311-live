@@ -42,7 +42,7 @@ test('sanitizes one-time reconciliation state before exposing it to the dashboar
     api_closed: 90,
     api_open: 20,
     closures_corrected: 90,
-    open_subscriptions_queued: 20,
+    open_subscriptions_queued: 23,
     errors: 0,
     retry_after_seconds: 86400,
     estimated_seconds_remaining: 50,

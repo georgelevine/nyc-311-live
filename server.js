@@ -290,7 +290,7 @@ function sanitizeLegacyReconciliation(value, stateUpdatedAt = null) {
     closures_corrected: closuresCorrected,
     open_subscriptions_queued: reconciliationCount(
       parsed.open_subscriptions_queued,
-      apiOpen
+      apiOpen + apiOmitted
     ),
     errors: reconciliationCount(parsed.errors),
     retry_after_seconds: parsed.retry_after_seconds == null

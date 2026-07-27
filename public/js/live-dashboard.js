@@ -1963,7 +1963,7 @@
       closuresCorrected: legacyReconciliationCount(value.closures_corrected, apiClosed),
       subscriptionsQueued: legacyReconciliationCount(
         value.open_subscriptions_queued,
-        apiOpen
+        apiOpen + legacyReconciliationCount(value.api_omitted, checked)
       ),
       errors: legacyReconciliationCount(value.errors),
       retryAfterSeconds: value.retry_after_seconds == null
