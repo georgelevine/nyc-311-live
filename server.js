@@ -1304,12 +1304,23 @@ app.get('/api/live-dashboard', (req, res) => {
          details.portal_url AS detail_portal_url,
          details.problem_details, details.additional_details, details.next_update,
          json_extract(details.fields_json, '$."Agency Response"') AS agency_response,
+         COALESCE(
+           json_extract(details.fields_json, '$."Agency Response Source"'),
+           CASE
+             WHEN NULLIF(TRIM(json_extract(details.fields_json, '$."Agency Response"')), '') IS NOT NULL
+               THEN 'NYC311 Portal'
+             ELSE NULL
+           END
+         ) AS agency_response_source,
+         json_extract(details.fields_json, '$."Agency Response Updated At"')
+           AS agency_response_updated_at,
          details.date_reported, details.updated_on, details.date_closed,
          details.archived_at AS details_fetched_at`
       : `NULL AS detail_portal_id, NULL AS detail_status,
          NULL AS detail_problem, NULL AS detail_address, NULL AS detail_portal_url,
          NULL AS problem_details, NULL AS additional_details, NULL AS next_update,
-         NULL AS agency_response,
+         NULL AS agency_response, NULL AS agency_response_source,
+         NULL AS agency_response_updated_at,
          NULL AS date_reported, NULL AS updated_on, NULL AS date_closed,
          NULL AS details_fetched_at`;
     const detailJoin = hasDetails

@@ -811,6 +811,8 @@
         problemDetails: record.problem_details,
         additionalDetails: record.additional_details,
         agencyResponse: record.agency_response,
+        agencyResponseSource: record.agency_response_source,
+        agencyResponseUpdatedAt: record.agency_response_updated_at,
         nextUpdate: record.next_update,
         dateReported: record.date_reported,
         updatedOn: record.updated_on,
@@ -1348,10 +1350,16 @@
     const response = String(detailData && detailData.agencyResponse || '').replace(/\s+/g, ' ').trim();
     const meaningfulResponse = /^(?:N\/?A|NONE|NOT PROVIDED)$/i.test(response) ? '' : response;
     document.getElementById('detail-agency-response-text').textContent = meaningfulResponse;
-    const publishedAt = detailData && (detailData.updatedOn || detailData.dateClosed);
+    const source = String(detailData && detailData.agencyResponseSource || '').trim();
+    const fromOneTimeApi = /public api/i.test(source);
+    const publishedAt = detailData && (
+      detailData.agencyResponseUpdatedAt || detailData.updatedOn || detailData.dateClosed
+    );
     const time = document.getElementById('detail-agency-response-time');
     time.textContent = meaningfulResponse && publishedAt
-      ? `Portal updated ${fullTimeLabel(publishedAt)}`
+      ? `${fromOneTimeApi ? 'Official API updated' : 'Portal updated'} ${fullTimeLabel(publishedAt)}`
+      : meaningfulResponse && fromOneTimeApi
+        ? 'Recovered in a one-time official API check'
       : '';
     time.dateTime = meaningfulResponse && publishedAt ? publishedAt : '';
     root.classList.toggle('hidden', !meaningfulResponse);
@@ -1364,6 +1372,8 @@
         problemDetails: record.problem_details,
         additionalDetails: record.additional_details,
         agencyResponse: record.agency_response,
+        agencyResponseSource: record.agency_response_source,
+        agencyResponseUpdatedAt: record.agency_response_updated_at,
         nextUpdate: record.next_update,
         dateReported: record.date_reported,
         updatedOn: record.updated_on,

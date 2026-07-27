@@ -79,6 +79,8 @@ test('loads a stored row using the same camelCase contract as a Portal detail', 
     problemDetails: 'Catch Basin Clogged',
     additionalDetails: 'Near the northwest corner',
     agencyResponse: 'The agency inspected the location and corrected the condition.',
+    agencyResponseSource: 'NYC311 Portal',
+    agencyResponseUpdatedAt: null,
     address: '198-08 53 AVENUE, QUEENS (FRESH MEADOWS), NY, 11365',
     nextUpdate: '24 Hours',
     dateReported: '2026-07-20T22:20:36.000Z',
@@ -101,6 +103,26 @@ test('keeps the stored detail usable when fields_json is malformed', t => {
   assert.equal(detail.problemDetails, 'Catch Basin Clogged');
   assert.equal(detail.agencyResponse, null);
   assert.deepEqual(detail.fields, {});
+});
+
+test('preserves one-time official API provenance without calling it Portal data', t => {
+  const databasePath = fixture(t);
+  insertDetail(databasePath, JSON.stringify({
+    'Problem Details': 'Non-Chronic',
+    'Agency Response': 'The outreach team contacted the person.',
+    'Agency Response Source': 'NYC311 Public API · one-time reconciliation',
+    'Agency Response Updated At': '2026-07-23T16:39:05.000Z',
+    Agency: 'Department of Homeless Services'
+  }));
+
+  const detail = readStoredPortalDetail(databasePath, PORTAL_ID);
+
+  assert.equal(detail.agencyResponse, 'The outreach team contacted the person.');
+  assert.equal(
+    detail.agencyResponseSource,
+    'NYC311 Public API · one-time reconciliation'
+  );
+  assert.equal(detail.agencyResponseUpdatedAt, '2026-07-23T16:39:05.000Z');
 });
 
 test('projects PostgreSQL rows without reparsing JSONB objects', () => {
@@ -128,6 +150,8 @@ test('projects PostgreSQL rows without reparsing JSONB objects', () => {
     problemDetails: 'Loud Music/Party',
     additionalDetails: null,
     agencyResponse: 'Officers responded and the condition was corrected.',
+    agencyResponseSource: 'NYC311 Portal',
+    agencyResponseUpdatedAt: null,
     address: '1 CENTRE STREET, MANHATTAN, NY, 10007',
     nextUpdate: null,
     dateReported: '2026-07-26T05:45:00.000Z',

@@ -33,13 +33,17 @@ function safelyParseFields(value) {
 function storedPortalDetailFromRow(row) {
   if (!row) return null;
   const fields = safelyParseFields(row.fields_json);
+  const agencyResponse = agencyResponseFromFields(fields);
   return {
     srnumber: textOrNull(row.srnumber),
     status: textOrNull(row.status),
     problem: textOrNull(row.problem),
     problemDetails: textOrNull(row.problem_details),
     additionalDetails: textOrNull(row.additional_details),
-    agencyResponse: agencyResponseFromFields(fields),
+    agencyResponse,
+    agencyResponseSource: textOrNull(fields['Agency Response Source'])
+      || (agencyResponse ? 'NYC311 Portal' : null),
+    agencyResponseUpdatedAt: timestampOrNull(fields['Agency Response Updated At']),
     address: textOrNull(row.address),
     nextUpdate: textOrNull(row.next_update),
     dateReported: timestampOrNull(row.date_reported),
