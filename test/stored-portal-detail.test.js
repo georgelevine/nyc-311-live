@@ -42,6 +42,7 @@ function fixture(t, { withTable = true } = {}) {
 
 function insertDetail(databasePath, fieldsJson = JSON.stringify({
   'Problem Details': 'Catch Basin Clogged',
+  'Agency Response': 'The agency inspected the location and corrected the condition.',
   Agency: 'DEP'
 })) {
   const database = new DatabaseSync(databasePath);
@@ -77,6 +78,7 @@ test('loads a stored row using the same camelCase contract as a Portal detail', 
     problem: 'Sewer Maintenance',
     problemDetails: 'Catch Basin Clogged',
     additionalDetails: 'Near the northwest corner',
+    agencyResponse: 'The agency inspected the location and corrected the condition.',
     address: '198-08 53 AVENUE, QUEENS (FRESH MEADOWS), NY, 11365',
     nextUpdate: '24 Hours',
     dateReported: '2026-07-20T22:20:36.000Z',
@@ -84,6 +86,7 @@ test('loads a stored row using the same camelCase contract as a Portal detail', 
     dateClosed: null,
     fields: {
       'Problem Details': 'Catch Basin Clogged',
+      'Agency Response': 'The agency inspected the location and corrected the condition.',
       Agency: 'DEP'
     }
   });
@@ -96,12 +99,14 @@ test('keeps the stored detail usable when fields_json is malformed', t => {
   const detail = readStoredPortalDetail(databasePath, PORTAL_ID);
 
   assert.equal(detail.problemDetails, 'Catch Basin Clogged');
+  assert.equal(detail.agencyResponse, null);
   assert.deepEqual(detail.fields, {});
 });
 
 test('projects PostgreSQL rows without reparsing JSONB objects', () => {
   const fields = {
     'Problem Details': 'Loud Music/Party',
+    'Agency Response': 'Officers responded and the condition was corrected.',
     Agency: 'NYPD'
   };
   assert.deepEqual(storedPortalDetailFromRow({
@@ -122,6 +127,7 @@ test('projects PostgreSQL rows without reparsing JSONB objects', () => {
     problem: 'Noise - Street/Sidewalk',
     problemDetails: 'Loud Music/Party',
     additionalDetails: null,
+    agencyResponse: 'Officers responded and the condition was corrected.',
     address: '1 CENTRE STREET, MANHATTAN, NY, 10007',
     nextUpdate: null,
     dateReported: '2026-07-26T05:45:00.000Z',

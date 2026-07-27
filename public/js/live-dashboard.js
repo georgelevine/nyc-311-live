@@ -810,6 +810,7 @@
       const savedDetail = {
         problemDetails: record.problem_details,
         additionalDetails: record.additional_details,
+        agencyResponse: record.agency_response,
         nextUpdate: record.next_update,
         dateReported: record.date_reported,
         updatedOn: record.updated_on,
@@ -1280,6 +1281,7 @@
     const updatedRow = document.getElementById('detail-updated-row');
     const closedRow = document.getElementById('detail-closed-row');
     const nextUpdateRow = document.getElementById('detail-next-update-row');
+    renderAgencyResponse(state === 'success' || state === 'stored' ? detailData : null);
     if (state === 'pending') {
       setDetailBadge('pending');
       problemDetails.textContent = 'Submitted details are still being saved.';
@@ -1341,12 +1343,27 @@
     nextUpdateRow.classList.toggle('hidden', !visibleNextUpdate);
   }
 
+  function renderAgencyResponse(detailData) {
+    const root = document.getElementById('detail-agency-response');
+    const response = String(detailData && detailData.agencyResponse || '').replace(/\s+/g, ' ').trim();
+    const meaningfulResponse = /^(?:N\/?A|NONE|NOT PROVIDED)$/i.test(response) ? '' : response;
+    document.getElementById('detail-agency-response-text').textContent = meaningfulResponse;
+    const publishedAt = detailData && (detailData.updatedOn || detailData.dateClosed);
+    const time = document.getElementById('detail-agency-response-time');
+    time.textContent = meaningfulResponse && publishedAt
+      ? `Portal updated ${fullTimeLabel(publishedAt)}`
+      : '';
+    time.dateTime = meaningfulResponse && publishedAt ? publishedAt : '';
+    root.classList.toggle('hidden', !meaningfulResponse);
+  }
+
   async function loadPortalDetails(record) {
     const sequence = ++detailLoadSequence;
     if (record.details_fetched_at) {
       const saved = {
         problemDetails: record.problem_details,
         additionalDetails: record.additional_details,
+        agencyResponse: record.agency_response,
         nextUpdate: record.next_update,
         dateReported: record.date_reported,
         updatedOn: record.updated_on,

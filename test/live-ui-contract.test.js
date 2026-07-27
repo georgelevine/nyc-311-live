@@ -103,6 +103,12 @@ test('request detail exposes status evidence separately from the status history 
   assert.equal($('#detail-evidence-summary').length, 1);
   assert.equal($('#detail-evidence-email').length, 1);
   assert.equal($('#detail-evidence-portal').length, 1);
+  assert.equal($('#detail-agency-response').length, 1);
+  assert.equal($('#detail-agency-response-text').length, 1);
+  assert.equal($('#detail-agency-response-time').length, 1);
+  assert.match($('#detail-agency-response').text(), /Latest agency response/i);
+  assert.match(dashboard, /agencyResponse:\s*record\.agency_response/);
+  assert.match(dashboard, /Portal updated/);
   assert.equal($('#detail-email-updates > summary').text().includes('Update history'), true);
   assert.match(dashboard, /NYC311 confirms this request is closed/);
   assert.match(dashboard, /Portal confirmation is still in progress/);

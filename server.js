@@ -23,6 +23,7 @@ const { createDashboardAuth, dashboardAuthConfig } = require('./dashboard-auth')
 const { inspectSqliteHealth } = require('./sqlite-health');
 const { originMatchesHost } = require('./request-security');
 const { normalizePortalTimestamp } = require('./portal-timestamp');
+const { attachPortalAgencyResponse } = require('./portal-agency-response');
 const { loadSqliteLiveSummary } = require('./sqlite-live-summary');
 const { loadSqliteEmailMetrics } = require('./sqlite-email-metrics');
 const { presentEmailMetrics } = require('./email-metrics-presentation');
@@ -686,6 +687,7 @@ function parsePortalDetail(html) {
       .replace(/\s+/g, ' ').trim();
     if (name && value && value !== '-') fields[name] = value;
   });
+  const agencyResponse = attachPortalAgencyResponse($, fields);
 
   const scripts = $('script').map((_, script) => $(script).html() || '').get().join('\n');
   const scriptDate = (id) => {
@@ -700,6 +702,7 @@ function parsePortalDetail(html) {
     problem: fields.Problem || null,
     problemDetails: fields['Problem Details'] || null,
     additionalDetails: fields['Additional Details'] || null,
+    agencyResponse,
     address: fields['SR Address'] || null,
     nextUpdate: fields['Time To Next Update'] || null,
     dateReported: scriptDate('srdatereported'),
@@ -1300,11 +1303,13 @@ app.get('/api/live-dashboard', (req, res) => {
          details.problem AS detail_problem, details.address AS detail_address,
          details.portal_url AS detail_portal_url,
          details.problem_details, details.additional_details, details.next_update,
+         json_extract(details.fields_json, '$."Agency Response"') AS agency_response,
          details.date_reported, details.updated_on, details.date_closed,
          details.archived_at AS details_fetched_at`
       : `NULL AS detail_portal_id, NULL AS detail_status,
          NULL AS detail_problem, NULL AS detail_address, NULL AS detail_portal_url,
          NULL AS problem_details, NULL AS additional_details, NULL AS next_update,
+         NULL AS agency_response,
          NULL AS date_reported, NULL AS updated_on, NULL AS date_closed,
          NULL AS details_fetched_at`;
     const detailJoin = hasDetails

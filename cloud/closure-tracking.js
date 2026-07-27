@@ -42,6 +42,7 @@ function closureSnapshot(detail) {
     problem: detail.problem || null,
     problemDetails: detail.problemDetails || null,
     additionalDetails: detail.additionalDetails || null,
+    agencyResponse: detail.agencyResponse || null,
     address: detail.address || null,
     nextUpdate: detail.nextUpdate || null,
     dateReported: detail.dateReported || null,

@@ -11,6 +11,11 @@
     return text || null;
   }
 
+  function narrativeOrNull(value) {
+    const text = textOrNull(value);
+    return text && !/^(?:N\/?A|NONE|NOT PROVIDED)$/i.test(text) ? text : null;
+  }
+
   function normalizedStatus(value) {
     return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
   }
@@ -324,7 +329,10 @@
 
   function snapshotNarrative(snapshot) {
     const detail = parsedSnapshot(snapshot && snapshot.snapshot);
-    return textOrNull(detail && detail.additionalDetails);
+    return narrativeOrNull(
+      detail && detail.agencyResponse
+      || detail && detail.fields && detail.fields['Agency Response']
+    );
   }
 
   function portalEvent(record, payload) {
@@ -382,7 +390,10 @@
       effective_at: effectiveAt,
       observed_at: observedAt,
       response_text: snapshotNarrative(closureSnapshot)
-        || textOrNull(parsedSnapshot(transition && transition.snapshot_json)?.additionalDetails),
+        || narrativeOrNull(
+          parsedSnapshot(transition && transition.snapshot_json)?.agencyResponse
+          || parsedSnapshot(transition && transition.snapshot_json)?.fields?.['Agency Response']
+        ),
       final_state: textOrNull(closureSnapshot && closureSnapshot.final_state),
       verification_state: verificationState,
       verification_label: verificationLabel,

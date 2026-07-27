@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const { DatabaseSync } = require('node:sqlite');
+const { agencyResponseFromFields } = require('./portal-agency-response');
 
 function textOrNull(value) {
   if (value == null) return null;
@@ -31,18 +32,20 @@ function safelyParseFields(value) {
 
 function storedPortalDetailFromRow(row) {
   if (!row) return null;
+  const fields = safelyParseFields(row.fields_json);
   return {
     srnumber: textOrNull(row.srnumber),
     status: textOrNull(row.status),
     problem: textOrNull(row.problem),
     problemDetails: textOrNull(row.problem_details),
     additionalDetails: textOrNull(row.additional_details),
+    agencyResponse: agencyResponseFromFields(fields),
     address: textOrNull(row.address),
     nextUpdate: textOrNull(row.next_update),
     dateReported: timestampOrNull(row.date_reported),
     updatedOn: timestampOrNull(row.updated_on),
     dateClosed: timestampOrNull(row.date_closed),
-    fields: safelyParseFields(row.fields_json)
+    fields
   };
 }
 

@@ -14,6 +14,10 @@ function detailHtml({
 } = {}) {
   return `
     <input id="EntityFormView_EntityID" value="${PORTAL_ID}">
+    <div id="page-wrapper">
+      <p>The mobile outreach response team reached the person, who did not want assistance.</p>
+      <div class="page-copy">Service Request Status</div>
+    </div>
     <div class="info">
       <div class="col-sm-6">
         <label>SR Number</label>
@@ -40,6 +44,11 @@ test('cloud Portal detail parser emits canonical timestamps for every detail dat
   assert.equal(parsed.record.dateReported, '2026-07-21T16:28:50.000Z');
   assert.equal(parsed.record.updatedOn, '2026-07-21T16:28:50.000Z');
   assert.equal(parsed.record.dateClosed, '2026-07-21T17:00:00.000Z');
+  assert.equal(
+    parsed.record.agencyResponse,
+    'The mobile outreach response team reached the person, who did not want assistance.'
+  );
+  assert.equal(parsed.record.fields['Agency Response'], parsed.record.agencyResponse);
 });
 
 test('cloud Portal detail parser converts an invalid published date to null', () => {
@@ -51,4 +60,31 @@ test('cloud Portal detail parser converts an invalid published date to null', ()
   assert.equal(parsed.record.dateReported, '2026-07-21T16:28:50.000Z');
   assert.equal(parsed.record.updatedOn, null);
   assert.equal(parsed.record.dateClosed, '2026-07-21T17:00:00.000Z');
+});
+
+test('cloud Portal detail parser leaves agency response empty when the Portal did not publish one', () => {
+  const parsed = parseDetail(
+    detailHtml().replace(
+      '<p>The mobile outreach response team reached the person, who did not want assistance.</p>',
+      ''
+    ),
+    '311-28310246'
+  );
+
+  assert.equal(parsed.outcome, 'found');
+  assert.equal(parsed.record.agencyResponse, null);
+  assert.equal(parsed.record.fields['Agency Response'], undefined);
+});
+
+test('cloud Portal detail parser ignores an N/A agency-response placeholder', () => {
+  const parsed = parseDetail(
+    detailHtml().replace(
+      'The mobile outreach response team reached the person, who did not want assistance.',
+      'N/A'
+    ),
+    '311-28310246'
+  );
+
+  assert.equal(parsed.record.agencyResponse, null);
+  assert.equal(parsed.record.fields['Agency Response'], undefined);
 });

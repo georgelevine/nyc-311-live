@@ -17,11 +17,13 @@ test('cloud closure snapshots are stable and retain submitted detail fields', ()
   const detail = {
     srnumber: '311-28304438',
     status: 'Closed',
+    agencyResponse: 'The outreach team visited the location.',
     dateClosed: '2026-07-20T20:00:00.000Z',
     fields: { Zebra: 'last', Alpha: 'first' }
   };
   assert.deepEqual(closureSnapshot(detail), {
     additionalDetails: null,
+    agencyResponse: 'The outreach team visited the location.',
     address: null,
     dateClosed: '2026-07-20T20:00:00.000Z',
     dateReported: null,

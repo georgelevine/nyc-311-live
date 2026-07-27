@@ -1,6 +1,7 @@
 const fetch = require('node-fetch');
 const cheerio = require('cheerio');
 const { normalizePortalTimestamp } = require('../portal-timestamp');
+const { attachPortalAgencyResponse } = require('../portal-agency-response');
 
 const MAP_URL = 'https://portal.311.nyc.gov/entity-pin-fetch-service-requests/';
 const PORTAL_HEADERS = {
@@ -25,6 +26,7 @@ function parseDetail(html, expectedNumber, expectedPortalId = null) {
     const value = field.find('.control span').first().text().replace(/\s+/g, ' ').trim();
     if (name && value && value !== '-') fields[name] = value;
   });
+  const agencyResponse = attachPortalAgencyResponse($, fields);
   const scripts = $('script').map((_, script) => $(script).html() || '').get().join('\n');
   const scriptDate = id => {
     const pattern = new RegExp(`\\$\\(["']#${id}["']\\)\\.text\\(getESTDate\\(["']([^"']+)["']\\)\\)`);
@@ -42,6 +44,7 @@ function parseDetail(html, expectedNumber, expectedPortalId = null) {
       problem: fields.Problem || null,
       problemDetails: fields['Problem Details'] || null,
       additionalDetails: fields['Additional Details'] || null,
+      agencyResponse,
       address: fields['SR Address'] || null,
       nextUpdate: fields['Time To Next Update'] || null,
       dateReported: scriptDate('srdatereported'),

@@ -74,6 +74,59 @@ test('projects a pre-subscription closure from the current Portal cycle', () => 
   assert.equal(model.events[0].verification_state, 'verified');
 });
 
+test('uses the Portal agency response as the status narrative, not submitted details', () => {
+  const payload = closurePayload({
+    closure_snapshots: [{
+      id: 4,
+      closure_cycle: 1,
+      is_final: 1,
+      final_state: 'complete',
+      fetched_at: '2026-07-23T20:01:56.170Z',
+      snapshot: {
+        status: 'Closed',
+        dateClosed: '2026-07-23T16:39:18.000Z',
+        additionalDetails: 'Person is near the northwest corner.',
+        agencyResponse: 'The outreach team reached the person, who did not want assistance.'
+      }
+    }]
+  });
+
+  const model = buildStatusUpdateModel(closedRecord(), payload, {
+    updates: [],
+    total: 0
+  });
+
+  assert.equal(
+    model.events[0].response_text,
+    'The outreach team reached the person, who did not want assistance.'
+  );
+  assert.notEqual(model.events[0].response_text, 'Person is near the northwest corner.');
+});
+
+test('reads an agency response preserved in legacy snapshot fields', () => {
+  const payload = closurePayload({
+    closure_snapshots: [{
+      id: 4,
+      closure_cycle: 1,
+      is_final: 1,
+      final_state: 'complete',
+      fetched_at: '2026-07-23T20:01:56.170Z',
+      snapshot: {
+        status: 'Closed',
+        dateClosed: '2026-07-23T16:39:18.000Z',
+        fields: {
+          'Agency Response': 'The condition was inspected and corrected.'
+        }
+      }
+    }]
+  });
+
+  assert.equal(
+    portalEvent(closedRecord(), payload).response_text,
+    'The condition was inspected and corrected.'
+  );
+});
+
 test('ignores a retained closure snapshot after a request reopens', () => {
   const record = closedRecord({
     status: 'In Progress',
