@@ -155,6 +155,21 @@
     note: document.getElementById('status-clarity-note')
   };
   const hasStatusClarityElements = Object.values(statusClarityElements).every(Boolean);
+  const legacyReconciliationElements = {
+    root: document.getElementById('legacy-reconciliation'),
+    status: document.getElementById('legacy-reconciliation-status'),
+    percent: document.getElementById('legacy-reconciliation-percent'),
+    count: document.getElementById('legacy-reconciliation-count'),
+    updated: document.getElementById('legacy-reconciliation-updated'),
+    progress: document.getElementById('legacy-reconciliation-progress'),
+    returned: document.getElementById('legacy-reconciliation-returned'),
+    closed: document.getElementById('legacy-reconciliation-closed'),
+    open: document.getElementById('legacy-reconciliation-open'),
+    omitted: document.getElementById('legacy-reconciliation-omitted'),
+    detail: document.getElementById('legacy-reconciliation-detail')
+  };
+  const hasLegacyReconciliationElements =
+    Object.values(legacyReconciliationElements).every(Boolean);
   const releaseSpeedElements = {
     root: document.getElementById('release-speed'),
     updated: document.getElementById('release-speed-updated'),
@@ -1907,6 +1922,121 @@
     document.getElementById('closures-note').textContent = `${closing.toLocaleString()} ${closing === 1 ? 'check' : 'checks'} in progress`;
   }
 
+  const legacyReconciliationStatusLabels = {
+    pending: 'Queued',
+    running: 'Checking official records',
+    paused_rate_limit: 'Respecting NYC311 rate limit',
+    applying: 'Saving verified results',
+    subscribing: 'Subscribing open requests',
+    complete: 'Complete',
+    failed: 'Needs attention'
+  };
+
+  function legacyReconciliationCount(value, maximum = Number.MAX_SAFE_INTEGER) {
+    return Number.isSafeInteger(value) && value >= 0
+      ? Math.min(value, maximum)
+      : 0;
+  }
+
+  function normalizeLegacyReconciliation(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    if (value.version !== 1 || !legacyReconciliationStatusLabels[value.status]) return null;
+    const total = legacyReconciliationCount(value.total_candidates);
+    const checked = legacyReconciliationCount(
+      value.checked,
+      total || Number.MAX_SAFE_INTEGER
+    );
+    const apiReturned = legacyReconciliationCount(value.api_returned, checked);
+    const apiClosed = legacyReconciliationCount(value.api_closed, apiReturned);
+    const apiOpen = legacyReconciliationCount(value.api_open, apiReturned);
+    const percent = total > 0
+      ? Math.min(100, Number(((checked / total) * 100).toFixed(1)))
+      : value.status === 'complete' ? 100 : 0;
+    return {
+      status: value.status,
+      total,
+      checked,
+      percent,
+      apiReturned,
+      apiOpen,
+      apiOmitted: legacyReconciliationCount(value.api_omitted, checked),
+      closuresCorrected: legacyReconciliationCount(value.closures_corrected, apiClosed),
+      subscriptionsQueued: legacyReconciliationCount(
+        value.open_subscriptions_queued,
+        apiOpen
+      ),
+      errors: legacyReconciliationCount(value.errors),
+      retryAfterSeconds: value.retry_after_seconds == null
+        ? null
+        : legacyReconciliationCount(value.retry_after_seconds, 86_400),
+      estimatedSecondsRemaining: value.estimated_seconds_remaining == null
+        ? null
+        : legacyReconciliationCount(value.estimated_seconds_remaining, 31_536_000),
+      updatedAt: value.updated_at,
+      finishedAt: value.finished_at,
+      message: typeof value.message === 'string' ? value.message.slice(0, 300).trim() : ''
+    };
+  }
+
+  function renderLegacyReconciliation(value) {
+    if (!hasLegacyReconciliationElements) return;
+    const model = normalizeLegacyReconciliation(value);
+    if (!model) {
+      legacyReconciliationElements.root.hidden = true;
+      legacyReconciliationElements.root.removeAttribute('data-state');
+      return;
+    }
+
+    const {
+      root, status, percent, count, updated, progress,
+      returned, closed, open, omitted, detail
+    } = legacyReconciliationElements;
+    root.hidden = false;
+    root.dataset.state = model.status;
+    status.textContent = legacyReconciliationStatusLabels[model.status];
+    percent.textContent = `${model.percent.toLocaleString()}%`;
+    count.textContent =
+      `${model.checked.toLocaleString()} of ${model.total.toLocaleString()} checked`;
+    progress.value = model.percent;
+    progress.textContent = `${model.percent}%`;
+    returned.textContent = model.apiReturned.toLocaleString();
+    closed.textContent = model.closuresCorrected.toLocaleString();
+    open.textContent = model.apiOpen.toLocaleString();
+    omitted.textContent = model.apiOmitted.toLocaleString();
+
+    const timestamp = model.status === 'complete'
+      ? model.finishedAt || model.updatedAt
+      : model.updatedAt;
+    const timestampLabel = timestamp && fullTimeLabel(timestamp) !== 'Unknown'
+      ? `${model.status === 'complete' ? 'Completed' : 'Updated'} ${fullTimeLabel(timestamp)}`
+      : model.status === 'pending' ? 'Waiting to start' : 'Update time unavailable';
+    const eta = model.estimatedSecondsRemaining == null
+      ? ''
+      : ` · about ${formatMetricDuration(model.estimatedSecondsRemaining)} remaining`;
+    const retry = model.status === 'paused_rate_limit' && model.retryAfterSeconds != null
+      ? ` · retrying in ${formatMetricDuration(model.retryAfterSeconds)}`
+      : '';
+    updated.textContent = `${timestampLabel}${retry || eta}`;
+
+    const defaultDetails = {
+      pending: 'The historical record list is ready for its one-time official check.',
+      running: 'Checking legacy records in rate-limited batches and saving a checkpoint after each batch.',
+      paused_rate_limit: 'NYC311 asked the repair to slow down. Progress is saved and will resume automatically.',
+      applying: 'The official results are being applied to the archive in one protected database update.',
+      subscribing: model.subscriptionsQueued
+        ? `${model.subscriptionsQueued.toLocaleString()} still-open requests have been queued for email subscription.`
+        : 'Still-open legacy requests are being queued for future email updates.',
+      complete: `${model.closuresCorrected.toLocaleString()} historical ${
+        model.closuresCorrected === 1 ? 'closure was' : 'closures were'
+      } corrected. Live monitoring continues through the existing subscription pipeline.`,
+      failed: 'The one-time repair stopped with its checkpoint saved. Existing live monitoring is unaffected.'
+    };
+    const errorNote = model.errors
+      ? ` · ${model.errors.toLocaleString()} ${model.errors === 1 ? 'error' : 'errors'} recorded`
+      : '';
+    detail.textContent = `${model.message || defaultDetails[model.status]}${errorNote}`;
+  }
+
   function renderStatusClarity(stats = {}, emailModel = lastGoodEmailMetrics) {
     if (!hasStatusClarityElements) return;
     const model = emailModel || {};
@@ -2608,6 +2738,7 @@
       lastDashboardStats = stats;
       renderOverviewStats(stats);
       renderStatusClarity(stats);
+      renderLegacyReconciliation(stats.legacy_reconciliation);
       renderCitySummary(stats.summary);
       document.getElementById('frontier-number').textContent = stats.frontier ? `311-${String(stats.frontier).padStart(8, '0')}` : '—';
       document.getElementById('last-updated').textContent = lastPortalCheck

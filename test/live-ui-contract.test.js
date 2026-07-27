@@ -98,6 +98,25 @@ test('overview exposes email delivery, enrollment, verification, and response-ti
   assert.match(dashboard, /Release timing service/);
 });
 
+test('overview exposes an honest one-time legacy reconciliation progress panel', () => {
+  assert.equal($('#legacy-reconciliation[hidden][aria-live="polite"]').length, 1);
+  assert.equal($('#legacy-reconciliation-progress[max="100"]').length, 1);
+  assert.equal($('#legacy-reconciliation-percent').length, 1);
+  assert.equal($('#legacy-reconciliation-count').length, 1);
+  assert.equal($('#legacy-reconciliation-returned').length, 1);
+  assert.equal($('#legacy-reconciliation-closed').length, 1);
+  assert.equal($('#legacy-reconciliation-open').length, 1);
+  assert.equal($('#legacy-reconciliation-omitted').length, 1);
+  assert.match($('#legacy-reconciliation').text(), /one-time historical repair/i);
+  assert.match($('#legacy-reconciliation').text(), /API is not part of live monitoring/i);
+  assert.match(dashboard, /renderLegacyReconciliation\(stats\.legacy_reconciliation\)/);
+  assert.match(dashboard, /paused_rate_limit/);
+  assert.match(dashboard, /Saving verified results/);
+  assert.match(dashboard, /Subscribing open requests/);
+  assert.match(dashboard, /root\.hidden = true/);
+  assert.match(dashboard, /progress\.value = model\.percent/);
+});
+
 test('request detail exposes status evidence separately from the status history timeline', () => {
   assert.equal($('#detail-status-evidence').length, 1);
   assert.equal($('#detail-evidence-summary').length, 1);

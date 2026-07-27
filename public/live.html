@@ -45,6 +45,59 @@
           </div>
           <p>Live demand, archive health, and observed response timing.</p>
         </header>
+        <section
+          id="legacy-reconciliation"
+          class="legacy-reconciliation"
+          aria-labelledby="legacy-reconciliation-title"
+          aria-live="polite"
+          hidden
+        >
+          <header class="legacy-reconciliation-header">
+            <div>
+              <span class="eyebrow">Historical status repair</span>
+              <h2 id="legacy-reconciliation-title">One-time reconciliation</h2>
+            </div>
+            <span id="legacy-reconciliation-status">Preparing</span>
+          </header>
+          <div class="legacy-reconciliation-lead">
+            <p>
+              <strong id="legacy-reconciliation-percent">0%</strong>
+              <span id="legacy-reconciliation-count">0 of 0 checked</span>
+            </p>
+            <time id="legacy-reconciliation-updated">Waiting to start</time>
+          </div>
+          <progress
+            id="legacy-reconciliation-progress"
+            max="100"
+            value="0"
+            aria-label="Historical reconciliation progress"
+          >0%</progress>
+          <dl class="legacy-reconciliation-breakdown">
+            <div>
+              <dt>Official records returned</dt>
+              <dd id="legacy-reconciliation-returned">0</dd>
+            </div>
+            <div>
+              <dt>Closures corrected</dt>
+              <dd id="legacy-reconciliation-closed">0</dd>
+            </div>
+            <div>
+              <dt>Still open</dt>
+              <dd id="legacy-reconciliation-open">0</dd>
+            </div>
+            <div>
+              <dt>API omissions</dt>
+              <dd id="legacy-reconciliation-omitted">0</dd>
+            </div>
+          </dl>
+          <p id="legacy-reconciliation-detail" class="legacy-reconciliation-detail">
+            Preparing the one-time historical check.
+          </p>
+          <p class="legacy-reconciliation-disclosure">
+            This is a one-time historical repair. The NYC311 API is not part of live monitoring
+            and will not continue after this run.
+          </p>
+        </section>
         <section id="city-summary" class="city-summary" aria-labelledby="city-summary-title" aria-busy="true">
           <header class="city-summary-header">
             <div>

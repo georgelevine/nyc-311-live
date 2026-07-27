@@ -219,6 +219,90 @@ function cachedLiveSummary(database, databasePath, scope = null) {
   return summary;
 }
 
+const LEGACY_RECONCILIATION_STATUSES = new Set([
+  'pending',
+  'running',
+  'paused_rate_limit',
+  'applying',
+  'subscribing',
+  'complete',
+  'failed'
+]);
+
+function reconciliationCount(value, maximum = Number.MAX_SAFE_INTEGER) {
+  return Number.isSafeInteger(value) && value >= 0
+    ? Math.min(value, maximum)
+    : 0;
+}
+
+function reconciliationTimestamp(value, fallback = null) {
+  const candidate = typeof value === 'string' && value.length <= 64
+    ? value.trim()
+    : '';
+  if (!candidate || !/^\d{4}-\d{2}-\d{2}T/.test(candidate)) return fallback;
+  const milliseconds = Date.parse(candidate);
+  return Number.isFinite(milliseconds) ? new Date(milliseconds).toISOString() : fallback;
+}
+
+function reconciliationMessage(value) {
+  if (typeof value !== 'string') return null;
+  const message = value
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return message ? message.slice(0, 300) : null;
+}
+
+function sanitizeLegacyReconciliation(value, stateUpdatedAt = null) {
+  if (typeof value === 'string' && value.length > 32_768) return null;
+  const parsed = parseState(value);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  if (parsed.version !== 1 || !LEGACY_RECONCILIATION_STATUSES.has(parsed.status)) return null;
+
+  const total = reconciliationCount(parsed.total_candidates);
+  const checked = reconciliationCount(parsed.checked, total || Number.MAX_SAFE_INTEGER);
+  const apiReturned = reconciliationCount(parsed.api_returned, checked);
+  const apiOmitted = reconciliationCount(parsed.api_omitted, checked);
+  const apiClosed = reconciliationCount(parsed.api_closed, apiReturned);
+  const apiOpen = reconciliationCount(parsed.api_open, apiReturned);
+  const closuresCorrected = reconciliationCount(parsed.closures_corrected, apiClosed);
+  const updatedAt = reconciliationTimestamp(
+    parsed.updated_at,
+    reconciliationTimestamp(stateUpdatedAt)
+  );
+
+  return {
+    version: 1,
+    status: parsed.status,
+    started_at: reconciliationTimestamp(parsed.started_at),
+    updated_at: updatedAt,
+    finished_at: reconciliationTimestamp(parsed.finished_at),
+    total_candidates: total,
+    checked,
+    percent: total > 0
+      ? Number(((checked / total) * 100).toFixed(1))
+      : parsed.status === 'complete' ? 100 : 0,
+    api_calls: reconciliationCount(parsed.api_calls),
+    api_returned: apiReturned,
+    api_omitted: apiOmitted,
+    api_closed: apiClosed,
+    api_open: apiOpen,
+    closures_corrected: closuresCorrected,
+    open_subscriptions_queued: reconciliationCount(
+      parsed.open_subscriptions_queued,
+      apiOpen
+    ),
+    errors: reconciliationCount(parsed.errors),
+    retry_after_seconds: parsed.retry_after_seconds == null
+      ? null
+      : reconciliationCount(parsed.retry_after_seconds, 86_400),
+    estimated_seconds_remaining: parsed.estimated_seconds_remaining == null
+      ? null
+      : reconciliationCount(parsed.estimated_seconds_remaining, 31_536_000),
+    message: reconciliationMessage(parsed.message)
+  };
+}
+
 function statusMonitoringMode(databasePath) {
   if (!require('fs').existsSync(databasePath)) return 'unknown';
   let database;
@@ -1482,6 +1566,15 @@ app.get('/api/live-dashboard', (req, res) => {
     const auditRunRow = database.prepare(`
       SELECT value FROM live_monitor_state WHERE key = 'audit_run'
     `).get();
+    const legacyReconciliationRow = database.prepare(`
+      SELECT value,updated_at
+      FROM live_monitor_state
+      WHERE key = 'legacy_reconciliation'
+    `).get();
+    totals.legacy_reconciliation = sanitizeLegacyReconciliation(
+      legacyReconciliationRow && legacyReconciliationRow.value,
+      legacyReconciliationRow && legacyReconciliationRow.updated_at
+    );
     const catchupWindow = parseState(catchupWindowRow && catchupWindowRow.value);
     if (catchupWindow && Number.isInteger(Number(catchupWindow.low_suffix)) &&
         Number.isInteger(Number(catchupWindow.high_suffix))) {
@@ -1651,5 +1744,12 @@ const onListen = () => {
   console.log(`NYC BID 311 Explorer running at http://localhost:${PORT}`);
 };
 
-if (HOST) app.listen(PORT, HOST, onListen);
-else app.listen(PORT, onListen);
+if (process.env.NYC311_SERVER_NO_LISTEN !== '1') {
+  if (HOST) app.listen(PORT, HOST, onListen);
+  else app.listen(PORT, onListen);
+}
+
+module.exports = {
+  app,
+  sanitizeLegacyReconciliation
+};
