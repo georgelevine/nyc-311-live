@@ -177,6 +177,15 @@ test('compact live dashboard returns records and only key-value monitor stats', 
   assert.equal(payload.stats.legacy_reconciliation.percent, 100);
 });
 
+test('dashboard defaults to the safe compact path for older browser clients', async () => {
+  const response = await fetch(`${baseUrl}/api/live-dashboard?limit=1`);
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.equal(payload.records.length, 1);
+  assert.equal(payload.stats.compact, true);
+  assert.equal(Object.hasOwn(payload.stats, 'total'), false);
+});
+
 test('compact query flag accepts only exact 0 or 1 values', async () => {
   for (const value of ['', 'true', 'yes', '2', '-1']) {
     const response = await fetch(
@@ -203,6 +212,14 @@ test('map fast path returns records without archive totals', async () => {
     has_more: true,
     next_before_suffix: 28390001
   });
+});
+
+test('map defaults to skipping totals for older browser clients', async () => {
+  const response = await fetch(`${baseUrl}/api/live-map?limit=1`);
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.equal(payload.records.length, 1);
+  assert.equal(Object.hasOwn(payload, 'stats'), false);
 });
 
 test('map totals flag accepts only exact 0 or 1 values', async () => {

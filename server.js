@@ -306,7 +306,7 @@ function sanitizeLegacyReconciliation(value, stateUpdatedAt = null) {
 
 function liveDashboardCompactMode(req) {
   if (!req.query || !Object.prototype.hasOwnProperty.call(req.query, 'compact')) {
-    return false;
+    return true;
   }
   const value = req.query.compact;
   if (value !== '0' && value !== '1') {
@@ -319,7 +319,7 @@ function liveDashboardCompactMode(req) {
 
 function liveMapIncludeTotals(req) {
   if (!req.query || !Object.prototype.hasOwnProperty.call(req.query, 'include_totals')) {
-    return true;
+    return false;
   }
   const value = req.query.include_totals;
   if (value !== '0' && value !== '1') {
