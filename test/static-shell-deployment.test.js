@@ -46,5 +46,18 @@ test('activation and rollback recreate the proxy against the selected release', 
     2
   );
   assert.match(deploy, /public_shell_url="https:\/\/311\.georgelevine\.com\/"/);
-  assert.match(deploy, /The public dashboard shell did not reach the new static release/);
+  assert.match(deploy, /for _attempt in \$\(seq 1 30\)/);
+  assert.match(
+    deploy,
+    /The public HTTPS health check and dashboard shell did not become ready in time/
+  );
+});
+
+test('rollback cannot recurse or continue a failed deployment', () => {
+  const rollback = deploy.slice(
+    deploy.indexOf('rollback() {'),
+    deploy.indexOf('trap rollback ERR')
+  );
+  assert.match(rollback, /trap - ERR/);
+  assert.match(rollback, /exit 1/);
 });

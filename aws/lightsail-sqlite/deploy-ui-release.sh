@@ -147,6 +147,10 @@ mv -- "${current_directory}" "${previous_directory}"
 mv -- "${staging_directory}" "${current_directory}"
 
 rollback() {
+  # An ERR trap inherits the shell's execution context. Disable it before
+  # attempting recovery so a failed recovery command cannot recursively move
+  # the restored release or let the failed deployment continue.
+  trap - ERR
   set +e
   if [[ -d "${current_directory}" ]]; then
     mv -- "${current_directory}" "${failed_directory}"
@@ -161,6 +165,7 @@ rollback() {
     fi
   fi
   echo "${deployment_scope} deployment failed and the previous release was restored." >&2
+  exit 1
 }
 trap rollback ERR
 
@@ -184,10 +189,19 @@ if [[ ${healthy} -ne 1 ]]; then
   echo "The local web health check did not recover in time." >&2
   false
 fi
-curl --fail --silent --show-error "${public_health_url}" >/dev/null
-public_shell="$(curl --fail --silent --show-error "${public_shell_url}")"
-if [[ "${public_shell}" != *"<title>NYC 311 Live</title>"* ]]; then
-  echo "The public dashboard shell did not reach the new static release." >&2
+public_ready=0
+for _attempt in $(seq 1 30); do
+  if curl --fail --silent --show-error "${public_health_url}" >/dev/null 2>&1; then
+    public_shell="$(curl --fail --silent --show-error "${public_shell_url}" 2>/dev/null || true)"
+    if [[ "${public_shell}" == *"<title>NYC 311 Live</title>"* ]]; then
+      public_ready=1
+      break
+    fi
+  fi
+  sleep 2
+done
+if [[ ${public_ready} -ne 1 ]]; then
+  echo "The public HTTPS health check and dashboard shell did not become ready in time." >&2
   false
 fi
 
