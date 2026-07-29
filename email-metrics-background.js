@@ -276,6 +276,38 @@ function createEmailMetricsBackground(options = {}) {
     };
   }
 
+  // Read the small persisted snapshot without ever launching analytics work.
+  // Operational health uses this path so checking health cannot itself make
+  // the live site unhealthy.
+  function peek(nextDatabasePath) {
+    configure(nextDatabasePath);
+    const currentTime = now();
+    const fresh = snapshot && currentTime - snapshot.generatedAtMs < cacheTtlMs;
+    if (snapshot) {
+      return {
+        statusCode: snapshot.payload.database_available === false ? 503 : 200,
+        payload: {
+          ...publicPayload(snapshot, {
+            refreshing: Boolean(activeWorker),
+            stale: !fresh,
+            lastError
+          }),
+          metrics_refresh_disabled: !refreshEnabled
+        },
+        refreshEnabled
+      };
+    }
+    return {
+      statusCode: 503,
+      payload: {
+        error: 'Email monitoring metrics are temporarily unavailable',
+        metrics_refreshing: Boolean(activeWorker),
+        metrics_refresh_disabled: !refreshEnabled
+      },
+      refreshEnabled
+    };
+  }
+
   function close() {
     if (!activeWorker) return;
     const worker = activeWorker;
@@ -288,6 +320,7 @@ function createEmailMetricsBackground(options = {}) {
   return {
     close,
     get,
+    peek,
     isRefreshing: () => Boolean(activeWorker)
   };
 }

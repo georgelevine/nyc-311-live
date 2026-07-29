@@ -26,6 +26,7 @@ const { normalizePortalTimestamp } = require('./portal-timestamp');
 const { attachPortalAgencyResponse } = require('./portal-agency-response');
 const { loadSqliteLiveSummary } = require('./sqlite-live-summary');
 const { createEmailMetricsBackground } = require('./email-metrics-background');
+const { loadOperationalHealth } = require('./operational-health');
 const { readStoredPortalDetail } = require('./stored-portal-detail');
 const { readRequestEmailUpdates } = require('./nyc311-email-events');
 const {
@@ -47,9 +48,11 @@ const dashboardAuth = dashboardAuthConfig();
 const dashboardSettingsAuth = createDashboardAuth(dashboardAuth, { publicPaths: [] });
 const LIVE_SUMMARY_CACHE_TTL_MS = 15_000;
 const ARCHIVE_QUALITY_CACHE_TTL_MS = 5 * 60_000;
+const OPERATIONAL_HEALTH_CACHE_TTL_MS = 15_000;
 const liveSummaryCache = new Map();
 const archiveQualityCache = new Map();
 const emailMetricsBackground = createEmailMetricsBackground();
+let operationalHealthCache = null;
 
 function tableExists(database, name) {
   return Boolean(database.prepare(
@@ -299,6 +302,81 @@ function sanitizeLegacyReconciliation(value, stateUpdatedAt = null) {
       : reconciliationCount(parsed.estimated_seconds_remaining, 31_536_000),
     message: reconciliationMessage(parsed.message)
   };
+}
+
+function liveDashboardCompactMode(req) {
+  if (!req.query || !Object.prototype.hasOwnProperty.call(req.query, 'compact')) {
+    return false;
+  }
+  const value = req.query.compact;
+  if (value !== '0' && value !== '1') {
+    const error = new Error('compact must be 0 or 1');
+    error.statusCode = 400;
+    throw error;
+  }
+  return value === '1';
+}
+
+function liveMapIncludeTotals(req) {
+  if (!req.query || !Object.prototype.hasOwnProperty.call(req.query, 'include_totals')) {
+    return true;
+  }
+  const value = req.query.include_totals;
+  if (value !== '0' && value !== '1') {
+    const error = new Error('include_totals must be 0 or 1');
+    error.statusCode = 400;
+    throw error;
+  }
+  return value === '1';
+}
+
+function emptyCompactDashboardStats() {
+  return {
+    compact: true,
+    frontier: null,
+    last_successful_poll_at: null,
+    last_seen_at: null,
+    poll_interval_seconds: 15,
+    legacy_reconciliation: null
+  };
+}
+
+function compactLiveDashboardStats(database) {
+  const stats = emptyCompactDashboardStats();
+  if (!tableExists(database, 'live_monitor_state')) return stats;
+
+  // These primary-key lookups deliberately avoid all archive-wide counts. The
+  // compact dashboard is the first-paint path, so it must remain responsive
+  // even while the collector is writing or analytics are being refreshed.
+  const stateByKey = database.prepare(`
+    SELECT value,updated_at
+    FROM live_monitor_state
+    WHERE key=?
+  `);
+  const frontierRow = stateByKey.get('live_frontier');
+  const lastPollRow = stateByKey.get('last_successful_poll_at');
+  const pollIntervalRow = stateByKey.get('poll_interval_seconds');
+  const reconciliationRow = stateByKey.get('legacy_reconciliation');
+
+  const frontier = frontierRow ? Number(frontierRow.value) : Number.NaN;
+  if (Number.isSafeInteger(frontier) && frontier >= 0) {
+    stats.frontier = frontier;
+  }
+  const lastSuccessfulPollAt = reconciliationTimestamp(lastPollRow && lastPollRow.value);
+  stats.last_successful_poll_at = lastSuccessfulPollAt;
+  // Keep the existing dashboard field during the compact-mode transition.
+  // A successful Portal poll is the lightweight freshness signal stored by
+  // the collector; finding MAX(last_seen_at) would scan the request archive.
+  stats.last_seen_at = lastSuccessfulPollAt;
+  const pollInterval = pollIntervalRow ? Number(pollIntervalRow.value) : Number.NaN;
+  if (Number.isSafeInteger(pollInterval) && pollInterval > 0 && pollInterval <= 3_600) {
+    stats.poll_interval_seconds = pollInterval;
+  }
+  stats.legacy_reconciliation = sanitizeLegacyReconciliation(
+    reconciliationRow && reconciliationRow.value,
+    reconciliationRow && reconciliationRow.updated_at
+  );
+  return stats;
 }
 
 function releaseInfoPath(databasePath) {
@@ -1079,13 +1157,19 @@ app.get('/api/live-map', (req, res) => {
   let database;
   res.setHeader('Cache-Control', 'no-store');
   try {
-    if (!require('fs').existsSync(databasePath)) return res.json(buildLiveMapPayload([]));
+    const includeTotals = liveMapIncludeTotals(req);
+    const emptyPayload = () => {
+      const payload = buildLiveMapPayload([]);
+      if (!includeTotals) delete payload.stats;
+      return payload;
+    };
+    if (!require('fs').existsSync(databasePath)) return res.json(emptyPayload());
     const { DatabaseSync } = require('node:sqlite');
     database = new DatabaseSync(databasePath, { readOnly: true });
     const tables = new Set(database.prepare(`
       SELECT name FROM sqlite_master WHERE type='table'
     `).all().map(row => row.name));
-    if (!tables.has('live_portal_requests')) return res.json(buildLiveMapPayload([]));
+    if (!tables.has('live_portal_requests')) return res.json(emptyPayload());
     const scope = requestGeographyScope(req, database);
     const rawPageLimit = req.query && req.query.limit;
     const rawBeforeSuffix = req.query && req.query.before_suffix;
@@ -1185,16 +1269,18 @@ app.get('/api/live-map', (req, res) => {
       );
     }
     const mappedWhere = `WHERE ${mappedPredicates.join(' AND ')}`;
-    const totals = database.prepare(`
-      SELECT
-        COUNT(*) AS total,
-        COALESCE(SUM(
-          live.latitude BETWEEN -90 AND 90
-          AND live.longitude BETWEEN -180 AND 180
-        ), 0) AS mapped_total
-      FROM live_portal_requests AS live
-      ${scopeWhere}
-    `).get(scopeParameters(scope));
+    const totals = includeTotals
+      ? database.prepare(`
+          SELECT
+            COUNT(*) AS total,
+            COALESCE(SUM(
+              live.latitude BETWEEN -90 AND 90
+              AND live.longitude BETWEEN -180 AND 180
+            ), 0) AS mapped_total
+          FROM live_portal_requests AS live
+          ${scopeWhere}
+        `).get(scopeParameters(scope))
+      : null;
     const queryParameters = {
       ...scopeParameters(scope),
       ...(beforeSuffix != null ? { before_suffix: beforeSuffix } : {}),
@@ -1221,13 +1307,14 @@ app.get('/api/live-map', (req, res) => {
       ${pageClause}
     `);
     const rows = statement.all(queryParameters);
-    const total = Number(totals.total || 0);
-    const mappedTotal = Number(totals.mapped_total || 0);
-    const payload = buildLiveMapPayload(rows, {
+    const total = totals ? Number(totals.total || 0) : null;
+    const mappedTotal = totals ? Number(totals.mapped_total || 0) : null;
+    const payload = buildLiveMapPayload(rows, totals ? {
       total,
       mapped_total: mappedTotal,
       unmapped_total: Math.max(0, total - mappedTotal)
-    });
+    } : null);
+    if (!includeTotals) delete payload.stats;
     if (pageLimit != null) {
       const lastRecord = payload.records[payload.records.length - 1];
       payload.page = {
@@ -1239,7 +1326,9 @@ app.get('/api/live-map', (req, res) => {
     }
     return res.json(payload);
   } catch (error) {
-    console.error('Live map data error:', error.message);
+    if (!error.statusCode || error.statusCode >= 500) {
+      console.error('Live map data error:', error.message);
+    }
     return res.status(error.statusCode || 503).json(
       error.statusCode ? { error: error.message } : buildLiveMapPayload([])
     );
@@ -1295,6 +1384,47 @@ app.get('/api/email-metrics', (req, res) => {
   }
 });
 
+app.get('/api/operational-health', (req, res) => {
+  const databasePath = process.env.DATABASE_PATH
+    || path.join(__dirname, 'data', 'portal-archive.sqlite');
+  const now = Date.now();
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    if (
+      operationalHealthCache
+      && operationalHealthCache.databasePath === databasePath
+      && now - operationalHealthCache.createdAt < OPERATIONAL_HEALTH_CACHE_TTL_MS
+    ) {
+      return res.status(operationalHealthCache.statusCode)
+        .json(operationalHealthCache.payload);
+    }
+    const analyticsSnapshot = emailMetricsBackground.peek(databasePath);
+    const payload = loadOperationalHealth(databasePath, { analyticsSnapshot });
+    const statusCode = payload.components.database.available ? 200 : 503;
+    operationalHealthCache = {
+      databasePath,
+      createdAt: now,
+      statusCode,
+      payload
+    };
+    return res.status(statusCode).json(payload);
+  } catch (error) {
+    console.error('Operational health error:', error.message);
+    return res.status(503).json({
+      version: 1,
+      generated_at: new Date(now).toISOString(),
+      status: 'attention',
+      components: {
+        database: {
+          status: 'attention',
+          reason: 'health_check_unavailable',
+          available: false
+        }
+      }
+    });
+  }
+});
+
 app.get('/api/release-info', (req, res) => {
   const databasePath = process.env.DATABASE_PATH
     || path.join(__dirname, 'data', 'portal-archive.sqlite');
@@ -1316,6 +1446,16 @@ app.get('/api/release-info', (req, res) => {
 app.get('/api/live-dashboard', (req, res) => {
   const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
   const limit = Math.max(1, Math.min(1000, Number(req.query.limit || 500)));
+  let compact;
+  try {
+    compact = liveDashboardCompactMode(req);
+  } catch (error) {
+    return res.status(error.statusCode || 400).json({
+      error: error.message,
+      records: [],
+      stats: {}
+    });
+  }
   const requestedSrnumber = req.query.srnumber == null || String(req.query.srnumber).trim() === ''
     ? null
     : String(req.query.srnumber).trim().toUpperCase();
@@ -1329,7 +1469,12 @@ app.get('/api/live-dashboard', (req, res) => {
   let database;
   try {
     if (!require('fs').existsSync(databasePath)) {
-      return res.json({ records: [], stats: { total: 0, pending: 0, frontier: null, last_seen_at: null } });
+      return res.json({
+        records: [],
+        stats: compact
+          ? emptyCompactDashboardStats()
+          : { total: 0, pending: 0, frontier: null, last_seen_at: null }
+      });
     }
     const { DatabaseSync } = require('node:sqlite');
     database = new DatabaseSync(databasePath, { readOnly: true });
@@ -1454,6 +1599,12 @@ app.get('/api/live-dashboard', (req, res) => {
           : null);
       return { ...record, ...assessRecordAvailability(record) };
     });
+    if (compact) {
+      return res.json({
+        records,
+        stats: compactLiveDashboardStats(database)
+      });
+    }
     const capturedPredicates = scopePredicates('captured', scope);
     const capturedScopeSql = capturedPredicates.join(' AND ');
     const capturedScopeWhere = capturedScopeSql ? `WHERE ${capturedScopeSql}` : '';
@@ -1712,5 +1863,8 @@ if (process.env.NYC311_SERVER_NO_LISTEN !== '1') {
 
 module.exports = {
   app,
+  compactLiveDashboardStats,
+  liveDashboardCompactMode,
+  liveMapIncludeTotals,
   sanitizeLegacyReconciliation
 };

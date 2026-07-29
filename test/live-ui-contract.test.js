@@ -98,6 +98,30 @@ test('overview exposes email delivery, enrollment, verification, and response-ti
   assert.match(dashboard, /Release timing service/);
 });
 
+test('overview exposes lightweight health for every live pipeline', () => {
+  assert.equal($('#system-health[aria-busy="true"]').length, 1);
+  assert.equal($('#system-health-overall').length, 1);
+  assert.equal($('#system-health-updated').length, 1);
+  assert.deepEqual(
+    $('[data-health-component]').map((_index, element) => (
+      $(element).attr('data-health-component')
+    )).get(),
+    [
+      'database',
+      'collector',
+      'map',
+      'details',
+      'email',
+      'subscriptions',
+      'closures',
+      'analytics'
+    ]
+  );
+  assert.match(dashboard, /fetchJson\('\/api\/operational-health'/);
+  assert.match(dashboard, /const OPERATIONAL_HEALTH_REFRESH_MS = 15_000/);
+  assert.match(dashboard, /refreshOperationalHealth\(\)\.finally/);
+});
+
 test('overview exposes an honest one-time legacy reconciliation progress panel', () => {
   assert.equal($('#legacy-reconciliation[hidden][aria-live="polite"]').length, 1);
   assert.equal($('#legacy-reconciliation-progress[max="100"]').length, 1);
@@ -208,12 +232,22 @@ test('map startup is self-hosted, bounded, and automatically recoverable', () =>
   );
   assert.equal($('#map-load-status[role="status"]').length, 1);
   assert.match(dashboard, /chunkedLoading:\s*true/);
-  assert.match(dashboard, /const MAP_PAGE_SIZE = 5_000/);
+  assert.match(dashboard, /const MAP_INITIAL_PAGE_SIZE = 250/);
+  assert.match(dashboard, /const MAP_PAGE_SIZE = 1_000/);
   assert.match(dashboard, /const MAP_REFRESH_MS = 5 \* 60_000/);
   assert.match(dashboard, /const MAP_REQUEST_TIMEOUT_MS = 15_000/);
   assert.match(dashboard, /const MAP_RETRY_MS = 3_000/);
   assert.match(dashboard, /const MAX_VISIBLE_RECORDS = 300/);
-  assert.match(dashboard, /live-dashboard', \{ limit: 300 \}/);
+  assert.match(dashboard, /const INITIAL_VISIBLE_RECORDS = 100/);
+  assert.match(
+    dashboard,
+    /const requestLimit = dashboardPayloadLoaded\s*\? MAX_VISIBLE_RECORDS\s*: INITIAL_VISIBLE_RECORDS/
+  );
+  assert.match(dashboard, /live-dashboard', \{\s*limit: requestLimit,\s*compact: 1\s*\}/);
+  assert.match(dashboard, /pagesLoaded === 0 \? MAP_INITIAL_PAGE_SIZE : MAP_PAGE_SIZE/);
+  assert.match(dashboard, /include_totals:\s*0/);
+  assert.match(dashboard, /while \(hasMore && pagesLoaded < 500\)/);
+  assert.match(dashboard, /await new Promise\(resolve => window\.requestAnimationFrame\(resolve\)\)/);
   assert.match(dashboard, /before_suffix:\s*beforeSuffix/);
   assert.match(dashboard, /submitted_since:\s*submittedSince/);
   assert.match(dashboard, /mergeMapRecords\(records\)/);

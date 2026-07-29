@@ -91,6 +91,7 @@ if [[ "${deployment_scope}" == "web" ]]; then
     --exclude=server.js \
     --exclude=sqlite-email-metrics.js --exclude=email-metrics-presentation.js \
     --exclude=email-metrics-background.js --exclude=email-metrics-worker.js \
+    --exclude=operational-health.js \
     --exclude=deploy-ui-release.sh --exclude=deploy-ui.sh \
     "${current_directory}" "${staging_directory}")"; then
     true

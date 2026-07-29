@@ -46,6 +46,68 @@
           <p>Live demand, archive health, and observed response timing.</p>
         </header>
         <section
+          id="system-health"
+          class="system-health"
+          aria-labelledby="system-health-title"
+          aria-busy="true"
+        >
+          <header class="system-health-header">
+            <div>
+              <span class="eyebrow">System health</span>
+              <h2 id="system-health-title">Collection pipeline</h2>
+            </div>
+            <span id="system-health-overall" class="system-health-badge" data-status="starting">
+              Checking…
+            </span>
+          </header>
+          <div class="system-health-grid">
+            <article data-health-component="database">
+              <span>Website &amp; database</span>
+              <strong id="health-database-status">Checking</strong>
+              <small id="health-database-detail">Testing the live service</small>
+            </article>
+            <article data-health-component="collector">
+              <span>New requests</span>
+              <strong id="health-collector-status">Checking</strong>
+              <small id="health-collector-detail">Reading the collector heartbeat</small>
+            </article>
+            <article data-health-component="map">
+              <span>Map feed</span>
+              <strong id="health-map-status">Checking</strong>
+              <small id="health-map-detail">Checking map discovery</small>
+            </article>
+            <article data-health-component="details">
+              <span>Submitted details</span>
+              <strong id="health-details-status">Checking</strong>
+              <small id="health-details-detail">Checking detail hydration</small>
+            </article>
+            <article data-health-component="email">
+              <span>Email updates</span>
+              <strong id="health-email-status">Checking</strong>
+              <small id="health-email-detail">Checking the latest received response</small>
+            </article>
+            <article data-health-component="subscriptions">
+              <span>Subscriptions</span>
+              <strong id="health-subscriptions-status">Checking</strong>
+              <small id="health-subscriptions-detail">Checking enrollment work</small>
+            </article>
+            <article data-health-component="closures">
+              <span>Closure verification</span>
+              <strong id="health-closures-status">Checking</strong>
+              <small id="health-closures-detail">Checking final-status work</small>
+            </article>
+            <article data-health-component="analytics">
+              <span>Response statistics</span>
+              <strong id="health-analytics-status">Checking</strong>
+              <small id="health-analytics-detail">Checking the saved snapshot</small>
+            </article>
+          </div>
+          <footer class="system-health-footer">
+            <time id="system-health-updated">Waiting for the first health check</time>
+            <span>Health checks never scan the full request archive.</span>
+          </footer>
+        </section>
+        <section
           id="legacy-reconciliation"
           class="legacy-reconciliation"
           aria-labelledby="legacy-reconciliation-title"

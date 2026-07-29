@@ -110,6 +110,36 @@
     status: document.getElementById('city-summary-status')
   };
   const hasSummaryElements = Object.values(summaryElements).every(Boolean);
+  const healthComponentNames = [
+    'database',
+    'collector',
+    'map',
+    'details',
+    'email',
+    'subscriptions',
+    'closures',
+    'analytics'
+  ];
+  const systemHealthElements = {
+    root: document.getElementById('system-health'),
+    overall: document.getElementById('system-health-overall'),
+    updated: document.getElementById('system-health-updated'),
+    cards: Object.fromEntries(healthComponentNames.map(name => [
+      name,
+      {
+        root: document.querySelector(`[data-health-component="${name}"]`),
+        status: document.getElementById(`health-${name}-status`),
+        detail: document.getElementById(`health-${name}-detail`)
+      }
+    ]))
+  };
+  const hasSystemHealthElements = Boolean(
+    systemHealthElements.root
+    && systemHealthElements.overall
+    && systemHealthElements.updated
+    && Object.values(systemHealthElements.cards)
+      .every(card => card.root && card.status && card.detail)
+  );
   const emailMetricElements = {
     root: document.getElementById('email-monitoring'),
     mode: document.getElementById('email-monitoring-mode'),
@@ -191,7 +221,9 @@
   };
   const hasDetailEvidenceElements = Object.values(detailEvidenceElements).every(Boolean);
   const MAX_VISIBLE_RECORDS = 300;
-  const MAP_PAGE_SIZE = 5_000;
+  const INITIAL_VISIBLE_RECORDS = 100;
+  const MAP_INITIAL_PAGE_SIZE = 250;
+  const MAP_PAGE_SIZE = 1_000;
   const MAP_REFRESH_MS = 5 * 60_000;
   const MAP_REQUEST_TIMEOUT_MS = 15_000;
   const MAP_RETRY_MS = 3_000;
@@ -199,6 +231,7 @@
   const EMAIL_METRICS_REFRESH_MS = 60_000;
   const EMAIL_METRICS_REFRESHING_RETRY_MS = 2_500;
   const RELEASE_INFO_REFRESH_MS = 5 * 60_000;
+  const OPERATIONAL_HEALTH_REFRESH_MS = 15_000;
   const DASHBOARD_MIN_REFRESH_MS = 5_000;
   const STATUS_HISTORY_REFRESH_MS = 15_000;
   let records = [];
@@ -211,7 +244,12 @@
   let markerByNumber = new Map();
   let markerSignatureByNumber = new Map();
   let mapScope = '24h';
-  let mapStats = { total: 0, mapped_total: 0, unmapped_total: 0 };
+  let mapStats = {
+    total: 0,
+    mapped_total: 0,
+    unmapped_total: 0,
+    totals_available: false
+  };
   let mapShownCount = 0;
   let mapRenderFrame = null;
   let refreshInFlight = false;
@@ -247,6 +285,8 @@
   let overviewDataStarted = false;
   let overviewEmailMetricsTimer = null;
   let overviewReleaseInfoTimer = null;
+  let overviewHealthTimer = null;
+  let operationalHealthInFlight = false;
   let lastEmailMetricsAttemptAt = 0;
   let lastReleaseInfoAttemptAt = 0;
   let emailMetricsRefreshPending = false;
@@ -374,6 +414,10 @@
       window.clearTimeout(overviewReleaseInfoTimer);
       overviewReleaseInfoTimer = null;
     }
+    if (overviewHealthTimer !== null) {
+      window.clearTimeout(overviewHealthTimer);
+      overviewHealthTimer = null;
+    }
   }
 
   function scheduleOverviewEmailMetrics(delayMs = EMAIL_METRICS_REFRESH_MS) {
@@ -394,6 +438,15 @@
     }, Math.max(0, delayMs));
   }
 
+  function scheduleOverviewHealth(delayMs = OPERATIONAL_HEALTH_REFRESH_MS) {
+    if (!overviewIsActive() || overviewHealthTimer !== null) return;
+    overviewHealthTimer = window.setTimeout(async () => {
+      overviewHealthTimer = null;
+      await refreshOperationalHealth();
+      scheduleOverviewHealth();
+    }, Math.max(0, delayMs));
+  }
+
   function syncOverviewRefreshes(active = overviewIsActive()) {
     clearOverviewRefreshTimers();
     if (!active) return;
@@ -404,6 +457,7 @@
       showEmailMetricsCalculating();
       void refreshEmailMetrics().finally(() => scheduleOverviewEmailMetrics());
       void refreshReleaseInfo().finally(() => scheduleOverviewReleaseInfo());
+      void refreshOperationalHealth().finally(() => scheduleOverviewHealth());
       return;
     }
 
@@ -414,6 +468,7 @@
       0,
       RELEASE_INFO_REFRESH_MS - (now - lastReleaseInfoAttemptAt)
     ));
+    scheduleOverviewHealth(0);
   }
 
   const submittedMillis = record => {
@@ -725,6 +780,11 @@
   }
 
   function updateMapCountText() {
+    if (!mapStats.totals_available) {
+      const label = `${mapShownCount.toLocaleString()} shown · ${mapRecords.length.toLocaleString()} pins loaded`;
+      if (mapCounts.textContent !== label) mapCounts.textContent = label;
+      return;
+    }
     const captured = Number.isFinite(Number(mapStats.total)) ? Number(mapStats.total) : 0;
     const unmapped = Number.isFinite(Number(mapStats.unmapped_total))
       ? Number(mapStats.unmapped_total)
@@ -1827,7 +1887,8 @@
     try {
       const payload = await fetchJson(scopedUrl('/api/live-dashboard', {
         limit: 1,
-        srnumber
+        srnumber,
+        compact: 1
       }), 'Archive search');
       if (sequence !== archiveSearchSequence || exactSrnumberQuery() !== srnumber) return;
       const found = Array.isArray(payload.records) ? payload.records[0] : null;
@@ -1935,6 +1996,8 @@
     const incoming = Array.isArray(payload) ? payload : payload.records || [];
     const stats = Array.isArray(payload) ? {} : payload.stats || {};
     mergeMapRecords(incoming);
+    const totalsAvailable = Number.isFinite(Number(stats.total))
+      || Number.isFinite(Number(dashboardStats && dashboardStats.total));
     const total = finiteStat(stats.total, finiteStat(dashboardStats.total, mapRecords.length));
     const mapped = finiteStat(stats.mapped_total, mapRecords.length);
     mapStats = {
@@ -1943,7 +2006,8 @@
       unmapped_total: finiteStat(
         stats.unmapped_total,
         finiteStat(dashboardStats.unmapped_total, Math.max(0, total - mapped))
-      )
+      ),
+      totals_available: totalsAvailable
     };
     syncStatuses();
     renderMap();
@@ -1957,10 +2021,12 @@
   }
 
   function updateMapStatsFromDashboard(stats) {
+    const totalsAvailable = Number.isFinite(Number(stats.total));
     mapStats = {
       ...mapStats,
       total: finiteStat(stats.total, mapStats.total),
-      unmapped_total: finiteStat(stats.unmapped_total, mapStats.unmapped_total)
+      unmapped_total: finiteStat(stats.unmapped_total, mapStats.unmapped_total),
+      totals_available: totalsAvailable || mapStats.totals_available
     };
     updateMapCountText();
   }
@@ -1971,6 +2037,20 @@
   }
 
   function renderOverviewStats(stats) {
+    if (stats && stats.compact && stats.total == null) {
+      document.getElementById('total-count').textContent = '—';
+      document.getElementById('details-coverage-rate').textContent = '—';
+      document.getElementById('details-coverage-note').textContent =
+        'Archive scan skipped on the live path';
+      document.getElementById('map-coverage-rate').textContent = '—';
+      document.getElementById('map-coverage-note').textContent =
+        'Pins load directly on the map';
+      document.getElementById('pending-count').textContent = '—';
+      document.getElementById('closures-count').textContent = '—';
+      document.getElementById('closures-note').textContent =
+        'See live pipeline health above';
+      return;
+    }
     const total = finiteStat(stats.total);
     const detailsPending = finiteStat(stats.details_pending);
     const detailsLoaded = finiteStat(stats.details_loaded, Math.max(0, total - detailsPending));
@@ -2144,10 +2224,15 @@
     statusClarityElements.closedEmailNote.textContent = verification.awaiting_within_grace
       ? `${verification.awaiting_within_grace.toLocaleString()} known closures still inside grace`
       : 'Fast closure signal from NYC311 email';
-    statusClarityElements.portalClosedCount.textContent = finalized.toLocaleString();
-    statusClarityElements.portalClosedNote.textContent = closing
-      ? `${closing.toLocaleString()} ${closing === 1 ? 'closure is' : 'closures are'} being verified`
-      : 'No final verifications waiting';
+    const compactArchiveStats = stats.compact && stats.closures_finalized == null;
+    statusClarityElements.portalClosedCount.textContent = compactArchiveStats
+      ? '—'
+      : finalized.toLocaleString();
+    statusClarityElements.portalClosedNote.textContent = compactArchiveStats
+      ? 'Archive-wide count skipped on live load'
+      : closing
+        ? `${closing.toLocaleString()} ${closing === 1 ? 'closure is' : 'closures are'} being verified`
+        : 'No final verifications waiting';
     const subscriptionBacklog = pending + processing + retry;
     const catchup = [
       subscriptionBacklog
@@ -2170,6 +2255,161 @@
     const seconds = Number(value);
     if (!Number.isFinite(seconds) || seconds < 0) return '—';
     return formatMetricDuration(seconds);
+  }
+
+  function healthAge(seconds) {
+    const value = Number(seconds);
+    if (!Number.isFinite(value) || value < 0) return 'an unknown time';
+    if (value < 5) return 'just now';
+    if (value < 60) return `${Math.round(value)}s ago`;
+    if (value < 60 * 60) return `${Math.round(value / 60)}m ago`;
+    if (value < 24 * 60 * 60) return `${Math.round(value / 3600)}h ago`;
+    return `${Math.round(value / 86400)}d ago`;
+  }
+
+  function healthDuration(seconds) {
+    const value = Number(seconds);
+    if (!Number.isFinite(value) || value < 0) return 'unknown';
+    if (value < 60) return `${Math.round(value)}s`;
+    if (value < 60 * 60) return `${Math.round(value / 60)}m`;
+    if (value < 24 * 60 * 60) return `${Math.round(value / 3600)}h`;
+    return `${Math.round(value / 86400)}d`;
+  }
+
+  function healthStatusLabel(component, name) {
+    const status = String(component && component.status || 'attention');
+    if (status === 'healthy') return 'Working';
+    if (status === 'delayed') return 'Delayed';
+    if (status === 'quiet') {
+      if (name === 'analytics') return component.available ? 'Saved' : 'Paused';
+      if (name === 'email') return 'Quiet';
+      return 'Up to date';
+    }
+    return 'Needs attention';
+  }
+
+  function queueHealthDetail(component, noun) {
+    if (!component || component.available === false) return `${noun} health is unavailable`;
+    const next = component.next;
+    if (!next) return `No ${noun.toLowerCase()} work is waiting`;
+    if (next.state === 'error') return `A ${noun.toLowerCase()} item needs review`;
+    if (next.state === 'working' || next.state === 'processing') {
+      return `Processing now · updated ${healthAge(next.updated_age_seconds)}`;
+    }
+    if (next.due === 'overdue') {
+      return `Oldest ${noun.toLowerCase()} item is ${healthDuration(next.overdue_seconds)} overdue`;
+    }
+    if (next.due === 'scheduled') {
+      return `Next ${noun.toLowerCase()} item in ${healthDuration(next.due_in_seconds)}`;
+    }
+    return `${noun} work is ready`;
+  }
+
+  function systemHealthDetail(name, component) {
+    if (!component || component.available === false) {
+      return name === 'database'
+        ? 'The live database is not responding'
+        : 'This health signal is unavailable';
+    }
+    if (name === 'database') {
+      const megabytes = Number(component.file_size_bytes) / (1024 * 1024);
+      return Number.isFinite(megabytes)
+        ? `Live database responded · ${Math.round(megabytes).toLocaleString()} MB`
+        : 'Live database responded';
+    }
+    if (name === 'collector') {
+      return component.last_successful_poll_at
+        ? `Latest request scan ${healthAge(component.poll_age_seconds)}`
+        : 'No successful request scan recorded';
+    }
+    if (name === 'map') {
+      const interval = Number(component.poll_interval_seconds);
+      const cadence = Number.isFinite(interval) ? ` · every ${interval}s` : '';
+      return component.last_successful_poll_at
+        ? `Portal map checked ${healthAge(component.poll_age_seconds)}${cadence}`
+        : 'No successful map check recorded';
+    }
+    if (name === 'details') return queueHealthDetail(component, 'Detail');
+    if (name === 'subscriptions') return queueHealthDetail(component, 'Subscription');
+    if (name === 'closures') return queueHealthDetail(component, 'Closure');
+    if (name === 'email') {
+      const event = component.latest_event;
+      if (!event) return 'No NYC311 response email has arrived yet';
+      return component.status === 'attention'
+        ? `Latest email ${healthAge(event.age_seconds)} needs parsing review`
+        : `Latest NYC311 response arrived ${healthAge(event.age_seconds)}`;
+    }
+    if (name === 'analytics') {
+      if (!component.generated_at) return 'No saved response-statistics snapshot';
+      if (component.refresh_disabled) {
+        return `Saved ${healthAge(component.age_seconds)} · recalculation paused to protect live traffic`;
+      }
+      if (component.stale) return `Saved snapshot updated ${healthAge(component.age_seconds)}`;
+      return `Response statistics saved ${healthAge(component.age_seconds)}`;
+    }
+    return 'Health signal received';
+  }
+
+  function renderOperationalHealth(payload) {
+    if (!hasSystemHealthElements || !payload || !payload.components) return false;
+    const components = payload.components;
+    const mapping = {
+      database: components.database,
+      collector: components.map_discovery,
+      map: components.map_discovery,
+      details: components.details,
+      email: components.email_intake,
+      subscriptions: components.subscriptions,
+      closures: components.closure_verification,
+      analytics: components.analytics
+    };
+    for (const name of healthComponentNames) {
+      const component = mapping[name] || {
+        status: 'attention',
+        available: false
+      };
+      const card = systemHealthElements.cards[name];
+      card.root.dataset.status = component.status;
+      card.status.textContent = healthStatusLabel(component, name);
+      card.detail.textContent = systemHealthDetail(name, component);
+    }
+    const overallStatus = ['healthy', 'delayed', 'attention', 'quiet']
+      .includes(payload.status) ? payload.status : 'attention';
+    const overallLabels = {
+      healthy: 'All working',
+      delayed: 'Some delays',
+      attention: 'Needs attention',
+      quiet: 'Standing by'
+    };
+    systemHealthElements.overall.dataset.status = overallStatus;
+    systemHealthElements.overall.textContent = overallLabels[overallStatus];
+    systemHealthElements.updated.textContent = payload.generated_at
+      ? `Checked ${fullTimeLabel(payload.generated_at)}`
+      : 'Checked just now';
+    systemHealthElements.root.setAttribute('aria-busy', 'false');
+    return true;
+  }
+
+  function showOperationalHealthUnavailable() {
+    if (!hasSystemHealthElements) return;
+    systemHealthElements.overall.dataset.status = 'attention';
+    systemHealthElements.overall.textContent = 'Check unavailable';
+    systemHealthElements.updated.textContent = 'The health endpoint will retry automatically';
+    systemHealthElements.root.setAttribute('aria-busy', 'false');
+  }
+
+  async function refreshOperationalHealth() {
+    if (!overviewIsActive() || operationalHealthInFlight || !hasSystemHealthElements) return;
+    operationalHealthInFlight = true;
+    try {
+      const payload = await fetchJson('/api/operational-health', 'Health service');
+      renderOperationalHealth(payload);
+    } catch (error) {
+      showOperationalHealthUnavailable();
+      console.warn(error);
+    } finally {
+      operationalHealthInFlight = false;
+    }
   }
 
   function showReleaseInfoUnavailable(message = 'No timed deployment has been recorded yet.') {
@@ -2663,7 +2903,7 @@
       && summary.capture && summary.data_quality);
   }
 
-  function showSummaryUnavailable() {
+  function showSummaryUnavailable(message = null) {
     if (!hasSummaryElements) return;
     summaryElements.root.setAttribute('aria-busy', 'false');
     summaryElements.loading.hidden = true;
@@ -2673,8 +2913,9 @@
       return;
     }
     summaryElements.content.hidden = true;
-    summaryElements.updated.textContent = 'Unavailable';
-    summaryElements.status.textContent = 'Live summary temporarily unavailable. Incoming requests are still updating.';
+    summaryElements.updated.textContent = message ? 'Fast live mode' : 'Unavailable';
+    summaryElements.status.textContent = message
+      || 'Live summary temporarily unavailable. Incoming requests are still updating.';
   }
 
   function renderCitySummary(summary) {
@@ -2752,14 +2993,16 @@
       let beforeSuffix = null;
       let pagesLoaded = 0;
       let hasMore = true;
-      while (hasMore && pagesLoaded < 100) {
+      while (hasMore && pagesLoaded < 500) {
         const controller = new AbortController();
         mapAbortController = controller;
         const timeout = window.setTimeout(() => controller.abort(), MAP_REQUEST_TIMEOUT_MS);
         let payload;
+        const pageLimit = pagesLoaded === 0 ? MAP_INITIAL_PAGE_SIZE : MAP_PAGE_SIZE;
         try {
           payload = await fetchJson(scopedUrl('/api/live-map', {
-            limit: MAP_PAGE_SIZE,
+            limit: pageLimit,
+            include_totals: 0,
             ...(submittedSince != null ? { submitted_since: submittedSince } : {}),
             ...(beforeSuffix != null ? { before_suffix: beforeSuffix } : {})
           }), 'Map service', {
@@ -2774,6 +3017,12 @@
           ? payload.records.length
           : 0;
         pagesLoaded += 1;
+        // Let the first, deliberately small page paint before fetching the
+        // remainder of a large archive.
+        if (pagesLoaded === 1) {
+          await new Promise(resolve => window.requestAnimationFrame(resolve));
+          if (sequence !== mapRequestSequence) return;
+        }
 
         const page = payload && payload.page;
         const nextSuffix = Number(page && page.next_before_suffix);
@@ -2819,7 +3068,13 @@
     const sequence = ++dashboardRequestSequence;
     refreshInFlight = true;
     try {
-      const data = await fetchJson(scopedUrl('/api/live-dashboard', { limit: 300 }), 'Data service', {
+      const requestLimit = dashboardPayloadLoaded
+        ? MAX_VISIBLE_RECORDS
+        : INITIAL_VISIBLE_RECORDS;
+      const data = await fetchJson(scopedUrl('/api/live-dashboard', {
+        limit: requestLimit,
+        compact: 1
+      }), 'Data service', {
         signal: controller.signal
       });
       if (sequence !== dashboardRequestSequence) return;
@@ -2843,7 +3098,13 @@
       renderOverviewStats(stats);
       renderStatusClarity(stats);
       renderLegacyReconciliation(stats.legacy_reconciliation);
-      renderCitySummary(stats.summary);
+      if (stats.compact && !stats.summary) {
+        showSummaryUnavailable(
+          'Citywide archive statistics are paused on the live path so requests and the map load immediately.'
+        );
+      } else {
+        renderCitySummary(stats.summary);
+      }
       document.getElementById('frontier-number').textContent = stats.frontier ? `311-${String(stats.frontier).padStart(8, '0')}` : '—';
       document.getElementById('last-updated').textContent = lastPortalCheck
         ? `Portal ${lastPortalCheck.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}`

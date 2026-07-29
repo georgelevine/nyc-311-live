@@ -228,3 +228,33 @@ test('keeps expensive refresh disabled unless it is explicitly enabled', () => {
   assert.equal(result.payload.metrics_refresh_disabled, true);
   assert.equal(workersStarted, 0);
 });
+
+test('peek serves a saved snapshot without starting a refresh worker', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-metrics-peek-'));
+  const databasePath = path.join(directory, 'archive.sqlite');
+  const cachePath = path.join(directory, 'metrics.json');
+  fs.writeFileSync(cachePath, JSON.stringify(snapshot(
+    databasePath,
+    '2026-07-29T11:00:00.000Z'
+  )));
+  let workersStarted = 0;
+  const background = createEmailMetricsBackground({
+    refreshEnabled: true,
+    cachePath,
+    cacheTtlMs: 300_000,
+    now: () => Date.parse('2026-07-29T12:00:00.000Z'),
+    logger: silentLogger,
+    forkWorker: () => {
+      workersStarted += 1;
+      return fakeChild();
+    }
+  });
+
+  const result = background.peek(databasePath);
+
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.payload.metrics_stale, true);
+  assert.equal(result.payload.metrics_refreshing, false);
+  assert.equal(result.payload.metrics_refresh_disabled, false);
+  assert.equal(workersStarted, 0);
+});
