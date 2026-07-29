@@ -10,6 +10,10 @@ const DEFAULT_FAILURE_COOLDOWN_MS = 5 * 60_000;
 const DEFAULT_WORKER_TIMEOUT_MS = 3 * 60_000;
 const DEFAULT_RETRY_AFTER_SECONDS = 3;
 
+function enabledValue(value) {
+  return /^(1|true|yes|on)$/i.test(String(value || '').trim());
+}
+
 function positiveInteger(value, fallback) {
   const parsed = Number(value);
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
@@ -64,6 +68,9 @@ function publicPayload(snapshot, state = {}) {
 }
 
 function createEmailMetricsBackground(options = {}) {
+  const refreshEnabled = options.refreshEnabled == null
+    ? enabledValue(process.env.EMAIL_METRICS_BACKGROUND_ENABLED)
+    : Boolean(options.refreshEnabled);
   const workerPath = options.workerPath || path.join(__dirname, 'email-metrics-worker.js');
   const cacheTtlMs = positiveInteger(
     options.cacheTtlMs || process.env.EMAIL_METRICS_CACHE_TTL_MS,
@@ -143,7 +150,7 @@ function createEmailMetricsBackground(options = {}) {
   }
 
   function startWorker() {
-    if (activeWorker || now() < retryAtMs) return false;
+    if (!refreshEnabled || activeWorker || now() < retryAtMs) return false;
 
     let child;
     try {
@@ -247,6 +254,17 @@ function createEmailMetricsBackground(options = {}) {
       };
     }
 
+    if (!refreshEnabled) {
+      return {
+        statusCode: 503,
+        payload: {
+          error: 'Email monitoring metrics are temporarily unavailable',
+          metrics_refreshing: false,
+          metrics_refresh_disabled: true
+        }
+      };
+    }
+
     return {
       statusCode: 202,
       payload: {
@@ -281,6 +299,7 @@ module.exports = {
   DEFAULT_RETRY_AFTER_SECONDS,
   DEFAULT_WORKER_TIMEOUT_MS,
   createEmailMetricsBackground,
+  enabledValue,
   normalizeSnapshot,
   readPersistedSnapshot
 };

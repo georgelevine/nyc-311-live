@@ -41,6 +41,7 @@ test('serves 202 immediately and starts only one metrics worker', () => {
   const children = [];
   let currentTime = Date.parse('2026-07-29T12:00:00.000Z');
   const background = createEmailMetricsBackground({
+    refreshEnabled: true,
     cachePath: path.join(directory, 'metrics.json'),
     tempDirectory: path.join(directory, 'sqlite-tmp'),
     now: () => currentTime,
@@ -89,6 +90,7 @@ test('returns a stale snapshot immediately while refreshing it in the background
   fs.writeFileSync(cachePath, JSON.stringify(snapshot(databasePath, generatedAt)));
   const children = [];
   const background = createEmailMetricsBackground({
+    refreshEnabled: true,
     cachePath,
     cacheTtlMs: 300_000,
     now: () => Date.parse('2026-07-29T12:00:00.000Z'),
@@ -123,6 +125,7 @@ test('applies a failure cooldown without discarding the last good snapshot', () 
   const children = [];
   let currentTime = Date.parse('2026-07-29T12:00:00.000Z');
   const background = createEmailMetricsBackground({
+    refreshEnabled: true,
     cachePath,
     cacheTtlMs: 300_000,
     failureCooldownMs: 60_000,
@@ -182,6 +185,7 @@ test('times out a stuck worker and enters cooldown instead of starting another',
   const databasePath = path.join(directory, 'archive.sqlite');
   const children = [];
   const background = createEmailMetricsBackground({
+    refreshEnabled: true,
     cachePath: path.join(directory, 'metrics.json'),
     workerTimeoutMs: 10,
     failureCooldownMs: 60_000,
@@ -203,4 +207,24 @@ test('times out a stuck worker and enters cooldown instead of starting another',
   assert.equal(children.length, 1);
   assert.deepEqual(children[0].killCalls, ['SIGTERM']);
   background.close();
+});
+
+test('keeps expensive refresh disabled unless it is explicitly enabled', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-metrics-disabled-'));
+  const databasePath = path.join(directory, 'archive.sqlite');
+  let workersStarted = 0;
+  const background = createEmailMetricsBackground({
+    cachePath: path.join(directory, 'metrics.json'),
+    forkWorker: () => {
+      workersStarted += 1;
+      return fakeChild();
+    }
+  });
+
+  const result = background.get(databasePath);
+
+  assert.equal(result.statusCode, 503);
+  assert.equal(result.payload.metrics_refreshing, false);
+  assert.equal(result.payload.metrics_refresh_disabled, true);
+  assert.equal(workersStarted, 0);
 });
