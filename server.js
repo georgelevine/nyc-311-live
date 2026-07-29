@@ -21,6 +21,7 @@ const { buildCatchupStatus, parseState } = require('./catchup-status');
 const { reconcileStoredDetails } = require('./detail-queue');
 const { createDashboardAuth, dashboardAuthConfig } = require('./dashboard-auth');
 const { inspectSqliteHealth } = require('./sqlite-health');
+const { resolveBusyTimeoutMs } = require('./sqlite-runtime');
 const { originMatchesHost } = require('./request-security');
 const { normalizePortalTimestamp } = require('./portal-timestamp');
 const { attachPortalAgencyResponse } = require('./portal-agency-response');
@@ -49,6 +50,7 @@ const dashboardSettingsAuth = createDashboardAuth(dashboardAuth, { publicPaths: 
 const LIVE_SUMMARY_CACHE_TTL_MS = 15_000;
 const ARCHIVE_QUALITY_CACHE_TTL_MS = 5 * 60_000;
 const OPERATIONAL_HEALTH_CACHE_TTL_MS = 15_000;
+const SQLITE_BUSY_TIMEOUT_MS = resolveBusyTimeoutMs(process.env.SQLITE_BUSY_TIMEOUT_MS);
 const liveSummaryCache = new Map();
 const archiveQualityCache = new Map();
 const emailMetricsBackground = createEmailMetricsBackground();
@@ -328,6 +330,45 @@ function liveMapIncludeTotals(req) {
     throw error;
   }
   return value === '1';
+}
+
+function quoteSqliteIdentifier(value) {
+  return `"${String(value).replace(/"/g, '""')}"`;
+}
+
+function liveRequestIndexWithColumns(database, expectedColumns) {
+  const indexes = database.prepare(`
+    SELECT name FROM pragma_index_list(?)
+  `).all('live_portal_requests');
+  const indexColumns = database.prepare(`
+    SELECT name FROM pragma_index_info(?) ORDER BY seqno
+  `);
+  for (const row of indexes) {
+    const columns = indexColumns.all(row.name).map(column => column.name);
+    if (columns.length === expectedColumns.length
+        && columns.every((column, index) => column === expectedColumns[index])) {
+      return row.name;
+    }
+  }
+  return null;
+}
+
+function liveMapRequestIndexClause(database, scope) {
+  // A BID-only query retains SQLite's freedom to plan the correlated
+  // membership predicate. Precinct queries have their own suffix-ordered
+  // index; unscoped requests use the UNIQUE suffix index and scan it backward.
+  // Both choices satisfy ORDER BY suffix DESC without a temporary sort.
+  if (scope && scope.bid && !scope.precinct) return '';
+  const preferredColumns = scope && scope.precinct
+    ? ['police_precinct', 'suffix']
+    : ['suffix'];
+  const preferred = liveRequestIndexWithColumns(database, preferredColumns);
+  const fallback = preferred || (
+    preferredColumns.length > 1
+      ? liveRequestIndexWithColumns(database, ['suffix'])
+      : null
+  );
+  return fallback ? `INDEXED BY ${quoteSqliteIdentifier(fallback)}` : '';
 }
 
 function emptyCompactDashboardStats() {
@@ -844,7 +885,7 @@ function persistLivePortalDetail(portalId, detail) {
     const { DatabaseSync } = require('node:sqlite');
     database = new DatabaseSync(databasePath);
     database.exec(`
-      PRAGMA busy_timeout = 500;
+      PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS};
       CREATE TABLE IF NOT EXISTS portal_requests (
         srnumber TEXT PRIMARY KEY,
         suffix INTEGER NOT NULL UNIQUE,
@@ -1273,6 +1314,7 @@ app.get('/api/live-map', (req, res) => {
       );
     }
     const mappedWhere = `WHERE ${mappedPredicates.join(' AND ')}`;
+    const liveIndexClause = liveMapRequestIndexClause(database, scope);
     const totals = includeTotals
       ? database.prepare(`
           SELECT
@@ -1303,6 +1345,7 @@ app.get('/api/live-map', (req, res) => {
              live.portal_url,live.first_seen_at,live.last_seen_at,
              ${detailColumns},${followUpColumns},${currentClosureColumns}
       FROM live_portal_requests AS live
+      ${liveIndexClause}
       ${detailJoin}
       ${followUpJoin}
       ${currentClosureJoin}
@@ -1321,10 +1364,15 @@ app.get('/api/live-map', (req, res) => {
     if (!includeTotals) delete payload.stats;
     if (pageLimit != null) {
       const lastRecord = payload.records[payload.records.length - 1];
+      const moreAvailable = payload.records.length === pageLimit;
       payload.page = {
         limit: pageLimit,
         returned: payload.records.length,
-        has_more: payload.records.length === pageLimit,
+        // Older and current dashboard clients automatically follow has_more.
+        // Keep the cursor available to deliberate API callers without allowing
+        // a browser tab to drain the full archive and monopolize SQLite.
+        has_more: false,
+        more_available: moreAvailable,
         next_before_suffix: lastRecord ? lastRecord.suffix : null
       };
     }
@@ -1813,7 +1861,7 @@ app.post('/api/live-settings', dashboardSettingsAuth, (req, res) => {
   try {
     const { DatabaseSync } = require('node:sqlite');
     database = new DatabaseSync(databasePath);
-    database.exec('PRAGMA busy_timeout = 1000');
+    database.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
     database.prepare(`
       INSERT INTO live_monitor_state (key, value, updated_at)
       VALUES ('poll_interval_seconds', ?, ?)
@@ -1870,5 +1918,6 @@ module.exports = {
   compactLiveDashboardStats,
   liveDashboardCompactMode,
   liveMapIncludeTotals,
+  liveMapRequestIndexClause,
   sanitizeLegacyReconciliation
 };

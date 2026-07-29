@@ -40,6 +40,10 @@ database.exec(`
     bid_id INTEGER NOT NULL,
     boundary_version TEXT NOT NULL
   );
+  CREATE INDEX live_portal_requests_submitted_at_idx
+    ON live_portal_requests(submitted_at);
+  CREATE INDEX live_portal_requests_police_precinct_idx
+    ON live_portal_requests(police_precinct,suffix DESC);
   CREATE TABLE portal_requests (
     srnumber TEXT PRIMARY KEY,
     suffix INTEGER NOT NULL UNIQUE,
@@ -130,7 +134,7 @@ insertState.run(
 );
 database.close();
 
-const { app } = require('../server');
+const { app, liveMapRequestIndexClause } = require('../server');
 let server;
 let baseUrl;
 
@@ -209,7 +213,8 @@ test('map fast path returns records without archive totals', async () => {
   assert.deepEqual(payload.page, {
     limit: 1,
     returned: 1,
-    has_more: true,
+    has_more: false,
+    more_available: true,
     next_before_suffix: 28390001
   });
 });
@@ -224,7 +229,23 @@ test('map defaults to skipping totals for older browser clients', async () => {
     limit: 250,
     returned: 1,
     has_more: false,
+    more_available: false,
     next_before_suffix: 28390001
+  });
+});
+
+test('map cursor remains available for deliberate manual paging', async () => {
+  const response = await fetch(
+    `${baseUrl}/api/live-map?limit=1&before_suffix=28390001`
+  );
+  assert.equal(response.status, 200);
+  const payload = await response.json();
+  assert.deepEqual(payload.page, {
+    limit: 1,
+    returned: 0,
+    has_more: false,
+    more_available: false,
+    next_before_suffix: null
   });
 });
 
@@ -243,5 +264,63 @@ test('map totals flag accepts only exact 0 or 1 values', async () => {
     assert.equal(response.status, 400, `include_totals=${JSON.stringify(value)}`);
     const payload = await response.json();
     assert.match(payload.error, /include_totals must be 0 or 1/);
+  }
+});
+
+test('map fast paths force suffix-ordered indexes and avoid temporary sorting', () => {
+  const readable = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    const unscopedClause = liveMapRequestIndexClause(readable, {
+      precinct: null,
+      bid: null
+    });
+    assert.match(unscopedClause, /^INDEXED BY /);
+    const unscopedPlan = readable.prepare(`
+      EXPLAIN QUERY PLAN
+      SELECT live.suffix
+      FROM live_portal_requests AS live
+      ${unscopedClause}
+      WHERE live.latitude BETWEEN -90 AND 90
+        AND live.longitude BETWEEN -180 AND 180
+        AND live.submitted_at >= ?
+      ORDER BY live.suffix DESC
+      LIMIT ?
+    `).all('2026-07-28T00:00:00.000Z', 250);
+    assert.equal(
+      unscopedPlan.some(row => /TEMP B-TREE/i.test(row.detail)),
+      false,
+      JSON.stringify(unscopedPlan)
+    );
+
+    const precinctClause = liveMapRequestIndexClause(readable, {
+      precinct: { precinct: 1, boundaryVersion: 'test-v1' },
+      bid: null
+    });
+    assert.match(precinctClause, /live_portal_requests_police_precinct_idx/);
+    const precinctPlan = readable.prepare(`
+      EXPLAIN QUERY PLAN
+      SELECT live.suffix
+      FROM live_portal_requests AS live
+      ${precinctClause}
+      WHERE live.police_precinct=?
+        AND live.police_precinct_boundary_version=?
+        AND live.latitude BETWEEN -90 AND 90
+        AND live.longitude BETWEEN -180 AND 180
+        AND live.submitted_at >= ?
+      ORDER BY live.suffix DESC
+      LIMIT ?
+    `).all(1, 'test-v1', '2026-07-28T00:00:00.000Z', 250);
+    assert.equal(
+      precinctPlan.some(row => /TEMP B-TREE/i.test(row.detail)),
+      false,
+      JSON.stringify(precinctPlan)
+    );
+
+    assert.equal(liveMapRequestIndexClause(readable, {
+      precinct: null,
+      bid: { bidId: 68, boundaryVersion: 'test-v1' }
+    }), '');
+  } finally {
+    readable.close();
   }
 });

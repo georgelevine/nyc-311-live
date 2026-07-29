@@ -23,6 +23,7 @@ x-app-environment: &app-environment
   NODE_ENV: production
   DATABASE_PATH: /data/portal-archive.sqlite
   SQLITE_SYNCHRONOUS: ${SQLITE_SYNCHRONOUS:-FULL}
+  SQLITE_BUSY_TIMEOUT_MS: ${SQLITE_BUSY_TIMEOUT_MS:-30000}
 
 x-data-volume: &data-volume
   type: bind
@@ -173,6 +174,10 @@ services:
       - "443:443"
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - type: bind
+        source: ../../public
+        target: /srv/public
+        read_only: true
       - caddy_data:/data
       - caddy_config:/config
     networks:

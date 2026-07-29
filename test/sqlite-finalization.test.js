@@ -11,6 +11,7 @@ const { DatabaseSync } = require('node:sqlite');
 const { parseArguments } = require('../finalize-sqlite');
 const {
   APPLICATION_ID,
+  BUSY_TIMEOUT_MS,
   MIGRATIONS,
   applyDataChanges,
   applyMigrations,
@@ -19,11 +20,29 @@ const {
   inspectDataChanges,
   migrationChecksum,
   normalizeSubmittedTimestamp,
+  openDatabase,
   resolveDatabasePath,
   timestampedBackupPath
 } = require('../sqlite-finalization');
 
 const NOW = new Date('2026-07-20T22:15:30.000Z');
+
+test('opens SQLite with the shared configurable writer timeout', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc-311-busy-timeout-'));
+  const databasePath = path.join(directory, 'archive.sqlite');
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+
+  assert.equal(BUSY_TIMEOUT_MS, 30_000);
+  const database = openDatabase(databasePath, { busyTimeoutMs: '42000' });
+  try {
+    assert.equal(
+      Number(database.prepare('PRAGMA busy_timeout').get().timeout),
+      42_000
+    );
+  } finally {
+    database.close();
+  }
+});
 
 function requestNumber(suffix) {
   return `311-${String(suffix).padStart(8, '0')}`;

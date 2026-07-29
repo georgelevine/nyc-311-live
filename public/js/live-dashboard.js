@@ -227,6 +227,7 @@
   const MAP_REFRESH_MS = 5 * 60_000;
   const MAP_REQUEST_TIMEOUT_MS = 15_000;
   const MAP_RETRY_MS = 3_000;
+  const DASHBOARD_REQUEST_TIMEOUT_MS = 8_000;
   const EMAIL_UPDATES_REFRESH_MS = 15_000;
   const EMAIL_METRICS_REFRESH_MS = 60_000;
   const EMAIL_METRICS_REFRESHING_RETRY_MS = 2_500;
@@ -3067,6 +3068,7 @@
     dashboardAbortController = controller;
     const sequence = ++dashboardRequestSequence;
     refreshInFlight = true;
+    const timeout = window.setTimeout(() => controller.abort(), DASHBOARD_REQUEST_TIMEOUT_MS);
     try {
       const requestLimit = dashboardPayloadLoaded
         ? MAX_VISIBLE_RECORDS
@@ -3117,13 +3119,13 @@
         loadStatusHistory(selectedRecord);
       }
     } catch (error) {
-      if (error.name === 'AbortError') return;
       if (sequence !== dashboardRequestSequence) return;
       showSummaryUnavailable();
       connection.classList.add('offline');
       connectionLabel.textContent = 'Reconnecting…';
-      console.warn(error);
+      if (error.name !== 'AbortError') console.warn(error);
     } finally {
+      window.clearTimeout(timeout);
       if (sequence === dashboardRequestSequence) {
         refreshInFlight = false;
         dashboardAbortController = null;

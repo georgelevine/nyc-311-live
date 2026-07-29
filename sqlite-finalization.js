@@ -6,9 +6,13 @@ const os = require('os');
 const path = require('path');
 const { DatabaseSync, backup: sqliteBackup } = require('node:sqlite');
 const { normalizePortalTimestamp } = require('./portal-timestamp');
+const {
+  DEFAULT_BUSY_TIMEOUT_MS,
+  resolveBusyTimeoutMs
+} = require('./sqlite-runtime');
 
 const APPLICATION_ID = 0x4e594333; // "NYC3"
-const BUSY_TIMEOUT_MS = 5000;
+const BUSY_TIMEOUT_MS = DEFAULT_BUSY_TIMEOUT_MS;
 
 const MIGRATIONS = Object.freeze([
   Object.freeze({
@@ -338,11 +342,11 @@ function timestampedBackupPath(databasePath, now = new Date()) {
   return path.join(parsed.dir, 'backups', `${parsed.name}-${stamp}${parsed.ext || '.sqlite'}`);
 }
 
-function openDatabase(databasePath, { readOnly = false, busyTimeoutMs = BUSY_TIMEOUT_MS } = {}) {
-  const parsedBusyTimeout = Number(busyTimeoutMs);
-  if (!Number.isInteger(parsedBusyTimeout) || parsedBusyTimeout < 0) {
-    throw new TypeError('busyTimeoutMs must be a nonnegative integer');
-  }
+function openDatabase(databasePath, {
+  readOnly = false,
+  busyTimeoutMs = process.env.SQLITE_BUSY_TIMEOUT_MS
+} = {}) {
+  const parsedBusyTimeout = resolveBusyTimeoutMs(busyTimeoutMs, BUSY_TIMEOUT_MS);
   const database = new DatabaseSync(databasePath, { readOnly });
   database.exec(`PRAGMA busy_timeout = ${parsedBusyTimeout}`);
   database.exec('PRAGMA foreign_keys = ON');

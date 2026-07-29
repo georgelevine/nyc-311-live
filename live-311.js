@@ -11,7 +11,10 @@ const {
 } = require('./closure-tracking');
 const { promoteAuditDiscoveries } = require('./audit-discovery');
 const { reconcileStoredDetails } = require('./detail-queue');
-const { resolveSynchronousMode } = require('./sqlite-runtime');
+const {
+  resolveBusyTimeoutMs,
+  resolveSynchronousMode
+} = require('./sqlite-runtime');
 const { applyMigrations } = require('./sqlite-finalization');
 const { normalizePortalTimestamp } = require('./portal-timestamp');
 const { attachPortalAgencyResponse } = require('./portal-agency-response');
@@ -78,16 +81,17 @@ const EMAIL_SUBSCRIPTION_WORKERS = Number.isFinite(configuredEmailSubscriptionWo
   : 2;
 const SCHEDULED_OPEN_FOLLOWUPS_ENABLED = scheduledOpenFollowupsEnabled(process.env);
 const SQLITE_SYNCHRONOUS = resolveSynchronousMode(process.env.SQLITE_SYNCHRONOUS);
+const SQLITE_BUSY_TIMEOUT_MS = resolveBusyTimeoutMs(process.env.SQLITE_BUSY_TIMEOUT_MS);
 const DATABASE_PATH = process.env.DATABASE_PATH
   ? path.resolve(process.env.DATABASE_PATH)
   : path.join(__dirname, 'data', 'portal-archive.sqlite');
 
 fs.mkdirSync(path.dirname(DATABASE_PATH), { recursive: true });
 const db = new DatabaseSync(DATABASE_PATH);
+db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
 db.exec(`
   PRAGMA journal_mode = WAL;
   PRAGMA synchronous = ${SQLITE_SYNCHRONOUS};
-  PRAGMA busy_timeout = 3000;
   PRAGMA foreign_keys = ON;
 
   CREATE TABLE IF NOT EXISTS live_portal_requests (
@@ -1379,6 +1383,7 @@ async function main() {
     detail_hydration_lanes: 2,
     email_subscription_workers: EMAIL_SUBSCRIPTION_WORKERS,
     sqlite_synchronous: SQLITE_SYNCHRONOUS,
+    sqlite_busy_timeout_ms: SQLITE_BUSY_TIMEOUT_MS,
     audit_discoveries_reconciled: startupPromotion.promoted,
     audit_promotion_conflicts: startupPromotion.conflicts,
     audit_promotion_invalid: startupPromotion.invalid,

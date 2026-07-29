@@ -3,7 +3,10 @@ const path = require('path');
 const fetch = require('node-fetch');
 const cheerio = require('cheerio');
 const { DatabaseSync } = require('node:sqlite');
-const { resolveSynchronousMode } = require('./sqlite-runtime');
+const {
+  resolveBusyTimeoutMs,
+  resolveSynchronousMode
+} = require('./sqlite-runtime');
 const { normalizePortalTimestamp } = require('./portal-timestamp');
 const { attachPortalAgencyResponse } = require('./portal-agency-response');
 
@@ -17,6 +20,7 @@ const DATABASE_PATH = process.env.DATABASE_PATH
   ? path.resolve(process.env.DATABASE_PATH)
   : path.join(__dirname, 'data', 'portal-archive.sqlite');
 const SQLITE_SYNCHRONOUS = resolveSynchronousMode(process.env.SQLITE_SYNCHRONOUS);
+const SQLITE_BUSY_TIMEOUT_MS = resolveBusyTimeoutMs(process.env.SQLITE_BUSY_TIMEOUT_MS);
 
 if (!Number.isInteger(LOW_SUFFIX) || !Number.isInteger(HIGH_SUFFIX) ||
     LOW_SUFFIX < 0 || HIGH_SUFFIX < LOW_SUFFIX || HIGH_SUFFIX > 99999999) {
@@ -26,10 +30,10 @@ if (!Number.isInteger(LOW_SUFFIX) || !Number.isInteger(HIGH_SUFFIX) ||
 
 fs.mkdirSync(path.dirname(DATABASE_PATH), { recursive: true });
 const db = new DatabaseSync(DATABASE_PATH);
+db.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
 db.exec(`
   PRAGMA journal_mode = WAL;
   PRAGMA synchronous = ${SQLITE_SYNCHRONOUS};
-  PRAGMA busy_timeout = 3000;
 
   CREATE TABLE IF NOT EXISTS portal_requests (
     srnumber TEXT PRIMARY KEY,

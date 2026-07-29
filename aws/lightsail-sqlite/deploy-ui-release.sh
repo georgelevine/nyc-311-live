@@ -33,6 +33,7 @@ archive="${release_root}/inbox/${release_sha}.tar.gz"
 staging_directory="/opt/nyc-311-live-stage-${release_sha}"
 lock_file="/var/lib/nyc-311-live-lock/install.lock"
 public_health_url="https://311.georgelevine.com/api/health"
+public_shell_url="https://311.georgelevine.com/"
 
 exec 9>"${lock_file}"
 if ! flock --exclusive --nonblock 9; then
@@ -154,9 +155,9 @@ rollback() {
     mv -- "${previous_directory}" "${current_directory}"
     cd "${current_directory}/aws/lightsail-sqlite"
     if [[ "${deployment_scope}" == "service" ]]; then
-      docker compose up -d --no-build web collector
+      docker compose up -d --no-build --force-recreate web collector proxy
     else
-      docker compose up -d --no-build web
+      docker compose up -d --no-build --force-recreate web proxy
     fi
   fi
   echo "${deployment_scope} deployment failed and the previous release was restored." >&2
@@ -165,9 +166,9 @@ trap rollback ERR
 
 cd "${current_directory}/aws/lightsail-sqlite"
 if [[ "${deployment_scope}" == "service" ]]; then
-  docker compose up -d --no-build web collector
+  docker compose up -d --no-build --force-recreate web collector proxy
 else
-  docker compose up -d --no-build web
+  docker compose up -d --no-build --force-recreate web proxy
 fi
 
 healthy=0
@@ -184,6 +185,11 @@ if [[ ${healthy} -ne 1 ]]; then
   false
 fi
 curl --fail --silent --show-error "${public_health_url}" >/dev/null
+public_shell="$(curl --fail --silent --show-error "${public_shell_url}")"
+if [[ "${public_shell}" != *"<title>NYC 311 Live</title>"* ]]; then
+  echo "The public dashboard shell did not reach the new static release." >&2
+  false
+fi
 
 web_container="$(docker compose ps -q web)"
 running_image_version="$(docker inspect \

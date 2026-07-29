@@ -84,6 +84,7 @@ declare -A allowed_env_keys=(
   [AUDIT_MAX_PARALLEL]=1
   [AUDIT_REQUEST_DELAY_MS]=1
   [SQLITE_SYNCHRONOUS]=1
+  [SQLITE_BUSY_TIMEOUT_MS]=1
   [INBOUND_EMAIL_DOMAIN]=1
   [INBOUND_EMAIL_WEBHOOK_SECRET]=1
   [EMAIL_SUBSCRIBE_BID_IDS]=1
@@ -162,6 +163,9 @@ require_integer_range DETAIL_REQUEST_DELAY_MS 2500 60000
 require_integer_range AUDIT_MAX_PARALLEL 1 8
 require_integer_range AUDIT_REQUEST_DELAY_MS 500 60000
 require_integer_range EMAIL_SUBSCRIPTION_DELAY_MS 1000 60000
+if [[ -n "${SQLITE_BUSY_TIMEOUT_MS:-}" ]]; then
+  require_integer_range SQLITE_BUSY_TIMEOUT_MS 0 300000
+fi
 if [[ -n "${EMAIL_SUBSCRIPTION_WORKERS:-}" ]]; then
   require_integer_range EMAIL_SUBSCRIPTION_WORKERS 1 4
 fi
