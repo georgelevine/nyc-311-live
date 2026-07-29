@@ -1174,18 +1174,22 @@ app.get('/api/live-map', (req, res) => {
     const rawPageLimit = req.query && req.query.limit;
     const rawBeforeSuffix = req.query && req.query.before_suffix;
     const rawSubmittedSince = req.query && req.query.submitted_since;
-    let pageLimit = null;
+    // Always bound the work, including requests from older cached clients
+    // that predate map pagination. An omitted limit previously selected the
+    // entire archive and could hold a long SQLite read lock, starving the
+    // collector and every other HTTP request.
+    let pageLimit = 250;
     let beforeSuffix = null;
     let submittedSince = null;
     if (rawPageLimit != null && String(rawPageLimit).trim() !== '') {
       if (!/^\d{1,5}$/.test(String(rawPageLimit).trim())) {
-        const error = new Error('limit must be an integer from 1 through 5000');
+        const error = new Error('limit must be an integer from 1 through 1000');
         error.statusCode = 400;
         throw error;
       }
       pageLimit = Number(rawPageLimit);
-      if (pageLimit < 1 || pageLimit > 5000) {
-        const error = new Error('limit must be an integer from 1 through 5000');
+      if (pageLimit < 1 || pageLimit > 1000) {
+        const error = new Error('limit must be an integer from 1 through 1000');
         error.statusCode = 400;
         throw error;
       }

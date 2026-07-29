@@ -215,11 +215,24 @@ test('map fast path returns records without archive totals', async () => {
 });
 
 test('map defaults to skipping totals for older browser clients', async () => {
-  const response = await fetch(`${baseUrl}/api/live-map?limit=1`);
+  const response = await fetch(`${baseUrl}/api/live-map`);
   assert.equal(response.status, 200);
   const payload = await response.json();
   assert.equal(payload.records.length, 1);
   assert.equal(Object.hasOwn(payload, 'stats'), false);
+  assert.deepEqual(payload.page, {
+    limit: 250,
+    returned: 1,
+    has_more: false,
+    next_before_suffix: 28390001
+  });
+});
+
+test('map rejects page sizes large enough to monopolize the web process', async () => {
+  const response = await fetch(`${baseUrl}/api/live-map?limit=1001`);
+  assert.equal(response.status, 400);
+  const payload = await response.json();
+  assert.match(payload.error, /limit must be an integer from 1 through 1000/);
 });
 
 test('map totals flag accepts only exact 0 or 1 values', async () => {
