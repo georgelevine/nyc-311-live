@@ -144,18 +144,44 @@ test('status update UI exposes incomplete Portal verification without calling it
   assert.match(dashboard, /Portal status is closed; detail verification unavailable/);
 });
 
-test('email metrics refresh independently once per minute and degrades independently', () => {
+test('overview metrics load lazily, refresh only while visible, and degrade independently', () => {
   assert.match(dashboard, /const EMAIL_METRICS_REFRESH_MS = 60_000/);
   assert.match(dashboard, /fetchJson\('\/api\/email-metrics', 'Email metrics service'\)/);
-  assert.match(
-    dashboard,
-    /window\.setInterval\(refreshEmailMetrics, EMAIL_METRICS_REFRESH_MS\)/
-  );
+  assert.match(dashboard, /syncOverviewRefreshes\(normalizedView === 'overview'\)/);
+  assert.match(dashboard, /function overviewIsActive\(\)/);
+  assert.match(dashboard, /function scheduleOverviewEmailMetrics/);
+  assert.match(dashboard, /function scheduleOverviewReleaseInfo/);
+  assert.match(dashboard, /if \(!overviewIsActive\(\) \|\| emailMetricsInFlight/);
+  assert.match(dashboard, /if \(!overviewIsActive\(\) \|\| releaseInfoInFlight/);
+  assert.equal(dashboard.includes('window.setInterval(refreshEmailMetrics'), false);
+  assert.equal(dashboard.includes('window.setInterval(refreshReleaseInfo'), false);
+  const startup = dashboard.slice(dashboard.lastIndexOf('loadPolicePrecincts();'));
+  assert.equal(startup.includes('refreshEmailMetrics();'), false);
+  assert.equal(startup.includes('refreshReleaseInfo();'), false);
+  assert.match(dashboard, /payload && payload\.refreshing === true/);
+  assert.match(dashboard, /const EMAIL_METRICS_REFRESHING_RETRY_MS = 2_500/);
+  assert.match(dashboard, /let emailMetricsRefreshPending = false/);
+  assert.match(dashboard, /emailMetricsRefreshPending = true/);
+  assert.match(dashboard, /emailMetricsRefreshPending\s*\?\s*EMAIL_METRICS_REFRESHING_RETRY_MS/);
+  assert.match(dashboard, /window\.clearTimeout\(overviewEmailMetricsTimer\)/);
+  assert.match(dashboard, /Math\.max\(2_000, Math\.min\(3_000, suggestedDelay\)\)/);
+  assert.match(dashboard, /scheduleOverviewEmailMetrics\(Number\.isFinite\(suggestedDelay\)/);
+  assert.match(dashboard, /Calculating email and response-time statistics in the background/);
+  assert.match(dashboard, /Requests and the map remain available/);
   assert.equal(dashboard.includes('window.setInterval(refresh, 5000)'), false);
   assert.match(dashboard, /nextDashboardRefreshDelay/);
   assert.match(dashboard, /scheduleDashboardRefresh/);
   assert.match(dashboard, /Showing the last successful email metrics refresh/);
   assert.match(dashboard, /Live requests are still updating/);
+});
+
+test('initial boundary loading cannot replace honest request and map loading states', () => {
+  assert.match(dashboard, /let dashboardPayloadLoaded = false/);
+  assert.match(dashboard, /dashboardPayloadLoaded = true/);
+  assert.match(dashboard, /!dashboardPayloadLoaded\s*\?\s*'Loading requests…'/);
+  assert.match(dashboard, /if \(dashboardPayloadLoaded\) \{\s*renderFeed\(\);\s*renderMap\(\);/);
+  assert.match(dashboard, /mapArchiveLoaded\s*\?\s*`\$\{mapScopeLabel\(\)\} · no matching dated pins`/);
+  assert.match(dashboard, /`\$\{mapScopeLabel\(\)\} · loading map records`/);
 });
 
 test('local dashboard styles and scripts resolve to committed files in load order', () => {

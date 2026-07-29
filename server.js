@@ -25,8 +25,7 @@ const { originMatchesHost } = require('./request-security');
 const { normalizePortalTimestamp } = require('./portal-timestamp');
 const { attachPortalAgencyResponse } = require('./portal-agency-response');
 const { loadSqliteLiveSummary } = require('./sqlite-live-summary');
-const { loadSqliteEmailMetrics } = require('./sqlite-email-metrics');
-const { presentEmailMetrics } = require('./email-metrics-presentation');
+const { createEmailMetricsBackground } = require('./email-metrics-background');
 const { readStoredPortalDetail } = require('./stored-portal-detail');
 const { readRequestEmailUpdates } = require('./nyc311-email-events');
 const {
@@ -48,10 +47,9 @@ const dashboardAuth = dashboardAuthConfig();
 const dashboardSettingsAuth = createDashboardAuth(dashboardAuth, { publicPaths: [] });
 const LIVE_SUMMARY_CACHE_TTL_MS = 15_000;
 const ARCHIVE_QUALITY_CACHE_TTL_MS = 5 * 60_000;
-const EMAIL_METRICS_CACHE_TTL_MS = 60_000;
 const liveSummaryCache = new Map();
 const archiveQualityCache = new Map();
-let emailMetricsCache = null;
+const emailMetricsBackground = createEmailMetricsBackground();
 
 function tableExists(database, name) {
   return Boolean(database.prepare(
@@ -301,46 +299,6 @@ function sanitizeLegacyReconciliation(value, stateUpdatedAt = null) {
       : reconciliationCount(parsed.estimated_seconds_remaining, 31_536_000),
     message: reconciliationMessage(parsed.message)
   };
-}
-
-function statusMonitoringMode(databasePath) {
-  if (!require('fs').existsSync(databasePath)) return 'unknown';
-  let database;
-  try {
-    const { DatabaseSync } = require('node:sqlite');
-    database = new DatabaseSync(databasePath, { readOnly: true });
-    const table = database.prepare(`
-      SELECT 1 FROM sqlite_master
-      WHERE type='table' AND name='live_monitor_state'
-    `).get();
-    if (!table) return 'unknown';
-    const row = database.prepare(`
-      SELECT value FROM live_monitor_state
-      WHERE key='status_monitoring_mode'
-    `).get();
-    return row && row.value ? String(row.value) : 'unknown';
-  } catch (_) {
-    return 'unknown';
-  } finally {
-    if (database) database.close();
-  }
-}
-
-function cachedEmailMetrics(databasePath) {
-  const now = Date.now();
-  if (emailMetricsCache
-      && emailMetricsCache.databasePath === databasePath
-      && now - emailMetricsCache.createdAt < EMAIL_METRICS_CACHE_TTL_MS) {
-    return emailMetricsCache.payload;
-  }
-  const metrics = loadSqliteEmailMetrics(databasePath, {
-    now: new Date(now),
-    minimumGroupSample: 5,
-    maxGroups: 50
-  });
-  const payload = presentEmailMetrics(metrics, statusMonitoringMode(databasePath));
-  emailMetricsCache = { databasePath, createdAt: now, payload };
-  return payload;
 }
 
 function releaseInfoPath(databasePath) {
@@ -1324,8 +1282,11 @@ app.get('/api/email-metrics', (req, res) => {
     || path.join(__dirname, 'data', 'portal-archive.sqlite');
   res.setHeader('Cache-Control', 'no-store');
   try {
-    const payload = cachedEmailMetrics(databasePath);
-    return res.status(payload.database_available ? 200 : 503).json(payload);
+    const result = emailMetricsBackground.get(databasePath);
+    if (result.payload.retry_after_seconds) {
+      res.setHeader('Retry-After', String(result.payload.retry_after_seconds));
+    }
+    return res.status(result.statusCode).json(result.payload);
   } catch (error) {
     console.error('Email metrics error:', error.message);
     return res.status(503).json({

@@ -197,6 +197,7 @@
   const MAP_RETRY_MS = 3_000;
   const EMAIL_UPDATES_REFRESH_MS = 15_000;
   const EMAIL_METRICS_REFRESH_MS = 60_000;
+  const EMAIL_METRICS_REFRESHING_RETRY_MS = 2_500;
   const RELEASE_INFO_REFRESH_MS = 5 * 60_000;
   const DASHBOARD_MIN_REFRESH_MS = 5_000;
   const STATUS_HISTORY_REFRESH_MS = 15_000;
@@ -243,6 +244,13 @@
   let lastDashboardStats = null;
   let emailMetricsInFlight = false;
   let releaseInfoInFlight = false;
+  let overviewDataStarted = false;
+  let overviewEmailMetricsTimer = null;
+  let overviewReleaseInfoTimer = null;
+  let lastEmailMetricsAttemptAt = 0;
+  let lastReleaseInfoAttemptAt = 0;
+  let emailMetricsRefreshPending = false;
+  let dashboardPayloadLoaded = false;
   let dashboardRefreshTimer = null;
   const expandedResponseTables = new Set();
   let archiveSearchRecord = null;
@@ -346,10 +354,66 @@
     if (usesViewTabs) {
       appShell.dataset.mobileView = normalizedView;
       setPressedView(normalizedView);
+      syncOverviewRefreshes(normalizedView === 'overview');
       scheduleMapLayout({ attemptBoundaryFit: normalizedView === 'map' });
       if (normalizedView === 'map' && !mapArchiveLoaded) refreshMap(mapStats, true);
     }
     return usesViewTabs && normalizedView === 'map';
+  }
+
+  function overviewIsActive() {
+    return appShell.dataset.mobileView === 'overview';
+  }
+
+  function clearOverviewRefreshTimers() {
+    if (overviewEmailMetricsTimer !== null) {
+      window.clearTimeout(overviewEmailMetricsTimer);
+      overviewEmailMetricsTimer = null;
+    }
+    if (overviewReleaseInfoTimer !== null) {
+      window.clearTimeout(overviewReleaseInfoTimer);
+      overviewReleaseInfoTimer = null;
+    }
+  }
+
+  function scheduleOverviewEmailMetrics(delayMs = EMAIL_METRICS_REFRESH_MS) {
+    if (!overviewIsActive() || overviewEmailMetricsTimer !== null) return;
+    overviewEmailMetricsTimer = window.setTimeout(async () => {
+      overviewEmailMetricsTimer = null;
+      await refreshEmailMetrics();
+      scheduleOverviewEmailMetrics();
+    }, Math.max(0, delayMs));
+  }
+
+  function scheduleOverviewReleaseInfo(delayMs = RELEASE_INFO_REFRESH_MS) {
+    if (!overviewIsActive() || overviewReleaseInfoTimer !== null) return;
+    overviewReleaseInfoTimer = window.setTimeout(async () => {
+      overviewReleaseInfoTimer = null;
+      await refreshReleaseInfo();
+      scheduleOverviewReleaseInfo();
+    }, Math.max(0, delayMs));
+  }
+
+  function syncOverviewRefreshes(active = overviewIsActive()) {
+    clearOverviewRefreshTimers();
+    if (!active) return;
+
+    const now = Date.now();
+    if (!overviewDataStarted) {
+      overviewDataStarted = true;
+      showEmailMetricsCalculating();
+      void refreshEmailMetrics().finally(() => scheduleOverviewEmailMetrics());
+      void refreshReleaseInfo().finally(() => scheduleOverviewReleaseInfo());
+      return;
+    }
+
+    scheduleOverviewEmailMetrics(emailMetricsRefreshPending
+      ? EMAIL_METRICS_REFRESHING_RETRY_MS
+      : Math.max(0, EMAIL_METRICS_REFRESH_MS - (now - lastEmailMetricsAttemptAt)));
+    scheduleOverviewReleaseInfo(Math.max(
+      0,
+      RELEASE_INFO_REFRESH_MS - (now - lastReleaseInfoAttemptAt)
+    ));
   }
 
   const submittedMillis = record => {
@@ -566,7 +630,9 @@
     const visible = filteredRecords();
     if (!visible.length) {
       const exact = exactSrnumberQuery();
-      const message = exact && archiveSearchState === 'loading'
+      const message = !dashboardPayloadLoaded
+        ? 'Loading requests…'
+        : exact && archiveSearchState === 'loading'
         ? `Searching the full archive for ${exact}…`
         : exact && archiveSearchState === 'not_found'
           ? `${exact} is not in the captured archive.`
@@ -691,7 +757,9 @@
       latest = latest === null ? timestamp : Math.max(latest, timestamp);
     }
     if (earliest === null || latest === null) {
-      mapDateRange.textContent = `${mapScopeLabel()} · no matching dated pins`;
+      mapDateRange.textContent = mapArchiveLoaded
+        ? `${mapScopeLabel()} · no matching dated pins`
+        : `${mapScopeLabel()} · loading map records`;
       return;
     }
     const earliestLabel = mapRangeDateFormatter.format(new Date(earliest));
@@ -1837,9 +1905,11 @@
           return `<option value="${Number(district.bid_id)}">${esc(district.name)}${esc(suffix)}</option>`;
         }).join('');
       bidFilter.disabled = districts.length === 0;
-      renderFeed();
-      renderMap();
-      if (selectedNumber) renderDetail(findRecord(selectedNumber));
+      if (dashboardPayloadLoaded) {
+        renderFeed();
+        renderMap();
+        if (selectedNumber) renderDetail(findRecord(selectedNumber));
+      }
     } catch (error) {
       bidFilter.innerHTML = '<option value="">BID filter unavailable</option>';
       bidFilter.disabled = true;
@@ -2145,8 +2215,9 @@
   }
 
   async function refreshReleaseInfo() {
-    if (releaseInfoInFlight || !hasReleaseSpeedElements) return;
+    if (!overviewIsActive() || releaseInfoInFlight || !hasReleaseSpeedElements) return;
     releaseInfoInFlight = true;
+    lastReleaseInfoAttemptAt = Date.now();
     try {
       const payload = await fetchJson('/api/release-info', 'Release timing service');
       renderReleaseInfo(payload);
@@ -2265,6 +2336,21 @@
       [],
       'Complaint response metrics are temporarily unavailable.'
     );
+  }
+
+  function showEmailMetricsCalculating(payload = {}) {
+    if (!hasEmailMetricElements) return;
+    const message = typeof payload.message === 'string' && payload.message.trim()
+      ? payload.message.trim()
+      : 'Calculating email and response-time statistics in the background. Requests and the map remain available.';
+    emailMetricElements.root.setAttribute('aria-busy', 'true');
+    emailMetricElements.responseRoot.setAttribute('aria-busy', 'true');
+    emailMetricElements.mode.textContent = 'Calculating metrics…';
+    emailMetricElements.mode.dataset.mode = 'calculating';
+    emailMetricElements.responseUpdated.textContent = 'Calculating…';
+    emailMetricElements.status.textContent = lastGoodEmailMetrics
+      ? `${message} Showing the last completed calculation until the refresh finishes.`
+      : message;
   }
 
   function renderEmailMetrics(payload) {
@@ -2407,6 +2493,7 @@
     );
     emailMetricElements.root.setAttribute('aria-busy', 'false');
     emailMetricElements.responseRoot.setAttribute('aria-busy', 'false');
+    emailMetricsRefreshPending = false;
     lastGoodEmailMetrics = model;
     renderStatusClarity(lastDashboardStats || {}, model);
     if (selectedNumber) {
@@ -2417,10 +2504,24 @@
   }
 
   async function refreshEmailMetrics() {
-    if (emailMetricsInFlight || !hasEmailMetricElements) return;
+    if (!overviewIsActive() || emailMetricsInFlight || !hasEmailMetricElements) return;
     emailMetricsInFlight = true;
+    lastEmailMetricsAttemptAt = Date.now();
     try {
       const payload = await fetchJson('/api/email-metrics', 'Email metrics service');
+      if (payload && payload.refreshing === true) {
+        emailMetricsRefreshPending = true;
+        showEmailMetricsCalculating(payload);
+        const suggestedDelay = Number(payload.retry_after_seconds) * 1000;
+        if (overviewEmailMetricsTimer !== null) {
+          window.clearTimeout(overviewEmailMetricsTimer);
+          overviewEmailMetricsTimer = null;
+        }
+        scheduleOverviewEmailMetrics(Number.isFinite(suggestedDelay)
+          ? Math.max(2_000, Math.min(3_000, suggestedDelay))
+          : EMAIL_METRICS_REFRESHING_RETRY_MS);
+        return;
+      }
       renderEmailMetrics(payload);
     } catch (error) {
       showEmailMetricsUnavailable();
@@ -2723,7 +2824,10 @@
       });
       if (sequence !== dashboardRequestSequence) return;
       const stats = data.stats || {};
+      const firstDashboardPayload = !dashboardPayloadLoaded;
+      dashboardPayloadLoaded = true;
       updateFeedRecords(data.records || []);
+      if (firstDashboardPayload && records.length === 0) renderFeed();
       const exact = exactSrnumberQuery();
       if (exact) {
         const archiveSequence = ++archiveSearchSequence;
@@ -2924,10 +3028,6 @@
   loadBusinessImprovementDistricts();
   updateActiveFilterState();
   refreshNowAndReschedule();
-  refreshEmailMetrics();
-  refreshReleaseInfo();
-  window.setInterval(refreshEmailMetrics, EMAIL_METRICS_REFRESH_MS);
-  window.setInterval(refreshReleaseInfo, RELEASE_INFO_REFRESH_MS);
   window.setInterval(() => {
     const now = new Date();
     document.getElementById('nyc-clock').textContent = new Intl.DateTimeFormat('en-US', {

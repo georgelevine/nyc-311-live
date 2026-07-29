@@ -1,0 +1,286 @@
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const { fork } = require('child_process');
+
+const CACHE_VERSION = 1;
+const DEFAULT_CACHE_TTL_MS = 5 * 60_000;
+const DEFAULT_FAILURE_COOLDOWN_MS = 5 * 60_000;
+const DEFAULT_WORKER_TIMEOUT_MS = 3 * 60_000;
+const DEFAULT_RETRY_AFTER_SECONDS = 3;
+
+function positiveInteger(value, fallback) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function defaultCachePath(databasePath) {
+  return path.join(path.dirname(databasePath), 'email-metrics-cache.json');
+}
+
+function defaultTempDirectory(databasePath) {
+  return path.join(path.dirname(databasePath), 'sqlite-email-metrics-tmp');
+}
+
+function normalizeSnapshot(candidate, databasePath) {
+  if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
+  if (candidate.version !== CACHE_VERSION) return null;
+  if (candidate.database_path !== path.resolve(databasePath)) return null;
+  if (!candidate.payload || typeof candidate.payload !== 'object' || Array.isArray(candidate.payload)) {
+    return null;
+  }
+  const generatedAtMs = Date.parse(candidate.generated_at);
+  if (!Number.isFinite(generatedAtMs)) return null;
+  return {
+    generatedAt: new Date(generatedAtMs).toISOString(),
+    generatedAtMs,
+    payload: candidate.payload
+  };
+}
+
+function readPersistedSnapshot(cachePath, databasePath) {
+  try {
+    if (!fs.existsSync(cachePath)) return null;
+    const stats = fs.statSync(cachePath);
+    if (!stats.isFile() || stats.size <= 0 || stats.size > 5 * 1024 * 1024) return null;
+    return normalizeSnapshot(JSON.parse(fs.readFileSync(cachePath, 'utf8')), databasePath);
+  } catch (error) {
+    console.error('Email metrics cache read error:', error.message);
+    return null;
+  }
+}
+
+function publicPayload(snapshot, state = {}) {
+  return {
+    ...snapshot.payload,
+    metrics_generated_at: snapshot.generatedAt,
+    metrics_refreshing: Boolean(state.refreshing),
+    metrics_stale: Boolean(state.stale),
+    ...(state.lastError ? {
+      metrics_refresh_error: 'Background refresh failed; using the last saved metrics'
+    } : {})
+  };
+}
+
+function createEmailMetricsBackground(options = {}) {
+  const workerPath = options.workerPath || path.join(__dirname, 'email-metrics-worker.js');
+  const cacheTtlMs = positiveInteger(
+    options.cacheTtlMs || process.env.EMAIL_METRICS_CACHE_TTL_MS,
+    DEFAULT_CACHE_TTL_MS
+  );
+  const failureCooldownMs = positiveInteger(
+    options.failureCooldownMs || process.env.EMAIL_METRICS_FAILURE_COOLDOWN_MS,
+    DEFAULT_FAILURE_COOLDOWN_MS
+  );
+  const workerTimeoutMs = positiveInteger(
+    options.workerTimeoutMs || process.env.EMAIL_METRICS_WORKER_TIMEOUT_MS,
+    DEFAULT_WORKER_TIMEOUT_MS
+  );
+  const retryAfterSeconds = positiveInteger(
+    options.retryAfterSeconds || process.env.EMAIL_METRICS_RETRY_AFTER_SECONDS,
+    DEFAULT_RETRY_AFTER_SECONDS
+  );
+  const forkWorker = options.forkWorker || fork;
+  const now = options.now || (() => Date.now());
+  const logger = options.logger || console;
+
+  let databasePath = null;
+  let cachePath = null;
+  let tempDirectory = null;
+  let snapshot = null;
+  let activeWorker = null;
+  let retryAtMs = 0;
+  let lastError = null;
+
+  function terminateWorker(worker) {
+    worker.child.kill('SIGTERM');
+    const forceTimer = setTimeout(() => {
+      if (!worker.exited) worker.child.kill('SIGKILL');
+    }, 5_000);
+    if (typeof forceTimer.unref === 'function') forceTimer.unref();
+  }
+
+  function configure(nextDatabasePath) {
+    const resolvedDatabasePath = path.resolve(nextDatabasePath);
+    if (databasePath === resolvedDatabasePath) return;
+    if (activeWorker) {
+      terminateWorker(activeWorker);
+      clearTimeout(activeWorker.timeout);
+      activeWorker = null;
+    }
+    databasePath = resolvedDatabasePath;
+    cachePath = options.cachePath || defaultCachePath(databasePath);
+    tempDirectory = options.tempDirectory || defaultTempDirectory(databasePath);
+    snapshot = readPersistedSnapshot(cachePath, databasePath);
+    retryAtMs = 0;
+    lastError = null;
+  }
+
+  function finishWorker(worker, error, message) {
+    if (activeWorker !== worker) return;
+    clearTimeout(worker.timeout);
+    activeWorker = null;
+
+    if (error) {
+      lastError = String(error.message || error).slice(0, 300);
+      retryAtMs = now() + failureCooldownMs;
+      logger.error('Email metrics worker error:', lastError);
+      return;
+    }
+
+    const normalized = normalizeSnapshot(message && message.snapshot, databasePath);
+    if (!normalized) {
+      lastError = 'The metrics worker returned an invalid snapshot';
+      retryAtMs = now() + failureCooldownMs;
+      logger.error('Email metrics worker error:', lastError);
+      return;
+    }
+
+    snapshot = normalized;
+    retryAtMs = 0;
+    lastError = null;
+  }
+
+  function startWorker() {
+    if (activeWorker || now() < retryAtMs) return false;
+
+    let child;
+    try {
+      child = forkWorker(workerPath, [], {
+        env: {
+          ...process.env,
+          EMAIL_METRICS_DATABASE_PATH: databasePath,
+          EMAIL_METRICS_CACHE_PATH: cachePath,
+          EMAIL_METRICS_TEMP_DIRECTORY: tempDirectory,
+          SQLITE_TMPDIR: tempDirectory
+        },
+        execArgv: [],
+        silent: true
+      });
+    } catch (error) {
+      lastError = String(error.message || error).slice(0, 300);
+      retryAtMs = now() + failureCooldownMs;
+      logger.error('Email metrics worker start error:', lastError);
+      return false;
+    }
+
+    const worker = {
+      child,
+      exited: false,
+      settled: false,
+      stderr: '',
+      timeout: null
+    };
+    activeWorker = worker;
+
+    worker.timeout = setTimeout(() => {
+      if (activeWorker !== worker) return;
+      worker.settled = true;
+      terminateWorker(worker);
+      finishWorker(worker, new Error(`timed out after ${workerTimeoutMs}ms`));
+    }, workerTimeoutMs);
+    if (typeof worker.timeout.unref === 'function') worker.timeout.unref();
+
+    if (child.stderr) {
+      child.stderr.setEncoding('utf8');
+      child.stderr.on('data', chunk => {
+        worker.stderr = `${worker.stderr}${chunk}`.slice(-16_384);
+      });
+    }
+    child.once('message', message => {
+      if (worker.settled) return;
+      worker.settled = true;
+      if (message && message.ok) {
+        finishWorker(worker, null, message);
+      } else {
+        finishWorker(worker, new Error(
+          message && message.error
+            ? message.error
+            : worker.stderr.trim() || 'metrics worker failed'
+        ));
+      }
+    });
+    child.once('error', error => {
+      if (worker.settled) return;
+      worker.settled = true;
+      finishWorker(worker, error);
+    });
+    child.once('exit', (code, signal) => {
+      worker.exited = true;
+      if (worker.settled) return;
+      worker.settled = true;
+      finishWorker(worker, new Error(
+        worker.stderr.trim()
+          || `exited before returning metrics (${signal || `code ${code}`})`
+      ));
+    });
+    return true;
+  }
+
+  function get(nextDatabasePath) {
+    configure(nextDatabasePath);
+    const currentTime = now();
+    const fresh = snapshot && currentTime - snapshot.generatedAtMs < cacheTtlMs;
+    if (!fresh) startWorker();
+
+    if (snapshot) {
+      return {
+        statusCode: snapshot.payload.database_available === false ? 503 : 200,
+        payload: publicPayload(snapshot, {
+          refreshing: Boolean(activeWorker),
+          stale: !fresh,
+          lastError
+        })
+      };
+    }
+
+    if (currentTime < retryAtMs && lastError) {
+      return {
+        statusCode: 503,
+        payload: {
+          error: 'Email monitoring metrics are temporarily unavailable',
+          metrics_refreshing: false,
+          metrics_refresh_error: 'Background refresh failed',
+          retry_after_seconds: Math.max(1, Math.ceil((retryAtMs - currentTime) / 1000))
+        }
+      };
+    }
+
+    return {
+      statusCode: 202,
+      payload: {
+        refreshing: true,
+        metrics_refreshing: true,
+        message: 'Calculating email monitoring metrics',
+        retry_after_seconds: retryAfterSeconds
+      }
+    };
+  }
+
+  function close() {
+    if (!activeWorker) return;
+    const worker = activeWorker;
+    worker.settled = true;
+    clearTimeout(worker.timeout);
+    activeWorker = null;
+    terminateWorker(worker);
+  }
+
+  return {
+    close,
+    get,
+    isRefreshing: () => Boolean(activeWorker)
+  };
+}
+
+module.exports = {
+  CACHE_VERSION,
+  DEFAULT_CACHE_TTL_MS,
+  DEFAULT_FAILURE_COOLDOWN_MS,
+  DEFAULT_RETRY_AFTER_SECONDS,
+  DEFAULT_WORKER_TIMEOUT_MS,
+  createEmailMetricsBackground,
+  normalizeSnapshot,
+  readPersistedSnapshot
+};
