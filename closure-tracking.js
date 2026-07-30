@@ -7,6 +7,15 @@ const CLOSURE_RETRY_DELAYS_MS = [
   2 * 60 * 60 * 1000,
   24 * 60 * 60 * 1000
 ];
+const PORTAL_DETAIL_UNAVAILABLE_CODE = 'PORTAL_DETAIL_UNAVAILABLE';
+// With the generic 30s-to-1h capped backoff below, eight identical semantic
+// responses span at least 63.5 minutes before finalization.
+const PORTAL_DETAIL_UNAVAILABLE_FINALIZE_AFTER = 8;
+const PORTAL_STATUS_EVIDENCE_SOURCES = new Set([
+  'map',
+  'detail',
+  'number_audit'
+]);
 
 function isClosedStatus(value) {
   return CLOSED_STATUS_PATTERN.test(String(value || ''));
@@ -18,6 +27,10 @@ function normalizedStatus(value) {
 
 function statusesMatch(first, second) {
   return normalizedStatus(first) === normalizedStatus(second);
+}
+
+function isPortalDetailUnavailableError(error) {
+  return Boolean(error && error.code === PORTAL_DETAIL_UNAVAILABLE_CODE);
 }
 
 function nextOpenFollowUpAt(now = new Date()) {
@@ -316,7 +329,13 @@ function createClosureTracker(db) {
 
   function markFollowUpError(row, error, checkedAt) {
     const existing = getFollowUp.get(row.srnumber) || row;
-    const attempts = Math.max(0, Number(existing.attempts) || 0) + 1;
+    const errorMessage = String(error && error.message || 'Unknown follow-up error');
+    // `attempts` is a consecutive-error counter. Resetting it when the error
+    // changes prevents unrelated timeouts or HTTP failures from satisfying a
+    // semantic-detail-unavailable threshold.
+    const attempts = existing.last_error === errorMessage
+      ? Math.max(0, Number(existing.attempts) || 0) + 1
+      : 1;
     const delay = Math.min(60 * 60 * 1000, 30_000 * (2 ** Math.min(attempts - 1, 7)));
     saveFollowUp.run(
       row.srnumber,
@@ -328,11 +347,85 @@ function createClosureTracker(db) {
       Number(existing.closure_cycle) || 0,
       checkedAt,
       existing.last_success_at || null,
-      error.message,
+      errorMessage,
       existing.finalized_at || null,
       checkedAt
     );
     return delay;
+  }
+
+  function handleFollowUpFailure({
+    row,
+    error,
+    checkedAt,
+    effectiveStatus = null,
+    evidenceSource = null,
+    evidenceStatus = null,
+    detail = null
+  }) {
+    const retryDelay = markFollowUpError(row, error, checkedAt);
+    const existing = getFollowUp.get(row.srnumber);
+    const source = normalizedStatus(evidenceSource);
+    const eligible = existing
+      && existing.state === 'closing'
+      && isPortalDetailUnavailableError(error)
+      && PORTAL_STATUS_EVIDENCE_SOURCES.has(source)
+      && isClosedStatus(effectiveStatus)
+      && isClosedStatus(evidenceStatus)
+      && Number(existing.attempts) >= PORTAL_DETAIL_UNAVAILABLE_FINALIZE_AFTER;
+
+    if (!eligible) {
+      return {
+        state: existing && existing.state || row.state || 'open',
+        finalized: false,
+        snapshotAdded: false,
+        retryDelay,
+        attempts: Number(existing && existing.attempts) || 0
+      };
+    }
+
+    const closureCycle = Math.max(1, Number(existing.closure_cycle) || 1);
+    const snapshotDetail = {
+      ...(detail || {}),
+      srnumber: row.srnumber,
+      portalId: row.portal_id || existing.portal_id || (detail && detail.portalId) || null,
+      status: effectiveStatus,
+      // Never infer a closure timestamp from a map observation or from the
+      // disappearance of the detail page.
+      dateClosed: null,
+      fields: detail && detail.fields && typeof detail.fields === 'object'
+        ? detail.fields
+        : {}
+    };
+    const snapshotAdded = recordClosure(
+      snapshotDetail,
+      `portal_${source}_detail_unavailable`,
+      checkedAt,
+      closureCycle,
+      true,
+      'portal_detail_unavailable'
+    );
+    saveFollowUp.run(
+      row.srnumber,
+      snapshotDetail.portalId,
+      'closed',
+      null,
+      Number(existing.attempts) || 0,
+      Number(existing.closing_attempts) || 0,
+      closureCycle,
+      checkedAt,
+      existing.last_success_at || null,
+      existing.last_error || null,
+      checkedAt,
+      checkedAt
+    );
+    return {
+      state: 'closed',
+      finalized: true,
+      snapshotAdded,
+      retryDelay: null,
+      attempts: Number(existing.attempts) || 0
+    };
   }
 
   function normalizeOpenFollowUps(now = new Date()) {
@@ -365,14 +458,18 @@ function createClosureTracker(db) {
     queueMapStatusChange,
     scheduleAfterDetail,
     markFollowUpError,
+    handleFollowUpFailure,
     normalizeOpenFollowUps,
     recordClosure
   };
 }
 
 module.exports = {
+  PORTAL_DETAIL_UNAVAILABLE_CODE,
+  PORTAL_DETAIL_UNAVAILABLE_FINALIZE_AFTER,
   createClosureTracker,
   ensureClosureSchema,
+  isPortalDetailUnavailableError,
   isClosedStatus,
   nextOpenFollowUpAt,
   statusesMatch

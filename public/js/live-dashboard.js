@@ -1106,6 +1106,12 @@
       || update && update.final_state
       || ''
     ).toLowerCase();
+    if (finalState === 'portal_detail_unavailable') {
+      return {
+        label: 'Closed in NYC311; final detail page unavailable',
+        state: 'unavailable'
+      };
+    }
     if (finalState === 'detail_unconfirmed') {
       return { label: 'Portal detail did not confirm closure', state: 'unconfirmed' };
     }
@@ -1306,6 +1312,13 @@
   function portalEvidence(record, statusPayload) {
     const followupState = String(record && record.followup_state || '').toLowerCase();
     const finalState = String(record && record.current_cycle_final_state || '').toLowerCase();
+    if (finalState === 'portal_detail_unavailable') {
+      return {
+        state: 'warning',
+        label: 'Closed in NYC311',
+        note: 'NYC311 reported the terminal status, but its detail page no longer contained this request after repeated checks. No closure time was inferred.'
+      };
+    }
     if (finalState === 'detail_unconfirmed') {
       return {
         state: 'warning',

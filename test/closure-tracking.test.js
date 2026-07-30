@@ -5,6 +5,8 @@ const assert = require('node:assert/strict');
 const { DatabaseSync } = require('node:sqlite');
 
 const {
+  PORTAL_DETAIL_UNAVAILABLE_CODE,
+  PORTAL_DETAIL_UNAVAILABLE_FINALIZE_AFTER,
   createClosureTracker,
   isClosedStatus,
   statusesMatch
@@ -45,6 +47,12 @@ function queueClosure(tracker, observedAt = '2026-07-20T13:30:00.000Z') {
     status: 'Closed',
     observedAt
   });
+}
+
+function unavailableDetailError() {
+  const error = new Error('Portal detail page did not contain a service request');
+  error.code = PORTAL_DETAIL_UNAVAILABLE_CODE;
+  return error;
 }
 
 test('status history deduplicates normalized statuses and records open-close-reopen', t => {
@@ -492,6 +500,146 @@ test('open follow-ups use a fixed 24 hours and ignore Portal timing metadata', t
   assert.equal(retry.next_check_at, '2026-07-20T14:05:30.000Z');
   assert.equal(retry.last_success_at, checkedAt);
   assert.equal(retry.last_error, 'timeout');
+});
+
+test('repeated semantic detail disappearance finalizes stored Portal closure evidence', t => {
+  const { db, tracker } = harness(t);
+  queueClosure(tracker);
+
+  // Mirror the production edge case: three successful Portal reads advanced
+  // the closure cycle, then the detail page stopped containing the request.
+  for (let index = 0; index < 3; index += 1) {
+    tracker.scheduleAfterDetail({
+      srnumber: SR_NUMBER,
+      portalId: PORTAL_ID,
+      effectiveStatus: 'Closed',
+      detail: detail(),
+      source: 'closure_followup',
+      checkedAt: new Date(Date.parse('2026-07-20T14:00:00.000Z') + index * 60_000).toISOString()
+    });
+  }
+
+  for (let index = 1; index <= PORTAL_DETAIL_UNAVAILABLE_FINALIZE_AFTER; index += 1) {
+    const result = tracker.handleFollowUpFailure({
+      row: tracker.getFollowUp.get(SR_NUMBER),
+      error: unavailableDetailError(),
+      checkedAt: new Date(Date.parse('2026-07-20T15:00:00.000Z') + index * 60_000).toISOString(),
+      effectiveStatus: 'Closed',
+      evidenceSource: 'map',
+      evidenceStatus: 'Closed',
+      detail: detail()
+    });
+    assert.equal(result.finalized, index === PORTAL_DETAIL_UNAVAILABLE_FINALIZE_AFTER);
+    assert.equal(result.attempts, index);
+  }
+
+  const row = tracker.getFollowUp.get(SR_NUMBER);
+  assert.equal(row.state, 'closed');
+  assert.equal(row.next_check_at, null);
+  assert.equal(row.closing_attempts, 3);
+  assert.equal(row.attempts, PORTAL_DETAIL_UNAVAILABLE_FINALIZE_AFTER);
+  assert.equal(row.last_success_at, '2026-07-20T14:02:00.000Z');
+  assert.equal(row.last_error, 'Portal detail page did not contain a service request');
+
+  const final = db.prepare(`
+    SELECT status,date_closed,source,is_final,final_state,snapshot_json
+    FROM request_closure_snapshots
+    WHERE srnumber=? AND closure_cycle=1 AND is_final=1
+  `).get(SR_NUMBER);
+  assert.equal(final.status, 'Closed');
+  assert.equal(final.date_closed, null);
+  assert.equal(final.source, 'portal_map_detail_unavailable');
+  assert.equal(final.is_final, 1);
+  assert.equal(final.final_state, 'portal_detail_unavailable');
+  assert.equal(JSON.parse(final.snapshot_json).dateClosed, null);
+});
+
+test('an existing semantic-error backlog resolves on its next qualified check', t => {
+  const { db, tracker } = harness(t);
+  queueClosure(tracker);
+  for (let index = 0; index < 3; index += 1) {
+    tracker.scheduleAfterDetail({
+      srnumber: SR_NUMBER,
+      portalId: PORTAL_ID,
+      effectiveStatus: 'Closed',
+      detail: detail(),
+      source: 'closure_followup',
+      checkedAt: new Date(Date.parse('2026-07-20T14:00:00.000Z') + index * 60_000).toISOString()
+    });
+  }
+  db.prepare(`
+    UPDATE request_followup_queue
+    SET attempts=27,last_error=?,next_check_at=?
+    WHERE srnumber=?
+  `).run(
+    'Portal detail page did not contain a service request',
+    '2026-07-20T15:00:00.000Z',
+    SR_NUMBER
+  );
+
+  const result = tracker.handleFollowUpFailure({
+    row: tracker.getFollowUp.get(SR_NUMBER),
+    error: unavailableDetailError(),
+    checkedAt: '2026-07-20T15:00:05.000Z',
+    effectiveStatus: 'Cancel',
+    evidenceSource: 'map',
+    evidenceStatus: 'Cancel',
+    detail: detail({ status: 'Cancel' })
+  });
+
+  assert.equal(result.finalized, true);
+  assert.equal(result.attempts, 28);
+  assert.equal(tracker.getFollowUp.get(SR_NUMBER).state, 'closed');
+});
+
+test('detail-unavailable fallback rejects unrelated failures and non-Portal evidence', t => {
+  const { db, tracker } = harness(t);
+  queueClosure(tracker);
+
+  for (let index = 1; index <= PORTAL_DETAIL_UNAVAILABLE_FINALIZE_AFTER + 2; index += 1) {
+    const result = tracker.handleFollowUpFailure({
+      row: tracker.getFollowUp.get(SR_NUMBER),
+      error: new Error('Portal detail returned HTTP 503'),
+      checkedAt: new Date(Date.parse('2026-07-20T15:00:00.000Z') + index * 60_000).toISOString(),
+      effectiveStatus: 'Closed',
+      evidenceSource: 'map',
+      evidenceStatus: 'Closed',
+      detail: detail()
+    });
+    assert.equal(result.finalized, false);
+  }
+  assert.equal(tracker.getFollowUp.get(SR_NUMBER).attempts,
+    PORTAL_DETAIL_UNAVAILABLE_FINALIZE_AFTER + 2);
+
+  const firstSemanticFailure = tracker.handleFollowUpFailure({
+    row: tracker.getFollowUp.get(SR_NUMBER),
+    error: unavailableDetailError(),
+    checkedAt: '2026-07-20T17:00:00.000Z',
+    effectiveStatus: 'Closed',
+    evidenceSource: 'map',
+    evidenceStatus: 'Closed',
+    detail: detail()
+  });
+  assert.equal(firstSemanticFailure.finalized, false);
+  assert.equal(firstSemanticFailure.attempts, 1);
+
+  for (let index = 2; index <= PORTAL_DETAIL_UNAVAILABLE_FINALIZE_AFTER; index += 1) {
+    const result = tracker.handleFollowUpFailure({
+      row: tracker.getFollowUp.get(SR_NUMBER),
+      error: unavailableDetailError(),
+      checkedAt: new Date(Date.parse('2026-07-20T17:00:00.000Z') + index * 60_000).toISOString(),
+      effectiveStatus: 'Closed',
+      evidenceSource: 'email',
+      evidenceStatus: 'Closed',
+      detail: detail()
+    });
+    assert.equal(result.finalized, false);
+  }
+
+  assert.equal(tracker.getFollowUp.get(SR_NUMBER).state, 'closing');
+  assert.equal(db.prepare(`
+    SELECT COUNT(*) AS count FROM request_closure_snapshots WHERE is_final=1
+  `).get().count, 0);
 });
 
 test('normalizes legacy open schedules without replacing an error retry', t => {

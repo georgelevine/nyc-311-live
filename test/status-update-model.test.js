@@ -314,6 +314,37 @@ test('never labels a detail-unconfirmed closure as Portal verified', () => {
   assert.equal(model.events[0].portal_evidence.verification_state, 'unconfirmed');
 });
 
+test('labels a terminal Portal status with an unavailable final detail page truthfully', () => {
+  const record = closedRecord({ current_cycle_final_state: 'portal_detail_unavailable' });
+  const payload = closurePayload({
+    closure_snapshots: [{
+      id: 14,
+      closure_cycle: 1,
+      is_final: 1,
+      final_state: 'portal_detail_unavailable',
+      source: 'portal_map_detail_unavailable',
+      fetched_at: '2026-07-23T21:05:00.000Z',
+      snapshot: { status: 'Closed', dateClosed: null }
+    }]
+  });
+  const model = buildStatusUpdateModel(record, payload, {
+    total: 1,
+    updates: [{
+      id: 9,
+      event_kind: 'Closed',
+      received_at: '2026-07-23T20:05:00.000Z'
+    }]
+  });
+
+  assert.equal(model.events.length, 1);
+  assert.equal(model.events[0].verification_state, 'unavailable');
+  assert.equal(
+    model.events[0].verification_label,
+    'Closed in NYC311; final detail page unavailable'
+  );
+  assert.equal(model.events[0].portal_evidence.final_state, 'portal_detail_unavailable');
+});
+
 test('merges a Portal closure and its agency email into one status update', () => {
   const model = buildStatusUpdateModel(closedRecord(), closurePayload(), {
     total: 2,

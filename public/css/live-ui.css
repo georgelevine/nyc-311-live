@@ -1940,7 +1940,8 @@ a:focus-visible {
   font-size: var(--font-xs);
 }
 
-.detail-email-verification[data-state="unconfirmed"] {
+.detail-email-verification[data-state="unconfirmed"],
+.detail-email-verification[data-state="unavailable"] {
   color: #9b6411;
   border-color: #efd5aa;
   background: #fff7e8;

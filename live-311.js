@@ -5,6 +5,7 @@ const fetch = require('node-fetch');
 const cheerio = require('cheerio');
 const { DatabaseSync } = require('node:sqlite');
 const {
+  PORTAL_DETAIL_UNAVAILABLE_CODE,
   createClosureTracker,
   isClosedStatus,
   statusesMatch
@@ -374,6 +375,19 @@ const latestStatusVersion = db.prepare(`
   SELECT COALESCE(MAX(id), 0) AS version
   FROM request_status_history WHERE srnumber = ?
 `);
+const getClosureFallbackEvidence = db.prepare(`
+  SELECT live.srnumber,live.portal_id,live.status AS live_status,
+         live.problem,live.address,live.submitted_at,
+         history.status AS evidence_status,history.source AS evidence_source
+  FROM live_portal_requests AS live
+  LEFT JOIN request_status_history AS history ON history.id=(
+    SELECT MAX(candidate.id)
+    FROM request_status_history AS candidate
+    WHERE candidate.srnumber=live.srnumber
+      AND candidate.source IN ('map','detail','number_audit')
+  )
+  WHERE live.srnumber=?
+`);
 const getState = db.prepare('SELECT value FROM live_monitor_state WHERE key = ?');
 const setState = db.prepare(`
   INSERT INTO live_monitor_state (key, value, updated_at)
@@ -712,7 +726,11 @@ function parseLiveDetail(html, expectedNumber, portalId) {
   };
 
   const number = fields['SR Number'] || expectedNumber;
-  if (!number || !fields['SR Number']) throw new Error('Portal detail page did not contain a service request');
+  if (!number || !fields['SR Number']) {
+    const error = new Error('Portal detail page did not contain a service request');
+    error.code = PORTAL_DETAIL_UNAVAILABLE_CODE;
+    throw error;
+  }
   return {
     srnumber: number,
     portalId: portalId || pagePortalId || null,
@@ -888,7 +906,36 @@ async function processDetailWork(row) {
           && Number(currentJob.closure_cycle) === Number(row.closure_cycle)
           && currentJob.updated_at === row.updated_at
           && Number(currentStatusVersion) === Number(row.status_version)) {
-        closureTracker.markFollowUpError(row, error, workTimestamp);
+        const evidence = getClosureFallbackEvidence.get(row.srnumber);
+        const failure = closureTracker.handleFollowUpFailure({
+          row,
+          error,
+          checkedAt: workTimestamp,
+          effectiveStatus: evidence && evidence.live_status,
+          evidenceSource: evidence && evidence.evidence_source,
+          evidenceStatus: evidence && evidence.evidence_status,
+          detail: evidence ? {
+            srnumber: evidence.srnumber,
+            portalId: evidence.portal_id,
+            status: evidence.live_status,
+            problem: evidence.problem,
+            address: evidence.address,
+            dateReported: evidence.submitted_at,
+            dateClosed: null,
+            fields: {}
+          } : null
+        });
+        if (failure.finalized) {
+          console.log(JSON.stringify({
+            closure_refresh: row.srnumber,
+            source: 'portal_status_detail_unavailable',
+            status: evidence && evidence.live_status,
+            date_closed: null,
+            finalized: true,
+            snapshot_added: failure.snapshotAdded,
+            consecutive_detail_unavailable: failure.attempts
+          }));
+        }
       }
     } else {
       markDetailRetry.run(retryAt, error.message, workTimestamp, row.srnumber);

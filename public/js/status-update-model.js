@@ -414,12 +414,17 @@
       : (followupState === 'closing' ? `Verifying ${status}` : status);
     const finalState = normalizedStatus(closureSnapshot && closureSnapshot.final_state);
     const detailUnconfirmed = finalState === 'detail_unconfirmed';
-    const verificationState = detailUnconfirmed
+    const detailUnavailable = finalState === 'portal_detail_unavailable';
+    const verificationState = detailUnavailable
+      ? 'unavailable'
+      : detailUnconfirmed
       ? 'unconfirmed'
       : followupState === 'closed'
         ? 'verified'
         : followupState === 'closing' ? 'checking' : null;
-    const verificationLabel = detailUnconfirmed
+    const verificationLabel = detailUnavailable
+      ? 'Closed in NYC311; final detail page unavailable'
+      : detailUnconfirmed
       ? 'Portal detail did not confirm closure'
       : followupState === 'closed'
         ? 'Confirmed from NYC311 Portal'
@@ -459,7 +464,10 @@
       const closed = isClosedStatus(eventKind);
       let verificationState = null;
       let verificationLabel = null;
-      if (closed && finalState === 'detail_unconfirmed') {
+      if (closed && finalState === 'portal_detail_unavailable') {
+        verificationState = 'unavailable';
+        verificationLabel = 'Closed in NYC311; final detail page unavailable';
+      } else if (closed && finalState === 'detail_unconfirmed') {
         verificationState = 'unconfirmed';
         verificationLabel = 'Portal detail did not confirm closure';
       } else if (closed && followupState === 'closed') {

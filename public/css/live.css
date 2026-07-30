@@ -336,7 +336,8 @@ button, input, select { font: inherit; }
 }
 .detail-email-verification[data-state="verified"] { color: #0d8058; border-color: #bee7d8; background: #e7f8f1; }
 .detail-email-verification[data-state="checking"],
-.detail-email-verification[data-state="queued"] { color: #9b6411; border-color: #efd5aa; background: #fff7e8; }
+.detail-email-verification[data-state="queued"],
+.detail-email-verification[data-state="unavailable"] { color: #9b6411; border-color: #efd5aa; background: #fff7e8; }
 .detail-portal-confirmation {
   display: grid; gap: 2px; margin-top: 8px; padding: 8px 9px;
   color: #536473; border: 1px solid #d5e2eb; border-radius: 8px; background: #fff;
@@ -349,12 +350,14 @@ button, input, select { font: inherit; }
 .detail-portal-confirmation[data-state="verified"] strong { color: #0d8058; }
 .detail-portal-confirmation[data-state="checking"],
 .detail-portal-confirmation[data-state="queued"],
-.detail-portal-confirmation[data-state="unconfirmed"] {
+.detail-portal-confirmation[data-state="unconfirmed"],
+.detail-portal-confirmation[data-state="unavailable"] {
   border-color: #efd5aa; background: #fff7e8;
 }
 .detail-portal-confirmation[data-state="checking"] strong,
 .detail-portal-confirmation[data-state="queued"] strong,
-.detail-portal-confirmation[data-state="unconfirmed"] strong { color: #9b6411; }
+.detail-portal-confirmation[data-state="unconfirmed"] strong,
+.detail-portal-confirmation[data-state="unavailable"] strong { color: #9b6411; }
 
 @media (max-width: 1240px) {
   .request-detail { top: 142px; max-height: calc(100% - 160px); }
