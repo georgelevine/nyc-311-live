@@ -367,11 +367,19 @@ Do not reopen the Mac collector. Preserve its original database unchanged.
 The timer runs nightly and keeps three verified local backups. Invalid or tampered
 backup pairs never consume retention slots, and the job refuses to start without
 safe free space. On the small instance, the backup process runs at idle disk
-priority and the lowest CPU priority inside its container. SQLite copies 64 pages
-per step by default so foreground collection, email ingestion, and dashboard reads
-can run between short backup bursts. Set `SQLITE_BACKUP_PAGE_RATE` in `.env` only
-after measuring production I/O latency; a larger value completes sooner but
-creates larger disk bursts.
+priority and the lowest CPU priority inside its container. Because the verified
+Lightsail root device `/dev/nvme0n1p1` uses the `none` scheduler and therefore
+does not honor `ionice`, Compose also applies cgroup-v2 ceilings of 5 MB/s for
+both reads and writes to the backup container only. SQLite copies 64 pages per
+step by default so foreground collection, email ingestion, and dashboard reads
+can run between short backup bursts. Set `SQLITE_BACKUP_PAGE_RATE` in `.env`
+only after measuring production I/O latency; a larger value creates larger
+bursts but cannot exceed the container bandwidth ceiling.
+
+Before moving this deployment to a different instance or disk layout, verify the
+root filesystem device with `findmnt -no SOURCE,MAJ:MIN /` and update both
+`blkio_config` paths if it is no longer `/dev/nvme0n1p1`. A missing or incorrect
+device path makes the backup job fail safely rather than running unthrottled.
 
 ```bash
 sudo systemctl status nyc311-backup.timer --no-pager

@@ -10,7 +10,10 @@ const {
   formPayload,
   modalUrl,
   parseBidIds, precinctLabel,
+  quarantineLegacySubscriptionRetries,
   recoverStaleProcessingSubscriptions,
+  retrySubscription,
+  subscriptionRetryPolicy,
   subscribeRequest
 } = require('../nyc311-portal-subscriptions');
 
@@ -342,5 +345,171 @@ test('newest subscription claims keep live arrivals ahead of an older catch-up b
     () => claimSubscription(database, now, { order: 'sideways' }),
     /order must be oldest or newest/
   );
+  database.close();
+});
+
+test('pending enrollment always precedes due legacy retries in both worker lanes', () => {
+  const database = new DatabaseSync(':memory:');
+  database.exec(`
+    CREATE TABLE live_portal_requests (
+      srnumber TEXT PRIMARY KEY,portal_id TEXT,suffix INTEGER
+    );
+    CREATE TABLE nyc311_email_aliases (
+      id INTEGER PRIMARY KEY,recipient_address TEXT
+    );
+    CREATE TABLE nyc311_email_subscription_jobs (
+      srnumber TEXT PRIMARY KEY,alias_id INTEGER,bid_id INTEGER,state TEXT,
+      attempts INTEGER,next_attempt_at TEXT,last_error TEXT,created_at TEXT,
+      updated_at TEXT,subscribed_at TEXT,scope_type TEXT,scope_id INTEGER,scope_label TEXT
+    );
+    INSERT INTO live_portal_requests VALUES
+      ('311-28300001','11111111-1111-1111-1111-111111111111',28300001),
+      ('311-28300002','22222222-2222-2222-2222-222222222222',28300002),
+      ('311-28300003','33333333-3333-3333-3333-333333333333',28300003);
+    INSERT INTO nyc311_email_aliases VALUES
+      (1,'first@track.opendata.support'),
+      (2,'second@track.opendata.support'),
+      (3,'third@track.opendata.support');
+    INSERT INTO nyc311_email_subscription_jobs VALUES
+      ('311-28300001',1,0,'pending',0,'2026-07-30T03:59:00.000Z',NULL,
+       '2026-07-30T03:59:00.000Z','2026-07-30T03:59:00.000Z',NULL,'all',0,'All NYC311'),
+      ('311-28300002',2,0,'pending',0,'2026-07-30T03:59:00.000Z',NULL,
+       '2026-07-30T03:59:00.000Z','2026-07-30T03:59:00.000Z',NULL,'all',0,'All NYC311'),
+      ('311-28300003',3,0,'retry',15,'2026-07-29T00:00:00.000Z',
+       'NYC311 subscription submit returned HTTP 500',
+       '2026-07-27T00:00:00.000Z','2026-07-29T00:00:00.000Z',NULL,'all',0,'All NYC311');
+  `);
+  const now = new Date('2026-07-30T04:00:00.000Z');
+
+  assert.equal(claimSubscription(database, now, { order: 'newest' }).srnumber,
+    '311-28300002');
+  assert.equal(claimSubscription(database, now, { order: 'oldest' }).srnumber,
+    '311-28300001');
+  assert.equal(claimSubscription(database, now, { order: 'oldest' }).srnumber,
+    '311-28300003');
+  database.close();
+});
+
+test('repeated Portal 5xx enters bounded eventual quarantine while other errors stay standard', () => {
+  const now = new Date('2026-07-30T04:00:00.000Z');
+  const first = subscriptionRetryPolicy({
+    srnumber: '311-28300001',
+    attempts: 0
+  }, new Error('NYC311 subscription submit returned HTTP 500'), now);
+  assert.equal(first.attempts, 1);
+  assert.equal(first.policy, 'standard_backoff');
+  assert.equal(first.delayMs, 60_000);
+
+  const quarantined = subscriptionRetryPolicy({
+    srnumber: '311-28300001',
+    attempts: 7
+  }, new Error('NYC311 subscription submit returned HTTP 500'), now);
+  assert.equal(quarantined.attempts, 8);
+  assert.equal(quarantined.quarantined, true);
+  assert.equal(quarantined.policy, 'portal_5xx_quarantine');
+  assert.ok(quarantined.delayMs >= 24 * 60 * 60 * 1000);
+  assert.ok(quarantined.delayMs <= 30 * 60 * 60 * 1000);
+
+  const bounded = subscriptionRetryPolicy({
+    srnumber: '311-28300001',
+    attempts: 50
+  }, new Error('NYC311 subscription submit returned HTTP 503'), now);
+  assert.equal(bounded.quarantined, true);
+  assert.ok(bounded.delayMs >= 7 * 24 * 60 * 60 * 1000);
+  assert.ok(bounded.delayMs <= (7 * 24 + 6) * 60 * 60 * 1000);
+
+  const unrelated = subscriptionRetryPolicy({
+    srnumber: '311-28300001',
+    attempts: 20
+  }, new Error('request aborted'), now);
+  assert.equal(unrelated.quarantined, false);
+  assert.equal(unrelated.policy, 'standard_backoff');
+  assert.equal(unrelated.delayMs, 360 * 60_000);
+});
+
+test('legacy 5xx jobs are spread across one to seven days once without becoming terminal', () => {
+  const database = new DatabaseSync(':memory:');
+  database.exec(`
+    CREATE TABLE nyc311_email_subscription_jobs (
+      srnumber TEXT PRIMARY KEY,state TEXT,attempts INTEGER,next_attempt_at TEXT,
+      last_error TEXT,updated_at TEXT
+    );
+    INSERT INTO nyc311_email_subscription_jobs VALUES
+      ('311-28300001','retry',15,'2026-07-30T03:00:00.000Z',
+       'NYC311 subscription submit returned HTTP 500','2026-07-30T03:00:00.000Z'),
+      ('311-28300002','retry',12,'2026-07-30T03:00:00.000Z',
+       'NYC311 subscription form returned HTTP 503','2026-07-30T03:00:00.000Z'),
+      ('311-28300003','retry',7,'2026-07-30T03:00:00.000Z',
+       'NYC311 subscription submit returned HTTP 500','2026-07-30T03:00:00.000Z'),
+      ('311-28300004','retry',15,'2026-07-30T03:00:00.000Z',
+       'request aborted','2026-07-30T03:00:00.000Z'),
+      ('311-28300005','retry',16,'2026-07-30T08:00:00.000Z',
+       'NYC311 subscription submit returned HTTP 502','2026-07-30T03:00:00.000Z'),
+      ('311-28300006','retry',16,'2026-08-02T03:00:00.000Z',
+       'NYC311 subscription submit returned HTTP 502','2026-07-30T03:00:00.000Z');
+  `);
+  const now = new Date('2026-07-30T04:00:00.000Z');
+  const result = quarantineLegacySubscriptionRetries(database, { now });
+  assert.equal(result.quarantined, 3);
+  assert.ok(Date.parse(result.earliestNextAttemptAt) >= now.getTime() + 24 * 60 * 60 * 1000);
+  assert.ok(Date.parse(result.latestNextAttemptAt) <= now.getTime() + 7 * 24 * 60 * 60 * 1000);
+  const rows = database.prepare(`
+    SELECT srnumber,state,attempts,next_attempt_at FROM nyc311_email_subscription_jobs
+    ORDER BY srnumber
+  `).all();
+  assert.equal(rows[0].state, 'retry');
+  assert.equal(rows[0].attempts, 15);
+  assert.ok(rows[0].next_attempt_at > now.toISOString());
+  assert.ok(rows[1].next_attempt_at > now.toISOString());
+  assert.equal(rows[2].next_attempt_at, '2026-07-30T03:00:00.000Z');
+  assert.equal(rows[3].next_attempt_at, '2026-07-30T03:00:00.000Z');
+  assert.ok(rows[4].next_attempt_at > now.toISOString());
+  assert.equal(rows[5].next_attempt_at, '2026-08-02T03:00:00.000Z');
+  assert.equal(
+    quarantineLegacySubscriptionRetries(database, { now }).quarantined,
+    0
+  );
+  const scheduled = database.prepare(`
+    SELECT srnumber,next_attempt_at FROM nyc311_email_subscription_jobs
+    ORDER BY srnumber
+  `).all();
+  assert.equal(
+    quarantineLegacySubscriptionRetries(database, {
+      now: new Date('2026-08-10T04:00:00.000Z')
+    }).quarantined,
+    0
+  );
+  assert.deepEqual(database.prepare(`
+    SELECT srnumber,next_attempt_at FROM nyc311_email_subscription_jobs
+    ORDER BY srnumber
+  `).all(), scheduled);
+  database.close();
+});
+
+test('retrySubscription persists the quarantine schedule and reports its policy', () => {
+  const database = new DatabaseSync(':memory:');
+  database.exec(`
+    CREATE TABLE nyc311_email_subscription_jobs (
+      srnumber TEXT PRIMARY KEY,state TEXT,attempts INTEGER,next_attempt_at TEXT,
+      last_error TEXT,updated_at TEXT
+    );
+    INSERT INTO nyc311_email_subscription_jobs VALUES
+      ('311-28300001','processing',8,'2026-07-30T04:00:00.000Z',NULL,
+       '2026-07-30T04:00:00.000Z');
+  `);
+  const now = new Date('2026-07-30T04:00:00.000Z');
+  const result = retrySubscription(database, {
+    srnumber: '311-28300001',
+    attempts: 7
+  }, new Error('NYC311 subscription submit returned HTTP 500'), now);
+  const row = database.prepare(`
+    SELECT state,attempts,next_attempt_at,last_error
+    FROM nyc311_email_subscription_jobs WHERE srnumber='311-28300001'
+  `).get();
+  assert.equal(result.quarantined, true);
+  assert.equal(row.state, 'retry');
+  assert.equal(row.attempts, 8);
+  assert.equal(row.next_attempt_at, result.nextAttemptAt);
+  assert.equal(row.last_error, 'NYC311 subscription submit returned HTTP 500');
   database.close();
 });

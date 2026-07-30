@@ -177,6 +177,16 @@ services:
       - type: bind
         source: /var/backups/nyc-311-live
         target: /backups
+    # Lightsail's root filesystem is /dev/nvme0n1p1. Its active "none" I/O
+    # scheduler does not honor ionice priorities, so cgroup v2 must enforce the
+    # bandwidth ceiling directly on the backup container.
+    blkio_config:
+      device_read_bps:
+        - path: /dev/nvme0n1p1
+          rate: 5mb
+      device_write_bps:
+        - path: /dev/nvme0n1p1
+          rate: 5mb
     network_mode: none
     logging: *default-logging
 

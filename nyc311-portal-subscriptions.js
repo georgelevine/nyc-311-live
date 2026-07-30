@@ -17,6 +17,13 @@ const EMAIL_NAME =
   'ctl00$ContentContainer$MainContent$EntityFormControl$EntityFormControl_EntityFormView$n311_email';
 const DEFAULT_SUBSCRIPTION_TIMEOUT_MS = 15_000;
 const STALE_SUBSCRIPTION_PROCESSING_MS = 10 * 60 * 1000;
+const SUBSCRIPTION_QUARANTINE_AFTER_ATTEMPTS = 8;
+const SUBSCRIPTION_QUARANTINE_BASE_MS = 24 * 60 * 60 * 1000;
+const SUBSCRIPTION_QUARANTINE_MAX_MS = 7 * 24 * 60 * 60 * 1000;
+const SUBSCRIPTION_QUARANTINE_JITTER_MAX_MS = 6 * 60 * 60 * 1000;
+const LEGACY_QUARANTINE_SPREAD_MS = 6 * 24 * 60 * 60 * 1000;
+const PORTAL_SERVER_FAILURE_PATTERN =
+  /^NYC311 subscription (?:form|submit) returned HTTP 5\d\d$/;
 
 function parseBidIds(value) {
   return [...new Set(String(value || '').split(',')
@@ -295,6 +302,128 @@ function recoverStaleProcessingSubscriptions(database, {
   `).run(nowIso, nowIso, staleBefore).changes || 0);
 }
 
+function stableBucket(value, buckets) {
+  const bucketCount = Math.max(1, Math.trunc(Number(buckets) || 1));
+  let hash = 2166136261;
+  for (const character of String(value || '')) {
+    hash ^= character.codePointAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0) % bucketCount;
+}
+
+function subscriptionRetryPolicy(job, error, now = new Date()) {
+  const current = now instanceof Date ? now : new Date(now);
+  if (!Number.isFinite(current.getTime())) throw new TypeError('now must be a valid date');
+  const priorAttempts = Math.max(0, Math.trunc(Number(job && job.attempts) || 0));
+  // claimSubscription increments the stored counter after returning the row.
+  const attempts = priorAttempts + 1;
+  const message = String(error && error.message || error);
+  const quarantined = attempts >= SUBSCRIPTION_QUARANTINE_AFTER_ATTEMPTS
+    && PORTAL_SERVER_FAILURE_PATTERN.test(message);
+
+  let delayMs;
+  let policy;
+  if (quarantined) {
+    const quarantineAttempt = attempts - SUBSCRIPTION_QUARANTINE_AFTER_ATTEMPTS;
+    delayMs = Math.min(
+      SUBSCRIPTION_QUARANTINE_MAX_MS,
+      SUBSCRIPTION_QUARANTINE_BASE_MS * (2 ** Math.min(3, quarantineAttempt))
+    );
+    const jitterWindow = Math.min(
+      SUBSCRIPTION_QUARANTINE_JITTER_MAX_MS,
+      Math.floor(delayMs / 4)
+    );
+    const jitterMinutes = stableBucket(
+      job && job.srnumber,
+      Math.floor(jitterWindow / 60_000) + 1
+    );
+    delayMs += jitterMinutes * 60_000;
+    policy = 'portal_5xx_quarantine';
+  } else {
+    const delayMinutes = Math.min(360, 2 ** Math.min(9, attempts - 1));
+    delayMs = delayMinutes * 60_000;
+    policy = 'standard_backoff';
+  }
+
+  return {
+    attempts,
+    delayMs,
+    nextAttemptAt: new Date(current.getTime() + delayMs).toISOString(),
+    policy,
+    quarantined
+  };
+}
+
+function quarantineLegacySubscriptionRetries(database, {
+  now = new Date(),
+  minimumAttempts = SUBSCRIPTION_QUARANTINE_AFTER_ATTEMPTS
+} = {}) {
+  const current = now instanceof Date ? now : new Date(now);
+  if (!Number.isFinite(current.getTime())) throw new TypeError('now must be a valid date');
+  if (!Number.isInteger(minimumAttempts) || minimumAttempts < 1) {
+    throw new TypeError('minimumAttempts must be a positive integer');
+  }
+  const nowIso = current.toISOString();
+  let quarantined = 0;
+  let earliestNextAttemptAt = null;
+  let latestNextAttemptAt = null;
+
+  database.exec('BEGIN IMMEDIATE');
+  try {
+    const rows = database.prepare(`
+      SELECT srnumber,next_attempt_at,updated_at
+      FROM nyc311_email_subscription_jobs
+      WHERE state='retry'
+        AND attempts>=?
+        AND (
+          last_error GLOB 'NYC311 subscription form returned HTTP 5[0-9][0-9]'
+          OR last_error GLOB 'NYC311 subscription submit returned HTTP 5[0-9][0-9]'
+        )
+      ORDER BY srnumber
+    `).all(minimumAttempts);
+    const update = database.prepare(`
+      UPDATE nyc311_email_subscription_jobs
+      SET next_attempt_at=?,updated_at=?
+      WHERE srnumber=? AND state='retry'
+    `);
+    const spreadMinutes = Math.floor(LEGACY_QUARANTINE_SPREAD_MS / 60_000);
+    for (const row of rows) {
+      const scheduledDelayMs =
+        Date.parse(row.next_attempt_at) - Date.parse(row.updated_at);
+      // A quarantine retry is already recognizable by its persisted delay.
+      // Keep it untouched across restarts so a due job can eventually run.
+      if (Number.isFinite(scheduledDelayMs)
+          && scheduledDelayMs >= SUBSCRIPTION_QUARANTINE_BASE_MS) {
+        continue;
+      }
+      const offsetMinutes = stableBucket(row.srnumber, spreadMinutes + 1);
+      const nextAttemptAt = new Date(
+        current.getTime() + SUBSCRIPTION_QUARANTINE_BASE_MS + offsetMinutes * 60_000
+      ).toISOString();
+      quarantined += Number(
+        update.run(nextAttemptAt, nowIso, row.srnumber).changes || 0
+      );
+      if (!earliestNextAttemptAt || nextAttemptAt < earliestNextAttemptAt) {
+        earliestNextAttemptAt = nextAttemptAt;
+      }
+      if (!latestNextAttemptAt || nextAttemptAt > latestNextAttemptAt) {
+        latestNextAttemptAt = nextAttemptAt;
+      }
+    }
+    database.exec('COMMIT');
+  } catch (error) {
+    database.exec('ROLLBACK');
+    throw error;
+  }
+
+  return {
+    quarantined,
+    earliestNextAttemptAt,
+    latestNextAttemptAt
+  };
+}
+
 function claimSubscription(database, now = new Date(), {
   order = 'oldest'
 } = {}) {
@@ -308,14 +437,18 @@ function claimSubscription(database, now = new Date(), {
   database.exec('BEGIN IMMEDIATE');
   try {
     recoverStaleProcessingSubscriptions(database, { now });
-    const row = database.prepare(`
+    const findDueJob = database.prepare(`
       SELECT job.*,alias.recipient_address,request.portal_id
       FROM nyc311_email_subscription_jobs job
       JOIN nyc311_email_aliases alias ON alias.id=job.alias_id
       JOIN live_portal_requests request USING(srnumber)
-      WHERE job.state IN ('pending','retry') AND job.next_attempt_at<=?
+      WHERE job.state=? AND job.next_attempt_at<=?
       ORDER BY ${orderSql} LIMIT 1
-    `).get(nowIso);
+    `);
+    // New enrollment is a separate indexed lookup, so retries cannot bury
+    // live arrivals and the database need not sort both queue states together.
+    const row = findDueJob.get('pending', nowIso)
+      || findDueJob.get('retry', nowIso);
     if (!row) {
       database.exec('COMMIT');
       return null;
@@ -344,15 +477,22 @@ function completeSubscription(database, job, now = new Date()) {
 }
 
 function retrySubscription(database, job, error, now = new Date()) {
-  const delayMinutes = Math.min(360, 2 ** Math.min(8, Number(job.attempts || 0)));
-  const next = new Date(now.getTime() + delayMinutes * 60_000).toISOString();
+  const retry = subscriptionRetryPolicy(job, error, now);
   database.prepare(`
     UPDATE nyc311_email_subscription_jobs
     SET state='retry',next_attempt_at=?,last_error=?,updated_at=? WHERE srnumber=?
-  `).run(next, String(error && error.message || error).slice(0, 1000), now.toISOString(), job.srnumber);
+  `).run(
+    retry.nextAttemptAt,
+    String(error && error.message || error).slice(0, 1000),
+    (now instanceof Date ? now : new Date(now)).toISOString(),
+    job.srnumber
+  );
+  return retry;
 }
 
 module.exports = {
+  PORTAL_SERVER_FAILURE_PATTERN,
+  SUBSCRIPTION_QUARANTINE_AFTER_ATTEMPTS,
   claimSubscription,
   completeSubscription,
   enqueueAllSubscriptions,
@@ -362,7 +502,9 @@ module.exports = {
   modalUrl,
   parseBidIds,
   precinctLabel,
+  quarantineLegacySubscriptionRetries,
   recoverStaleProcessingSubscriptions,
   retrySubscription,
+  subscriptionRetryPolicy,
   subscribeRequest
 };

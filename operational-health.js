@@ -67,13 +67,15 @@ function dueDescriptor(row, nowMs) {
     updated_at: updatedAt,
     updated_age_seconds: ageSeconds(updatedAt, nowMs),
     attempts: safeInteger(row.attempts),
-    has_error: Boolean(row.has_error)
+    has_error: Boolean(row.has_error),
+    quarantined: Boolean(row.quarantined)
   };
 }
 
 function queueStatus(descriptor, thresholds, {
   processingState = 'processing',
-  finalErrorState = 'error'
+  finalErrorState = 'error',
+  quarantinedState = null
 } = {}) {
   if (!descriptor) return { status: 'quiet', reason: 'queue_empty' };
   if (descriptor.state === finalErrorState) {
@@ -85,6 +87,11 @@ function queueStatus(descriptor, thresholds, {
       return { status: 'attention', reason: 'work_stalled' };
     }
     return { status: 'healthy', reason: 'work_in_progress' };
+  }
+  if (descriptor.state === quarantinedState
+      && descriptor.quarantined
+      && descriptor.due === 'scheduled') {
+    return { status: 'quiet', reason: 'portal_failure_quarantined' };
   }
   if (descriptor.due === 'unscheduled') {
     return { status: 'attention', reason: 'work_unscheduled' };
@@ -152,7 +159,14 @@ function readQueueState(database, {
 }) {
   const sql = `
     SELECT ${stateColumn} AS state,${dueColumn},updated_at,attempts,
-      CASE WHEN last_error IS NULL OR TRIM(last_error)='' THEN 0 ELSE 1 END AS has_error
+      CASE WHEN last_error IS NULL OR TRIM(last_error)='' THEN 0 ELSE 1 END AS has_error,
+      CASE WHEN ${stateColumn}='retry'
+             AND attempts>=8
+             AND (
+               last_error GLOB 'NYC311 subscription form returned HTTP 5[0-9][0-9]'
+               OR last_error GLOB 'NYC311 subscription submit returned HTTP 5[0-9][0-9]'
+             )
+           THEN 1 ELSE 0 END AS quarantined
     FROM ${table}
     WHERE ${stateColumn}=?
     ORDER BY ${dueColumn}
@@ -287,7 +301,9 @@ function subscriptionsComponent(database, nowMs, thresholds) {
       state,
       dueColumn: 'next_attempt_at'
     })
-  ), nowMs, thresholds);
+  ), nowMs, thresholds, {
+    quarantinedState: 'retry'
+  });
 }
 
 function closureVerificationComponent(database, nowMs, thresholds) {

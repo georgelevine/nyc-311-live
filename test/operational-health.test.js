@@ -255,6 +255,38 @@ test('surfaces failed and stalled queue lanes as attention without exposing erro
   assert.equal(serialized.includes('last_error'), false);
 });
 
+test('a future Portal 5xx quarantine is quiet but becomes active when due', () => {
+  const { database, databasePath } = createHealthDatabase();
+  seedFreshCollector(database);
+  database.prepare(`
+    INSERT INTO nyc311_email_subscription_jobs VALUES (?,?,?,?,?,?,?)
+  `).run(
+    '311-00000006',
+    'retry',
+    15,
+    '2026-07-31T12:00:00.000Z',
+    'NYC311 subscription submit returned HTTP 500',
+    '2026-07-29T12:00:00.000Z',
+    0
+  );
+  database.close();
+
+  const quarantined = loadOperationalHealth(databasePath, { now: NOW });
+  assert.equal(quarantined.components.subscriptions.status, 'quiet');
+  assert.equal(
+    quarantined.components.subscriptions.reason,
+    'portal_failure_quarantined'
+  );
+  assert.equal(quarantined.components.subscriptions.next.quarantined, true);
+  assert.equal(quarantined.components.subscriptions.next.attempts, 15);
+
+  const due = loadOperationalHealth(databasePath, {
+    now: new Date('2026-07-31T12:20:00.000Z')
+  });
+  assert.equal(due.components.subscriptions.status, 'attention');
+  assert.equal(due.components.subscriptions.reason, 'work_stalled');
+});
+
 test('reports a missing database with the same stable component contract', () => {
   const databasePath = path.join(
     os.tmpdir(),

@@ -228,6 +228,7 @@
   const MAP_REFRESH_MS = 5 * 60_000;
   const MAP_REQUEST_TIMEOUT_MS = 15_000;
   const MAP_RETRY_MS = 3_000;
+  const MAP_PAGE_YIELD_MS = 100;
   const DASHBOARD_REQUEST_TIMEOUT_MS = 8_000;
   const EMAIL_UPDATES_REFRESH_MS = 15_000;
   const EMAIL_METRICS_REFRESH_MS = 60_000;
@@ -341,6 +342,17 @@
     if (mapRetryTimer === null) return;
     window.clearTimeout(mapRetryTimer);
     mapRetryTimer = null;
+  }
+
+  function invalidateMapLoad(message = 'Map selection changed · loading when visible…') {
+    if (mapAbortController) mapAbortController.abort();
+    mapAbortController = null;
+    clearMapRetry();
+    mapRequestSequence += 1;
+    mapRefreshInFlight = false;
+    lastMapRefreshStartedAt = 0;
+    mapArchiveLoaded = false;
+    setMapLoadState('loading', message);
   }
 
   function scheduleMapRetry() {
@@ -1772,7 +1784,13 @@
     const changed = !recordsMatch(nextRecords, records);
     records = nextRecords;
     feedByNumber = nextByNumber;
-    const { changed: mapChanged } = mergeMapRecords(records);
+    // Once a complete map snapshot is established, the much smaller live feed
+    // may add brand-new arrivals between five-minute map refreshes. Never do
+    // this while a map snapshot is loading: feed rows are not map pages and
+    // must not make an incomplete/reset scope look complete.
+    const { changed: mapChanged } = mapArchiveLoaded && !mapRefreshInFlight
+      ? mergeMapRecords(records)
+      : { changed: false };
     if (!changed && !mapChanged) {
       updateFeedCoverage();
       renderFeedPagination();
@@ -2153,6 +2171,7 @@
   }
 
   function resetMapDataset() {
+    invalidateMapLoad();
     mapByNumber = new Map();
     mapRecords = [];
     mapStats = {
@@ -2161,7 +2180,6 @@
       unmapped_total: 0,
       totals_available: false
     };
-    mapArchiveLoaded = false;
     renderMap();
     updateMapCountText();
   }
@@ -3232,16 +3250,9 @@
   }
 
   async function refreshMap(dashboardStats, force = false) {
+    if (force) invalidateMapLoad('Loading map records…');
     if (!mapHasLayout()) return;
     const now = Date.now();
-    if (force) {
-      if (mapAbortController) mapAbortController.abort();
-      clearMapRetry();
-      mapRequestSequence += 1;
-      mapRefreshInFlight = false;
-      lastMapRefreshStartedAt = 0;
-      mapArchiveLoaded = false;
-    }
     if (mapRefreshInFlight || now - lastMapRefreshStartedAt < MAP_REFRESH_MS) return;
     mapRefreshInFlight = true;
     lastMapRefreshStartedAt = now;
@@ -3277,17 +3288,12 @@
           window.clearTimeout(timeout);
         }
         if (sequence !== mapRequestSequence) return;
+        if (pagesLoaded === 0) mapArchiveLoaded = false;
         updateMapRecords(payload, dashboardStats, { replace: pagesLoaded === 0 });
         recordsLoadedForRequest += Array.isArray(payload && payload.records)
           ? payload.records.length
           : 0;
         pagesLoaded += 1;
-        // Let the first, deliberately small page paint before fetching the
-        // remainder of a large archive.
-        if (pagesLoaded === 1) {
-          await new Promise(resolve => window.requestAnimationFrame(resolve));
-          if (sequence !== mapRequestSequence) return;
-        }
 
         const page = payload && payload.page;
         const nextSuffix = Number(page && page.next_before_suffix);
@@ -3306,9 +3312,14 @@
             'loading',
             `Loading ${mapScopeLabel().toLowerCase()}… ${recordsLoadedForRequest.toLocaleString()} pins`
           );
+          // Give rendering and the collector a small, predictable gap between
+          // archive pages without materially slowing recent-date map loads.
+          await new Promise(resolve => window.setTimeout(resolve, MAP_PAGE_YIELD_MS));
+          if (sequence !== mapRequestSequence) return;
         }
       }
       if (hasMore) throw new Error('Map service returned too many pages');
+      if (sequence !== mapRequestSequence) return;
       mapArchiveLoaded = true;
       clearMapRetry();
       renderMap();

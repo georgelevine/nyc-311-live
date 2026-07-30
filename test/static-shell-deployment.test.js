@@ -127,6 +127,20 @@ test('nightly backup priority and SQLite batching apply inside the container', (
     backup,
     /- --page-rate\s+- \$\{SQLITE_BACKUP_PAGE_RATE:-64\}/
   );
+  assert.match(
+    backup,
+    /blkio_config:\s+device_read_bps:\s+- path: \/dev\/nvme0n1p1\s+rate: 5mb\s+device_write_bps:\s+- path: \/dev\/nvme0n1p1\s+rate: 5mb/
+  );
+  const nonBackupServices = [
+    compose.slice(compose.indexOf('  collector:'), compose.indexOf('  web:')),
+    compose.slice(compose.indexOf('  web:'), compose.indexOf('  inbound-email:')),
+    compose.slice(compose.indexOf('  inbound-email:'), compose.indexOf('  backup:')),
+    compose.slice(compose.indexOf('  verify:'), compose.indexOf('  proxy:')),
+    compose.slice(compose.indexOf('  proxy:'))
+  ];
+  for (const service of nonBackupServices) {
+    assert.doesNotMatch(service, /blkio_config:/);
+  }
   assert.match(backupService, /Nice=19/);
   assert.match(backupService, /IOSchedulingClass=idle/);
 });

@@ -37,6 +37,7 @@ const {
   enqueueBidSubscriptions,
   enqueuePrecinctSubscriptions,
   parseBidIds,
+  quarantineLegacySubscriptionRetries,
   retrySubscription,
   subscribeRequest
 } = require('./nyc311-portal-subscriptions');
@@ -481,6 +482,22 @@ function startEmailSubscriptions() {
       && !EMAIL_SUBSCRIBE_PRECINCTS.length
       && !EMAIL_SUBSCRIBE_ALL_NEW)
       || emailSubscriptionPromise) return;
+  try {
+    const legacy = quarantineLegacySubscriptionRetries(db);
+    if (legacy.quarantined) {
+      console.log(JSON.stringify({
+        email_subscription_quarantine: 'rescheduled',
+        jobs: legacy.quarantined,
+        earliest_retry_at: legacy.earliestNextAttemptAt,
+        latest_retry_at: legacy.latestNextAttemptAt
+      }));
+    }
+  } catch (error) {
+    console.error(JSON.stringify({
+      email_subscription_quarantine: 'failed',
+      error: error.message
+    }));
+  }
   const enqueueAndSendInitialAlerts = async () => {
     while (!detailHydrationStopping) {
       try {
@@ -579,12 +596,14 @@ function startEmailSubscriptions() {
             queue_order: order
           }));
         } catch (error) {
-          retrySubscription(db, job, error);
+          const retry = retrySubscription(db, job, error);
           console.error(JSON.stringify({
-            email_subscription: 'retry',
+            email_subscription: retry.quarantined ? 'quarantined' : 'retry',
             srnumber: job.srnumber,
             worker: workerIndex + 1,
             queue_order: order,
+            retry_policy: retry.policy,
+            next_attempt_at: retry.nextAttemptAt,
             error: error.message
           }));
         }

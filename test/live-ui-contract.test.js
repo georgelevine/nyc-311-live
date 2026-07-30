@@ -254,6 +254,7 @@ test('map startup is self-hosted, bounded, and automatically recoverable', () =>
   assert.match(dashboard, /const MAP_REFRESH_MS = 5 \* 60_000/);
   assert.match(dashboard, /const MAP_REQUEST_TIMEOUT_MS = 15_000/);
   assert.match(dashboard, /const MAP_RETRY_MS = 3_000/);
+  assert.match(dashboard, /const MAP_PAGE_YIELD_MS = 100/);
   assert.match(dashboard, /const FEED_PAGE_SIZE = 300/);
   assert.match(dashboard, /const INITIAL_FEED_PAGE_SIZE = 100/);
   assert.match(
@@ -267,16 +268,68 @@ test('map startup is self-hosted, bounded, and automatically recoverable', () =>
   assert.match(dashboard, /include_totals: pagesLoaded === 0 \? 1 : 0/);
   assert.match(dashboard, /paginate:\s*1/);
   assert.match(dashboard, /while \(hasMore && pagesLoaded < 500\)/);
-  assert.match(dashboard, /await new Promise\(resolve => window\.requestAnimationFrame\(resolve\)\)/);
+  assert.match(
+    dashboard,
+    /await new Promise\(resolve => window\.setTimeout\(resolve, MAP_PAGE_YIELD_MS\)\)/
+  );
   assert.match(dashboard, /before_suffix:\s*beforeSuffix/);
   assert.match(dashboard, /submitted_since:\s*submittedSince/);
-  assert.match(dashboard, /mergeMapRecords\(records\)/);
+  assert.match(
+    dashboard,
+    /mapArchiveLoaded && !mapRefreshInFlight\s*\?\s*mergeMapRecords\(records\)/
+  );
   assert.match(
     dashboard,
     /if \(!mapArchiveLoaded && !mapRefreshInFlight\) refreshMap\(mapStats\)/
   );
   assert.match(dashboard, /Map data took too long\. Retrying/);
   assert.match(dashboard, /tile\.openstreetmap\.org/);
+});
+
+test('a hidden mobile filter change cannot let an old map request complete the new scope', () => {
+  const refreshStart = dashboard.indexOf('async function refreshMap(');
+  const refreshEnd = dashboard.indexOf('\n  async function refresh(', refreshStart);
+  const refreshSource = dashboard.slice(refreshStart, refreshEnd);
+  const forceIndex = refreshSource.indexOf("if (force) invalidateMapLoad('Loading map records…')");
+  const layoutIndex = refreshSource.indexOf('if (!mapHasLayout()) return');
+  assert.ok(forceIndex >= 0 && forceIndex < layoutIndex);
+  assert.match(
+    refreshSource,
+    /if \(sequence !== mapRequestSequence\) return;\s*mapArchiveLoaded = true/
+  );
+
+  const invalidationStart = dashboard.indexOf('function invalidateMapLoad(');
+  const invalidationEnd = dashboard.indexOf('\n  function scheduleMapRetry(', invalidationStart);
+  const invalidationSource = dashboard.slice(invalidationStart, invalidationEnd);
+  assert.match(invalidationSource, /mapAbortController\.abort\(\)/);
+  assert.match(invalidationSource, /mapRequestSequence \+= 1/);
+  assert.match(invalidationSource, /mapRefreshInFlight = false/);
+  assert.match(invalidationSource, /mapArchiveLoaded = false/);
+
+  const resetStart = dashboard.indexOf('function resetMapDataset(');
+  const resetEnd = dashboard.indexOf('\n  function updateMapRecords(', resetStart);
+  assert.match(dashboard.slice(resetStart, resetEnd), /invalidateMapLoad\(\)/);
+
+  const feedStart = dashboard.indexOf('function updateFeedRecords(');
+  const feedEnd = dashboard.indexOf('\n  function finiteStat(', feedStart);
+  assert.match(
+    dashboard.slice(feedStart, feedEnd),
+    /mapArchiveLoaded && !mapRefreshInFlight\s*\?\s*mergeMapRecords\(records\)/,
+    'only an idle, completed map snapshot may accept newer live-feed pins'
+  );
+  assert.match(
+    refreshSource,
+    /if \(pagesLoaded === 0\) mapArchiveLoaded = false;\s*updateMapRecords\(payload/
+  );
+
+  const layoutStart = dashboard.indexOf('function scheduleMapLayout(');
+  const layoutEnd = dashboard.indexOf('\n  function scheduleSelectedBoundaryFit(', layoutStart);
+  const layoutSource = dashboard.slice(layoutStart, layoutEnd);
+  assert.equal((layoutSource.match(/refreshMap\(mapStats\)/g) || []).length, 1);
+  assert.match(
+    layoutSource,
+    /if \(!mapArchiveLoaded && !mapRefreshInFlight\) refreshMap\(mapStats\)/
+  );
 });
 
 test('map starts recent, keeps the chosen date scope during filters, and discloses the range', () => {
