@@ -47,6 +47,8 @@ npm run desktop:package
 - `npm run db:verify` — verify the SQLite archive without changing it
 - `npm run db:finalize` — create a verified migration-ready SQLite backup
 - `npm run db:backup` — create a non-mutating verified routine SQLite backup
+  with one copy, one integrity pass, one hash pass, and manifest-only nightly
+  retention checks for unchanged older backups
 - `npm run db:verify-snapshot` — verify a transferred snapshot and its manifest
 - `npm run cloud:migrate` — apply the PostgreSQL/PostGIS cloud schema
 - `npm run cloud:import` — import the finalized SQLite archive

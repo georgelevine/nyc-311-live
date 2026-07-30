@@ -5,14 +5,18 @@ const fs = require('fs');
 const path = require('path');
 const {
   APPLICATION_ID,
+  MIGRATIONS,
   createBackup,
-  healthCheck,
   inspectMigrationState,
   openDatabase,
   resolveDatabasePath,
   timestampedBackupPath
 } = require('./sqlite-finalization');
-const { verifySnapshot } = require('./sqlite-snapshot');
+const {
+  REQUIRED_ARCHIVE_TABLES,
+  verifySnapshot,
+  verifySnapshotDatabase
+} = require('./sqlite-snapshot');
 
 const STALE_PARTIAL_AGE_MS = 24 * 60 * 60 * 1000;
 // 64 ordinary 4 KiB pages is a roughly 256 KiB backup step. This keeps each
@@ -174,11 +178,128 @@ async function verifiedManagedBackups(directory, databasePath) {
   return { verified, invalid };
 }
 
+function inspectTrustedManagedBackup(item, sourceDatabasePath) {
+  let manifest;
+  try {
+    const databaseStat = fs.lstatSync(item.databasePath);
+    const manifestStat = fs.lstatSync(item.manifestPath);
+    if (!databaseStat.isFile()) throw new Error('backup database is not a regular file');
+    if (!manifestStat.isFile()) throw new Error('backup manifest is not a regular file');
+    manifest = JSON.parse(fs.readFileSync(item.manifestPath, 'utf8'));
+    if (manifest.format !== 'nyc-311-sqlite-backup-manifest-v1') {
+      throw new Error(`unsupported manifest format ${manifest.format || 'missing'}`);
+    }
+    if (path.resolve(manifest.source_database || '') !== path.resolve(sourceDatabasePath)) {
+      throw new Error('manifest source database does not match this backup set');
+    }
+    if (path.resolve(manifest.backup_database || '') !== path.resolve(item.databasePath)) {
+      throw new Error('manifest backup path does not match its database');
+    }
+    if (!Number.isFinite(Date.parse(manifest.created_at))) {
+      throw new Error('manifest creation timestamp is invalid');
+    }
+    if (Number(manifest.bytes) !== databaseStat.size) {
+      throw new Error('backup byte count no longer matches its manifest');
+    }
+    if (databaseStat.mtimeMs > manifestStat.mtimeMs + 1) {
+      throw new Error('backup database changed after its manifest was written');
+    }
+    if (!/^[a-f0-9]{64}$/.test(String(manifest.sha256 || ''))) {
+      throw new Error('manifest does not contain a valid SHA-256 digest');
+    }
+    const latestVersion = MIGRATIONS[MIGRATIONS.length - 1].version;
+    if (Number(manifest.application_id) !== APPLICATION_ID
+        || Number(manifest.user_version) !== latestVersion) {
+      throw new Error('manifest does not describe the current NYC 311 archive schema');
+    }
+    if (String(manifest.journal_mode || '').toLowerCase() !== 'delete') {
+      throw new Error('manifest is not for a self-contained DELETE-journal backup');
+    }
+    const health = manifest.health;
+    if (!health || health.ok !== true
+        || !Array.isArray(health.integrity_check)
+        || health.integrity_check.length !== 1
+        || health.integrity_check[0] !== 'ok'
+        || !Array.isArray(health.foreign_key_violations)
+        || health.foreign_key_violations.length !== 0) {
+      throw new Error('manifest does not record successful integrity and foreign-key checks');
+    }
+    if (health.quick_check !== null
+        && (!Array.isArray(health.quick_check)
+          || health.quick_check.length !== 1
+          || health.quick_check[0] !== 'ok')) {
+      throw new Error('manifest quick-check result is invalid');
+    }
+    if (!manifest.tables || typeof manifest.tables !== 'object') {
+      throw new Error('manifest table catalog is missing');
+    }
+    const missingTables = REQUIRED_ARCHIVE_TABLES
+      .filter(name => !Object.hasOwn(manifest.tables, name));
+    if (missingTables.length) {
+      throw new Error(`manifest is missing archive table(s): ${missingTables.join(', ')}`);
+    }
+    const manifestMode = manifest.table_manifest_mode || 'row_counts';
+    if (!['schema', 'row_counts'].includes(manifestMode)) {
+      throw new Error(`manifest table catalog mode is unsupported: ${manifestMode}`);
+    }
+    if (manifestMode === 'schema') {
+      const invalidSchemaTables = REQUIRED_ARCHIVE_TABLES.filter(name => {
+        const entry = manifest.tables[name];
+        return !entry || !Array.isArray(entry.columns) || entry.columns.length === 0;
+      });
+      if (invalidSchemaTables.length) {
+        throw new Error(`manifest schema catalog is incomplete: ${invalidSchemaTables.join(', ')}`);
+      }
+      if (!manifest.verification) {
+        throw new Error('schema-only manifest is missing its archive verification receipt');
+      }
+    } else {
+      const invalidCountTables = REQUIRED_ARCHIVE_TABLES.filter(name => {
+        const count = manifest.tables[name] && manifest.tables[name].count;
+        return !Number.isInteger(Number(count)) || Number(count) < 0;
+      });
+      if (invalidCountTables.length) {
+        throw new Error(`legacy table-count catalog is incomplete: ${invalidCountTables.join(', ')}`);
+      }
+    }
+    if (manifest.verification != null) {
+      const verification = manifest.verification;
+      const valid = verification.status === 'verified'
+        && Number.isFinite(Date.parse(verification.verified_at))
+        && verification.integrity_check === 'ok'
+        && verification.foreign_key_check === 'ok'
+        && verification.migration_catalog === 'ok'
+        && verification.archive_contract === 'ok'
+        && verification.sha256 === 'recorded';
+      if (!valid) throw new Error('manifest verification receipt is incomplete');
+    }
+    return {
+      ...item,
+      trust_basis: manifest.verification
+        ? 'atomic_verified_manifest'
+        : 'legacy_atomic_verified_manifest'
+    };
+  } catch (error) {
+    return { ...item, error: error.message };
+  }
+}
+
+async function trustedManagedBackups(directory, databasePath) {
+  const trusted = [];
+  const invalid = [];
+  for (const item of managedBackupManifests(directory, databasePath)) {
+    const inspected = inspectTrustedManagedBackup(item, databasePath);
+    if (inspected.error) invalid.push(inspected);
+    else trusted.push(inspected);
+  }
+  return { trusted, invalid };
+}
+
 async function pruneBackups(directory, databasePath, retain) {
   const removed = [];
-  const inspected = await verifiedManagedBackups(directory, databasePath);
-  const retained = inspected.verified.slice(0, retain);
-  for (const item of inspected.verified.slice(retain)) {
+  const inspected = await trustedManagedBackups(directory, databasePath);
+  const retained = inspected.trusted.slice(0, retain);
+  for (const item of inspected.trusted.slice(retain)) {
     if (fs.existsSync(item.databasePath)) fs.unlinkSync(item.databasePath);
     if (fs.existsSync(item.manifestPath)) fs.unlinkSync(item.manifestPath);
     removed.push(item.databasePath);
@@ -192,11 +313,20 @@ async function createRoutineBackup({
   retain = 3,
   pageRate = DEFAULT_BACKUP_PAGE_RATE,
   now = new Date(),
-  stalePartialAgeMs = STALE_PARTIAL_AGE_MS
+  stalePartialAgeMs = STALE_PARTIAL_AGE_MS,
+  onIoPass = null
 }) {
   if (!Number.isInteger(pageRate) || pageRate < 1 || pageRate > 10000) {
     throw new TypeError('Backup page rate must be an integer from 1 through 10000');
   }
+  if (onIoPass != null && typeof onIoPass !== 'function') {
+    throw new TypeError('onIoPass must be a function');
+  }
+  const ioOperations = [];
+  const observeIo = operation => {
+    ioOperations.push(operation);
+    if (onIoPass) onIoPass(operation);
+  };
   const resolvedDatabase = path.resolve(databasePath);
   if (!fs.existsSync(resolvedDatabase)) throw new Error(`SQLite database does not exist: ${resolvedDatabase}`);
   const resolvedDirectory = path.resolve(directory || path.join(path.dirname(resolvedDatabase), 'backups'));
@@ -224,8 +354,6 @@ async function createRoutineBackup({
   const database = openDatabase(resolvedDatabase, { readOnly: true });
   let created;
   try {
-    const health = healthCheck(database);
-    if (!health.ok) throw new Error('Source database failed health checks; backup was not created');
     const migrations = inspectMigrationState(database);
     if (migrations.application_id !== APPLICATION_ID || migrations.pending.length) {
       throw new Error('Source database must be finalized before routine cloud backups begin');
@@ -235,17 +363,36 @@ async function createRoutineBackup({
       resolvedDatabase,
       destination,
       now.toISOString(),
-      { rate: pageRate }
+      {
+        rate: pageRate,
+        healthCheckOptions: { runQuickCheck: false },
+        tableManifestOptions: { includeRowCounts: false },
+        onIoPass: observeIo,
+        validateDatabase({
+          database: backup,
+          health,
+          tables,
+          applicationId,
+          userVersion,
+          journalMode
+        }) {
+          observeIo('backup_archive_contract');
+          return verifySnapshotDatabase({
+            database: backup,
+            health,
+            tables,
+            manifest: {
+              application_id: applicationId,
+              user_version: userVersion,
+              journal_mode: journalMode,
+              tables
+            }
+          });
+        }
+      }
     );
   } finally {
     database.close();
-  }
-  try {
-    await verifySnapshot({ databasePath: created.path, manifestPath: created.manifest_path });
-  } catch (error) {
-    if (fs.existsSync(created.manifest_path)) fs.unlinkSync(created.manifest_path);
-    if (fs.existsSync(created.path)) fs.unlinkSync(created.path);
-    throw new Error(`New backup failed archive verification: ${error.message}`);
   }
   const pruned = await pruneBackups(resolvedDirectory, resolvedDatabase, retain);
   const remainingArtifacts = inspectManagedArtifacts(resolvedDirectory, resolvedDatabase, {
@@ -255,6 +402,18 @@ async function createRoutineBackup({
   return {
     ...created,
     backup_page_rate: pageRate,
+    io_operations: ioOperations,
+    io_operation_counts: Object.fromEntries(
+      [...new Set(ioOperations)].map(operation => [
+        operation,
+        ioOperations.filter(item => item === operation).length
+      ])
+    ),
+    full_file_passes: [
+      'source_online_copy',
+      'backup_integrity_check',
+      'backup_sha256'
+    ],
     retained: pruned.retained.length,
     removed: pruned.removed,
     invalid_backups: pruned.invalid,
@@ -300,6 +459,7 @@ module.exports = {
   parseArguments,
   pruneBackups,
   removeStaleManagedPartials,
+  trustedManagedBackups,
   verifiedManagedBackups,
   usage
 };

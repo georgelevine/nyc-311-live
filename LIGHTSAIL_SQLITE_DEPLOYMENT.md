@@ -364,10 +364,34 @@ Do not reopen the Mac collector. Preserve its original database unchanged.
 
 ## Backups, restore, and rollback
 
-The timer runs nightly and keeps three verified local backups. Invalid or tampered
-backup pairs never consume retention slots, and the job refuses to start without
-safe free space. On the small instance, the backup process runs at idle disk
-priority and the lowest CPU priority inside its container. Because the verified
+The timer runs nightly and keeps three verified local backups. Each run uses
+SQLite's online backup API, then verifies the new copy with one full
+`integrity_check`, a foreign-key check, the migration and archive contracts, and
+one SHA-256 pass. `quick_check` is deliberately omitted because
+`integrity_check` is the stronger superset. The command's JSON result lists
+`io_operations`, `io_operation_counts`, and the three whole-file operations in
+`full_file_passes`; every listed new-backup operation should have a count of one.
+
+Retention does not re-hash or reopen unchanged older databases every night.
+Instead, it trusts their atomically published verification manifests, exact
+paths and sizes, schema identity, health receipts, and the requirement that the
+database file has not changed since its manifest was written. Existing legacy
+manifests created by the prior atomic routine remain eligible because that
+routine verified them before returning. A changed, malformed, unpaired, or
+untrusted artifact is preserved for investigation and never consumes a
+retention slot. Stale managed `.partial` files are still removed after 24 hours,
+and the job refuses to start without safe free space.
+
+Use the explicit snapshot verifier when you want to re-read and deeply scrub a
+retained backup (for example, during a restore rehearsal or periodic audit):
+
+```bash
+node verify-sqlite-snapshot.js \
+  /var/backups/nyc-311-live/portal-archive-YYYYMMDDTHHMMSSZ.sqlite
+```
+
+On the small instance, the backup process runs at idle disk priority and the
+lowest CPU priority inside its container. Because the verified
 Lightsail root partition `/dev/nvme0n1p1` uses the `none` scheduler and therefore
 does not honor `ionice`, Compose also applies cgroup-v2 ceilings of 1 MB/s for
 both reads and writes to its parent block device, `/dev/nvme0n1`, on the backup

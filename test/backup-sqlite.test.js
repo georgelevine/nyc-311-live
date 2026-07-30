@@ -9,9 +9,10 @@ const {
   DEFAULT_BACKUP_PAGE_RATE,
   createRoutineBackup,
   parseArguments,
+  trustedManagedBackups,
   verifiedManagedBackups
 } = require('../backup-sqlite');
-const { finalizeDatabase } = require('../sqlite-finalization');
+const { createBackup, finalizeDatabase, openDatabase } = require('../sqlite-finalization');
 const { verifySnapshot } = require('../sqlite-snapshot');
 const { createArchiveFixture } = require('../test-support/archive-fixture');
 
@@ -89,6 +90,188 @@ test('routine backups use a small configurable SQLite page batch', async t => {
     manifestPath: result.manifest_path
   })).ok, true);
   assert.equal(DEFAULT_BACKUP_PAGE_RATE, 64);
+});
+
+test('routine backup performs each expensive new-backup operation once', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-routine-io-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const unfinalizedSource = createArchiveFixture(directory, 'source.sqlite');
+  const finalized = await finalizeDatabase({
+    databasePath: unfinalizedSource,
+    backupPath: path.join(directory, 'portal-archive.sqlite')
+  });
+  const observed = [];
+  const result = await createRoutineBackup({
+    databasePath: finalized.backup.path,
+    directory: path.join(directory, 'backups'),
+    now: new Date('2026-07-24T05:15:00.000Z'),
+    onIoPass: operation => observed.push(operation)
+  });
+
+  assert.deepEqual(observed, [
+    'source_online_copy',
+    'backup_integrity_check',
+    'backup_foreign_key_check',
+    'backup_table_manifest',
+    'backup_archive_contract',
+    'backup_sha256'
+  ]);
+  assert.deepEqual(result.io_operations, observed);
+  assert.deepEqual(result.full_file_passes, [
+    'source_online_copy',
+    'backup_integrity_check',
+    'backup_sha256'
+  ]);
+  assert.deepEqual(result.io_operation_counts, {
+    source_online_copy: 1,
+    backup_integrity_check: 1,
+    backup_foreign_key_check: 1,
+    backup_table_manifest: 1,
+    backup_archive_contract: 1,
+    backup_sha256: 1
+  });
+  assert.equal(result.io_operations.includes('backup_quick_check'), false);
+  assert.equal(result.manifest.health.quick_check, null);
+  assert.equal(result.manifest.table_manifest_mode, 'schema');
+  assert.equal(result.manifest.verification.status, 'verified');
+});
+
+test('nightly retention does not reread an unchanged retained database', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-routine-trust-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const unfinalizedSource = createArchiveFixture(directory, 'source.sqlite');
+  const finalized = await finalizeDatabase({
+    databasePath: unfinalizedSource,
+    backupPath: path.join(directory, 'portal-archive.sqlite')
+  });
+  const backups = path.join(directory, 'backups');
+  const first = await createRoutineBackup({
+    databasePath: finalized.backup.path,
+    directory: backups,
+    retain: 3,
+    now: new Date('2026-07-24T06:15:00.000Z')
+  });
+  fs.chmodSync(first.path, 0o000);
+  t.after(() => {
+    if (fs.existsSync(first.path)) fs.chmodSync(first.path, 0o600);
+  });
+
+  const second = await createRoutineBackup({
+    databasePath: finalized.backup.path,
+    directory: backups,
+    retain: 3,
+    now: new Date('2026-07-25T06:15:00.000Z')
+  });
+  const inspected = await trustedManagedBackups(backups, finalized.backup.path);
+
+  assert.equal(second.retained, 2);
+  assert.equal(inspected.trusted.length, 2);
+  assert.equal(inspected.invalid.length, 0);
+  assert.equal(
+    inspected.trusted.find(item => item.databasePath === first.path).trust_basis,
+    'atomic_verified_manifest'
+  );
+});
+
+test('manifest retention quarantines a backup changed after verification', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-routine-changed-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const unfinalizedSource = createArchiveFixture(directory, 'source.sqlite');
+  const finalized = await finalizeDatabase({
+    databasePath: unfinalizedSource,
+    backupPath: path.join(directory, 'portal-archive.sqlite')
+  });
+  const backups = path.join(directory, 'backups');
+  const created = await createRoutineBackup({
+    databasePath: finalized.backup.path,
+    directory: backups,
+    now: new Date('2026-07-24T07:15:00.000Z')
+  });
+
+  const descriptor = fs.openSync(created.path, 'r+');
+  try {
+    fs.writeSync(descriptor, Buffer.from([0]), 0, 1, 0);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  const manifestTime = fs.statSync(created.manifest_path).mtimeMs;
+  const changedTime = new Date(manifestTime + 1_000);
+  fs.utimesSync(created.path, changedTime, changedTime);
+
+  const inspected = await trustedManagedBackups(backups, finalized.backup.path);
+  assert.equal(inspected.trusted.length, 0);
+  assert.equal(inspected.invalid.length, 1);
+  assert.match(inspected.invalid[0].error, /changed after its manifest/);
+  assert.equal(fs.existsSync(created.path), true);
+  assert.equal(fs.existsSync(created.manifest_path), true);
+});
+
+test('retention accepts a legacy backup that the prior routine fully verified', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-routine-legacy-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const unfinalizedSource = createArchiveFixture(directory, 'source.sqlite');
+  const finalized = await finalizeDatabase({
+    databasePath: unfinalizedSource,
+    backupPath: path.join(directory, 'portal-archive.sqlite')
+  });
+  const source = finalized.backup.path;
+  const backups = path.join(directory, 'backups');
+  const destination = path.join(backups, 'portal-archive-20260723T061500Z.sqlite');
+  const database = openDatabase(source, { readOnly: true });
+  let legacy;
+  try {
+    legacy = await createBackup(
+      database,
+      source,
+      destination,
+      '2026-07-23T06:15:00.000Z'
+    );
+  } finally {
+    database.close();
+  }
+  assert.equal((await verifySnapshot({
+    databasePath: legacy.path,
+    manifestPath: legacy.manifest_path
+  })).ok, true);
+  const oldManifest = JSON.parse(fs.readFileSync(legacy.manifest_path, 'utf8'));
+  delete oldManifest.table_manifest_mode;
+  fs.writeFileSync(legacy.manifest_path, `${JSON.stringify(oldManifest, null, 2)}\n`);
+
+  const inspected = await trustedManagedBackups(backups, source);
+  assert.equal(inspected.trusted.length, 1);
+  assert.equal(inspected.invalid.length, 0);
+  assert.equal(inspected.trusted[0].trust_basis, 'legacy_atomic_verified_manifest');
+});
+
+test('archive-contract failure removes the new partial backup safely', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-routine-contract-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const unfinalizedSource = createArchiveFixture(directory, 'source.sqlite');
+  const finalized = await finalizeDatabase({
+    databasePath: unfinalizedSource,
+    backupPath: path.join(directory, 'portal-archive.sqlite')
+  });
+  const source = finalized.backup.path;
+  const database = openDatabase(source);
+  try {
+    database.prepare(`
+      DELETE FROM request_followup_queue
+      WHERE srnumber = (SELECT srnumber FROM request_followup_queue LIMIT 1)
+    `).run();
+  } finally {
+    database.close();
+  }
+  const backups = path.join(directory, 'backups');
+
+  await assert.rejects(
+    createRoutineBackup({
+      databasePath: source,
+      directory: backups,
+      now: new Date('2026-07-26T06:15:00.000Z')
+    }),
+    /Snapshot archive parity failed: missing_followup_queue=1/
+  );
+  assert.deepEqual(fs.readdirSync(backups), []);
 });
 
 test('backup CLI validates its page batch size', () => {

@@ -558,6 +558,57 @@ function validateArchiveContract(database, tables) {
   };
 }
 
+function verifySnapshotDatabase({
+  database,
+  manifest,
+  health,
+  tables
+}) {
+  if (!database || typeof database.prepare !== 'function') {
+    throw new TypeError('database must be an open SQLite database');
+  }
+  if (!manifest || typeof manifest !== 'object') {
+    throw new TypeError('manifest metadata is required');
+  }
+  if (!health || typeof health !== 'object') {
+    throw new TypeError('health results are required');
+  }
+  if (!tables || typeof tables !== 'object') {
+    throw new TypeError('table manifest is required');
+  }
+
+  const migrations = inspectMigrationState(database);
+  if (!health.ok) throw new Error('Snapshot failed SQLite integrity verification');
+  if (migrations.application_id !== APPLICATION_ID) {
+    throw new Error(`Snapshot application_id ${migrations.application_id} is not NYC 311 Live`);
+  }
+  if (migrations.pending.length) {
+    throw new Error(`Snapshot still has ${migrations.pending.length} pending migration(s)`);
+  }
+  const journalRow = database.prepare('PRAGMA journal_mode').get();
+  const journalMode = String(journalRow && Object.values(journalRow)[0] || '').toLowerCase();
+  if (journalMode !== 'delete' || manifest.journal_mode !== 'delete') {
+    throw new Error(`Snapshot is not a self-contained DELETE-journal transport (found ${journalMode || 'unknown'})`);
+  }
+  const missingTables = REQUIRED_ARCHIVE_TABLES.filter(name => !Object.hasOwn(tables, name));
+  if (missingTables.length) {
+    throw new Error(`Snapshot is missing required archive table(s): ${missingTables.join(', ')}`);
+  }
+  const archive = validateArchiveContract(database, tables);
+  if (Number(manifest.application_id) !== migrations.application_id
+      || Number(manifest.user_version) !== migrations.user_version) {
+    throw new Error('Snapshot schema metadata does not match its manifest');
+  }
+  if (!isDeepStrictEqual(manifest.tables, tables)) {
+    throw new Error('Snapshot table manifest does not match the transferred database');
+  }
+  return {
+    migrations,
+    archive,
+    journal_mode: journalMode
+  };
+}
+
 async function verifySnapshot({ databasePath, manifestPath }) {
   const resolvedDatabase = path.resolve(databasePath);
   const resolvedManifest = path.resolve(manifestPath || `${resolvedDatabase}.manifest.json`);
@@ -584,37 +635,14 @@ async function verifySnapshot({ databasePath, manifestPath }) {
 
   const database = openDatabase(resolvedDatabase, { readOnly: true });
   let health;
-  let migrations;
   let tables;
-  let archive;
+  let verified;
   try {
     health = healthCheck(database);
-    migrations = inspectMigrationState(database);
-    tables = tableManifest(database);
-    if (!health.ok) throw new Error('Snapshot failed SQLite integrity verification');
-    if (migrations.application_id !== APPLICATION_ID) {
-      throw new Error(`Snapshot application_id ${migrations.application_id} is not NYC 311 Live`);
-    }
-    if (migrations.pending.length) {
-      throw new Error(`Snapshot still has ${migrations.pending.length} pending migration(s)`);
-    }
-    const journalRow = database.prepare('PRAGMA journal_mode').get();
-    const journalMode = String(journalRow && Object.values(journalRow)[0] || '').toLowerCase();
-    if (journalMode !== 'delete' || manifest.journal_mode !== 'delete') {
-      throw new Error(`Snapshot is not a self-contained DELETE-journal transport (found ${journalMode || 'unknown'})`);
-    }
-    const missingTables = REQUIRED_ARCHIVE_TABLES.filter(name => !Object.hasOwn(tables, name));
-    if (missingTables.length) {
-      throw new Error(`Snapshot is missing required archive table(s): ${missingTables.join(', ')}`);
-    }
-    archive = validateArchiveContract(database, tables);
-    if (Number(manifest.application_id) !== migrations.application_id
-        || Number(manifest.user_version) !== migrations.user_version) {
-      throw new Error('Snapshot schema metadata does not match its manifest');
-    }
-    if (!isDeepStrictEqual(manifest.tables, tables)) {
-      throw new Error('Snapshot table manifest does not match the transferred database');
-    }
+    tables = tableManifest(database, {
+      includeRowCounts: manifest.table_manifest_mode !== 'schema'
+    });
+    verified = verifySnapshotDatabase({ database, manifest, health, tables });
   } finally {
     database.close();
   }
@@ -625,9 +653,9 @@ async function verifySnapshot({ databasePath, manifestPath }) {
     manifest: resolvedManifest,
     bytes: stat.size,
     sha256: digest,
-    application_id: migrations.application_id,
-    user_version: migrations.user_version,
-    archive,
+    application_id: verified.migrations.application_id,
+    user_version: verified.migrations.user_version,
+    archive: verified.archive,
     tables
   };
 }
@@ -647,5 +675,6 @@ module.exports = {
   validateArchiveContract,
   validateKeysAndConstraints,
   validateRequiredIndexes,
+  verifySnapshotDatabase,
   verifySnapshot
 };

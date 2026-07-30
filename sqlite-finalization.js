@@ -400,12 +400,26 @@ function pragmaNumber(database, name) {
   return Number(row && Object.values(row)[0]);
 }
 
-function healthCheck(database) {
-  const quick = database.prepare('PRAGMA quick_check').all().map(row => String(Object.values(row)[0]));
+function healthCheck(database, {
+  runQuickCheck = true,
+  onCheck = null
+} = {}) {
+  if (typeof runQuickCheck !== 'boolean') {
+    throw new TypeError('runQuickCheck must be a boolean');
+  }
+  if (onCheck != null && typeof onCheck !== 'function') {
+    throw new TypeError('onCheck must be a function');
+  }
+  if (runQuickCheck && onCheck) onCheck('quick_check');
+  const quick = runQuickCheck
+    ? database.prepare('PRAGMA quick_check').all().map(row => String(Object.values(row)[0]))
+    : null;
+  if (onCheck) onCheck('integrity_check');
   const integrity = database.prepare('PRAGMA integrity_check').all().map(row => String(Object.values(row)[0]));
+  if (onCheck) onCheck('foreign_key_check');
   const foreignKeys = database.prepare('PRAGMA foreign_key_check').all().map(row => ({ ...row }));
   return {
-    ok: quick.length === 1 && quick[0] === 'ok'
+    ok: (!runQuickCheck || (quick.length === 1 && quick[0] === 'ok'))
       && integrity.length === 1 && integrity[0] === 'ok'
       && foreignKeys.length === 0,
     quick_check: quick,
@@ -600,7 +614,10 @@ function quoteIdentifier(value) {
   return `"${String(value).replace(/"/g, '""')}"`;
 }
 
-function tableManifest(database) {
+function tableManifest(database, { includeRowCounts = true } = {}) {
+  if (typeof includeRowCounts !== 'boolean') {
+    throw new TypeError('includeRowCounts must be a boolean');
+  }
   const tables = database.prepare(`
     SELECT name FROM sqlite_master
     WHERE type='table' AND name NOT LIKE 'sqlite_%'
@@ -610,6 +627,10 @@ function tableManifest(database) {
   for (const table of tables) {
     const identifier = quoteIdentifier(table);
     const columns = database.prepare(`PRAGMA table_info(${identifier})`).all().map(row => row.name);
+    if (!includeRowCounts) {
+      manifest[table] = { columns };
+      continue;
+    }
     const row = database.prepare(
       columns.includes('suffix')
         ? `SELECT COUNT(*) AS count, MIN(suffix) AS min_suffix, MAX(suffix) AS max_suffix FROM ${identifier}`
@@ -682,14 +703,40 @@ async function createBackup(
   sourcePath,
   backupPath,
   createdAt = new Date().toISOString(),
-  { prepareDatabase = null, rate = 10000 } = {}
+  {
+    prepareDatabase = null,
+    validateDatabase = null,
+    healthCheckOptions = null,
+    tableManifestOptions = null,
+    onIoPass = null,
+    rate = 10000
+  } = {}
 ) {
   if (prepareDatabase != null && typeof prepareDatabase !== 'function') {
     throw new TypeError('prepareDatabase must be a function');
   }
+  if (validateDatabase != null && typeof validateDatabase !== 'function') {
+    throw new TypeError('validateDatabase must be a function');
+  }
+  if (healthCheckOptions != null
+      && (!healthCheckOptions || typeof healthCheckOptions !== 'object'
+        || Array.isArray(healthCheckOptions))) {
+    throw new TypeError('healthCheckOptions must be an object');
+  }
+  if (tableManifestOptions != null
+      && (!tableManifestOptions || typeof tableManifestOptions !== 'object'
+        || Array.isArray(tableManifestOptions))) {
+    throw new TypeError('tableManifestOptions must be an object');
+  }
+  if (onIoPass != null && typeof onIoPass !== 'function') {
+    throw new TypeError('onIoPass must be a function');
+  }
   if (!Number.isInteger(rate) || rate < 1) {
     throw new TypeError('Backup page rate must be a positive integer');
   }
+  const observeIo = operation => {
+    if (onIoPass) onIoPass(operation);
+  };
   const {
     resolvedBackup,
     manifestPath,
@@ -700,10 +747,12 @@ async function createBackup(
   let promotedBackup = false;
   let promotedManifest = false;
   let preparation = null;
+  let validation = null;
   try {
     const backupStartedAt = Date.now();
     // The batch size is configurable so routine production backups can yield
     // between small I/O bursts while one-off finalization keeps its fast default.
+    observeIo('source_online_copy');
     await sqliteBackup(database, partialBackupPath, { rate });
     const backupDurationMs = Date.now() - backupStartedAt;
     fs.chmodSync(partialBackupPath, 0o600);
@@ -721,10 +770,29 @@ async function createBackup(
       if (journalMode !== 'delete') {
         throw new Error(`Could not make backup self-contained; journal_mode is ${journalMode || 'unknown'}`);
       }
-      backupHealth = healthCheck(backup);
-      tables = tableManifest(backup);
+      backupHealth = healthCheck(backup, {
+        ...(healthCheckOptions || {}),
+        onCheck(check) {
+          observeIo(`backup_${check}`);
+          if (healthCheckOptions && typeof healthCheckOptions.onCheck === 'function') {
+            healthCheckOptions.onCheck(check);
+          }
+        }
+      });
+      observeIo('backup_table_manifest');
+      tables = tableManifest(backup, tableManifestOptions || {});
       applicationId = pragmaNumber(backup, 'application_id');
       userVersion = pragmaNumber(backup, 'user_version');
+      if (validateDatabase) {
+        validation = await validateDatabase({
+          database: backup,
+          health: backupHealth,
+          tables,
+          applicationId,
+          userVersion,
+          journalMode
+        });
+      }
     } finally {
       backup.close();
     }
@@ -735,6 +803,8 @@ async function createBackup(
     }
     if (!backupHealth.ok) throw new Error('Backup failed SQLite health verification');
     const stat = fs.statSync(partialBackupPath);
+    observeIo('backup_sha256');
+    const digest = await sha256File(partialBackupPath);
     const manifest = {
       format: 'nyc-311-sqlite-backup-manifest-v1',
       created_at: createdAt,
@@ -742,13 +812,28 @@ async function createBackup(
       backup_database: resolvedBackup,
       backup_duration_ms: backupDurationMs,
       bytes: stat.size,
-      sha256: await sha256File(partialBackupPath),
+      sha256: digest,
       application_id: applicationId,
       user_version: userVersion,
       journal_mode: journalMode,
+      table_manifest_mode: tableManifestOptions
+        && tableManifestOptions.includeRowCounts === false
+        ? 'schema'
+        : 'row_counts',
       health: backupHealth,
       tables
     };
+    if (validateDatabase) {
+      manifest.verification = {
+        status: 'verified',
+        verified_at: createdAt,
+        integrity_check: 'ok',
+        foreign_key_check: 'ok',
+        migration_catalog: 'ok',
+        archive_contract: 'ok',
+        sha256: 'recorded'
+      };
+    }
     fs.writeFileSync(partialManifestPath, `${JSON.stringify(manifest, null, 2)}\n`, {
       flag: 'wx',
       mode: 0o600
@@ -766,6 +851,7 @@ async function createBackup(
       manifest
     };
     if (prepareDatabase) result.preparation = preparation;
+    if (validateDatabase) result.validation = validation;
     return result;
   } catch (error) {
     removeFileIfPresent(partialManifestPath);
