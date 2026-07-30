@@ -83,8 +83,7 @@
       }
     });
   }
-  let markerLayer = createMarkerClusterLayer();
-  map.addLayer(markerLayer);
+  let markerLayer = null;
 
   const feed = document.getElementById('request-feed');
   const feedCoverage = document.getElementById('feed-coverage');
@@ -390,6 +389,11 @@
       fillColor: '#f0ae35', fillOpacity: 0.09
     }
   };
+  // Attaching even an empty MarkerCluster layer synchronously invokes its
+  // progress callback. Wait until every map/feed state binding above has left
+  // its temporal dead zone before allowing that callback to render.
+  markerLayer = createMarkerClusterLayer();
+  map.addLayer(markerLayer);
   let pendingBoundaryFit = false;
   let boundaryFitRevision = 0;
   let lastMapLayoutKey = '';
