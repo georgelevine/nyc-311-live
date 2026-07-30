@@ -91,6 +91,7 @@ if [[ "${deployment_scope}" == "web" ]]; then
     --exclude=public --exclude=test --exclude=.env --exclude=RELEASE_COMMIT \
     --exclude=server.js \
     --exclude=nyc311-email-events.js \
+    --exclude=sqlite-live-summary.js \
     --exclude=sqlite-email-metrics.js --exclude=email-metrics-presentation.js \
     --exclude=email-metrics-background.js --exclude=email-metrics-worker.js \
     --exclude=operational-health.js \
