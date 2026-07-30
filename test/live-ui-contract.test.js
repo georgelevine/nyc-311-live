@@ -284,6 +284,11 @@ test('map startup is self-hosted, bounded, and automatically recoverable', () =>
   );
   assert.match(dashboard, /Map data took too long\. Retrying/);
   assert.match(dashboard, /tile\.openstreetmap\.org/);
+  assert.match(dashboard, /if \(!compactLayout\.matches\) ensureBaseTiles\(\)/);
+  assert.match(
+    dashboard,
+    /if \(!mapHasLayout\(\)\) return;\s*ensureBaseTiles\(\);\s*map\.invalidateSize/
+  );
 });
 
 test('a hidden mobile filter change cannot let an old map request complete the new scope', () => {

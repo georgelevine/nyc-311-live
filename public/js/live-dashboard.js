@@ -11,6 +11,12 @@
   });
   let primaryTileErrors = 0;
   let usingFallbackTiles = false;
+  let baseTilesStarted = false;
+  function ensureBaseTiles() {
+    if (baseTilesStarted) return;
+    baseTilesStarted = true;
+    primaryTiles.addTo(map);
+  }
   primaryTiles.on('tileload', () => {
     primaryTileErrors = 0;
   });
@@ -21,7 +27,6 @@
     map.removeLayer(primaryTiles);
     fallbackTiles.addTo(map);
   });
-  primaryTiles.addTo(map);
   const GEOGRAPHY_PANE = 'boundary';
   const geographyPane = map.createPane(GEOGRAPHY_PANE);
   geographyPane.style.zIndex = '350';
@@ -93,6 +98,10 @@
     recordHasMapPin
   } = window.NYC311LiveDashboardModel;
   const compactLayout = window.matchMedia('(max-width: 900px)');
+  // The map is hidden behind a tab on phones. Avoid making its external tile
+  // requests part of the initial request-stream load; start them only when the
+  // map can actually be seen. Desktop keeps its immediate map.
+  if (!compactLayout.matches) ensureBaseTiles();
   const summaryElements = {
     root: document.getElementById('city-summary'),
     eyebrow: document.getElementById('city-summary-eyebrow'),
@@ -1882,6 +1891,7 @@
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(() => {
         if (!mapHasLayout()) return;
+        ensureBaseTiles();
         map.invalidateSize({ pan: false, debounceMoveend: true });
         renderMap();
         if (!mapArchiveLoaded && !mapRefreshInFlight) refreshMap(mapStats);
