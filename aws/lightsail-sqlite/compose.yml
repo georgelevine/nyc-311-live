@@ -184,10 +184,10 @@ services:
     blkio_config:
       device_read_bps:
         - path: /dev/nvme0n1
-          rate: 5mb
+          rate: 1mb
       device_write_bps:
         - path: /dev/nvme0n1
-          rate: 5mb
+          rate: 1mb
     network_mode: none
     logging: *default-logging
 

@@ -129,7 +129,7 @@ test('nightly backup priority and SQLite batching apply inside the container', (
   );
   assert.match(
     backup,
-    /blkio_config:\s+device_read_bps:\s+- path: \/dev\/nvme0n1\s+rate: 5mb\s+device_write_bps:\s+- path: \/dev\/nvme0n1\s+rate: 5mb/
+    /blkio_config:\s+device_read_bps:\s+- path: \/dev\/nvme0n1\s+rate: 1mb\s+device_write_bps:\s+- path: \/dev\/nvme0n1\s+rate: 1mb/
   );
   const nonBackupServices = [
     compose.slice(compose.indexOf('  collector:'), compose.indexOf('  web:')),

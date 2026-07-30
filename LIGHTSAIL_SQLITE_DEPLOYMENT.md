@@ -369,14 +369,16 @@ backup pairs never consume retention slots, and the job refuses to start without
 safe free space. On the small instance, the backup process runs at idle disk
 priority and the lowest CPU priority inside its container. Because the verified
 Lightsail root partition `/dev/nvme0n1p1` uses the `none` scheduler and therefore
-does not honor `ionice`, Compose also applies cgroup-v2 ceilings of 5 MB/s for
+does not honor `ionice`, Compose also applies cgroup-v2 ceilings of 1 MB/s for
 both reads and writes to its parent block device, `/dev/nvme0n1`, on the backup
 container only. The parent is required because this host's cgroup v2 controller
 rejects limits on the partition itself. SQLite copies 64 pages per step by
 default so foreground collection, email ingestion, and dashboard reads can run
-between short backup bursts. Set `SQLITE_BACKUP_PAGE_RATE` in `.env` only after
-measuring production I/O latency; a larger value creates larger bursts but
-cannot exceed the container bandwidth ceiling.
+between short backup bursts. The 1 MB/s ceiling was validated on the production
+instance while a full backup was running: dashboard and map reads remained
+sub-second. Set `SQLITE_BACKUP_PAGE_RATE` in `.env` only after measuring
+production I/O latency; a larger value creates larger bursts but cannot exceed
+the container bandwidth ceiling.
 
 Before moving this deployment to a different instance or disk layout, verify the
 root filesystem device with `findmnt -no SOURCE,MAJ:MIN /`, find its parent with
