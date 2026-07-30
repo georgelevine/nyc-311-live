@@ -10,7 +10,8 @@ const {
   inspectMigrationState,
   openDatabase,
   resolveDatabasePath,
-  timestampedBackupPath
+  timestampedBackupPath,
+  validateBackupCopyStrategy
 } = require('./sqlite-finalization');
 const {
   REQUIRED_ARCHIVE_TABLES,
@@ -19,9 +20,10 @@ const {
 } = require('./sqlite-snapshot');
 
 const STALE_PARTIAL_AGE_MS = 24 * 60 * 60 * 1000;
-// 64 ordinary 4 KiB pages is a roughly 256 KiB backup step. This keeps each
-// asynchronous SQLite backup burst short enough for the live writer and web
-// reads to run between steps on the small Lightsail disk.
+const MINIMUM_BACKUP_FREE_BYTES = 256 * 1024 * 1024;
+// Retained for callers that still pass the former incremental-backup option.
+// Routine VACUUM snapshots are throttled by the backup container's I/O cgroup,
+// not by SQLite page batches.
 const DEFAULT_BACKUP_PAGE_RATE = 64;
 
 function usage() {
@@ -31,7 +33,8 @@ Options:
   --db PATH          Explicit source database
   --directory PATH   Backup directory (default BACKUP_DIRECTORY or source/backups)
   --retain COUNT     Number of verified local backups to retain (default 3)
-  --page-rate COUNT  SQLite pages per backup step (default ${DEFAULT_BACKUP_PAGE_RATE})
+  --exclusive        Confirm an external lock excludes every other backup run
+  --page-rate COUNT  Deprecated compatibility option; ignored by routine backups
   --help             Show this help`;
 }
 
@@ -41,11 +44,13 @@ function parseArguments(argv) {
     directory: null,
     retain: 3,
     pageRate: null,
+    exclusive: false,
     help: false
   };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--help' || argument === '-h') options.help = true;
+    else if (argument === '--exclusive') options.exclusive = true;
     else if (argument === '--db' || argument === '--directory'
         || argument === '--retain' || argument === '--page-rate') {
       const value = argv[++index];
@@ -142,6 +147,79 @@ function removeStaleManagedPartials(directory, databasePath, options = {}) {
   return removed;
 }
 
+function removeAbandonedManagedPartials(directory, databasePath, {
+  preservePaths = []
+} = {}) {
+  if (!Array.isArray(preservePaths)) {
+    throw new TypeError('preservePaths must be an array');
+  }
+  const preserved = new Set(preservePaths.map(item => path.resolve(item)));
+  const removed = [];
+  const inspected = inspectManagedArtifacts(directory, databasePath);
+  for (const item of inspected.partials) {
+    if (preserved.has(path.resolve(item.path))) continue;
+    try {
+      fs.unlinkSync(item.path);
+      removed.push(item.path);
+    } catch (error) {
+      if (!error || error.code !== 'ENOENT') throw error;
+    }
+  }
+  return removed;
+}
+
+function fileSizeIfPresent(filePath) {
+  try {
+    const stat = fs.statSync(filePath);
+    return stat.isFile() ? stat.size : 0;
+  } catch (error) {
+    if (error && error.code === 'ENOENT') return 0;
+    throw error;
+  }
+}
+
+function calculateBackupCapacity({
+  sourceDatabaseBytes,
+  sourceLogicalBytes,
+  sourceWalBytes = 0,
+  availableBytes
+}) {
+  const values = {
+    sourceDatabaseBytes,
+    sourceLogicalBytes,
+    sourceWalBytes,
+    availableBytes
+  };
+  for (const [name, value] of Object.entries(values)) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new TypeError(`${name} must be a nonnegative safe integer`);
+    }
+  }
+  if (sourceLogicalBytes < 1) {
+    throw new TypeError('sourceLogicalBytes must be positive');
+  }
+  // The VACUUM output can be as large as the logical database even when most
+  // committed pages still live only in the WAL. Keep two additional logical
+  // database sizes plus the current WAL size available for writer growth,
+  // validation I/O, and an interrupted partial awaiting cleanup.
+  const requiredFreeBytes = Math.max(
+    sourceLogicalBytes * 3 + sourceWalBytes,
+    MINIMUM_BACKUP_FREE_BYTES
+  );
+  if (!Number.isSafeInteger(requiredFreeBytes)) {
+    throw new Error('Calculated backup capacity exceeds the safe integer range');
+  }
+  return {
+    source_database_bytes: sourceDatabaseBytes,
+    source_logical_bytes: sourceLogicalBytes,
+    source_wal_bytes: sourceWalBytes,
+    available_bytes: availableBytes,
+    required_free_bytes: requiredFreeBytes,
+    safety_headroom_bytes: requiredFreeBytes - sourceLogicalBytes,
+    ok: availableBytes >= requiredFreeBytes
+  };
+}
+
 function managedBackupManifests(directory, databasePath) {
   const pattern = managedArtifactPatterns(databasePath).manifest;
   if (!fs.existsSync(directory)) return [];
@@ -188,6 +266,11 @@ function inspectTrustedManagedBackup(item, sourceDatabasePath) {
     manifest = JSON.parse(fs.readFileSync(item.manifestPath, 'utf8'));
     if (manifest.format !== 'nyc-311-sqlite-backup-manifest-v1') {
       throw new Error(`unsupported manifest format ${manifest.format || 'missing'}`);
+    }
+    try {
+      validateBackupCopyStrategy(manifest.copy_strategy, { allowMissing: true });
+    } catch (error) {
+      throw new Error(`unsupported copy strategy: ${error.message}`);
     }
     if (path.resolve(manifest.source_database || '') !== path.resolve(sourceDatabasePath)) {
       throw new Error('manifest source database does not match this backup set');
@@ -311,13 +394,18 @@ async function createRoutineBackup({
   databasePath,
   directory,
   retain = 3,
-  pageRate = DEFAULT_BACKUP_PAGE_RATE,
+  pageRate = null,
+  exclusiveRun = false,
   now = new Date(),
   stalePartialAgeMs = STALE_PARTIAL_AGE_MS,
   onIoPass = null
 }) {
-  if (!Number.isInteger(pageRate) || pageRate < 1 || pageRate > 10000) {
+  if (pageRate != null
+      && (!Number.isInteger(pageRate) || pageRate < 1 || pageRate > 10000)) {
     throw new TypeError('Backup page rate must be an integer from 1 through 10000');
+  }
+  if (typeof exclusiveRun !== 'boolean') {
+    throw new TypeError('exclusiveRun must be a boolean');
   }
   if (onIoPass != null && typeof onIoPass !== 'function') {
     throw new TypeError('onIoPass must be a function');
@@ -331,32 +419,54 @@ async function createRoutineBackup({
   if (!fs.existsSync(resolvedDatabase)) throw new Error(`SQLite database does not exist: ${resolvedDatabase}`);
   const resolvedDirectory = path.resolve(directory || path.join(path.dirname(resolvedDatabase), 'backups'));
   fs.mkdirSync(resolvedDirectory, { recursive: true, mode: 0o700 });
-  const removedStalePartials = removeStaleManagedPartials(resolvedDirectory, resolvedDatabase, {
+  const partialsBeforeCleanup = inspectManagedArtifacts(resolvedDirectory, resolvedDatabase, {
     now,
     stalePartialAgeMs
   });
+  const stalePartialPaths = new Set(
+    partialsBeforeCleanup.stale_partials.map(item => path.resolve(item.path))
+  );
+  // Removing every pre-existing partial is safe only while an external lock
+  // proves that no other backup process can own one. Without that proof, retain
+  // all partials (including old ones) so a legitimately long active copy is
+  // never unlinked by a concurrent invocation.
+  const removedAbandonedPartials = exclusiveRun
+    ? removeAbandonedManagedPartials(resolvedDirectory, resolvedDatabase)
+    : [];
+  const removedStalePartials = removedAbandonedPartials
+    .filter(item => stalePartialPaths.has(path.resolve(item)));
   const artifactsBeforeBackup = inspectManagedArtifacts(resolvedDirectory, resolvedDatabase, {
     now,
     stalePartialAgeMs
   });
-  const sourceBytes = fs.statSync(resolvedDatabase).size;
-  const filesystem = fs.statfsSync(resolvedDirectory);
-  const availableBytes = Number(filesystem.bavail) * Number(filesystem.bsize);
-  const requiredFreeBytes = Math.max(sourceBytes * 3, 256 * 1024 * 1024);
-  if (!Number.isFinite(availableBytes) || availableBytes < requiredFreeBytes) {
-    throw new Error(
-      `Insufficient free space for a verified backup: require ${requiredFreeBytes} bytes, `
-      + `have ${availableBytes}; ${artifactsBeforeBackup.orphans.length} orphaned managed artifact(s) require review`
-    );
-  }
   const proposed = timestampedBackupPath(resolvedDatabase, now);
   const destination = path.join(resolvedDirectory, path.basename(proposed));
   const database = openDatabase(resolvedDatabase, { readOnly: true });
   let created;
+  let capacityPreflight;
   try {
     const migrations = inspectMigrationState(database);
     if (migrations.application_id !== APPLICATION_ID || migrations.pending.length) {
       throw new Error('Source database must be finalized before routine cloud backups begin');
+    }
+    const pageSize = Number(database.prepare('PRAGMA page_size').get().page_size);
+    const pageCount = Number(database.prepare('PRAGMA page_count').get().page_count);
+    const filesystem = fs.statfsSync(resolvedDirectory);
+    capacityPreflight = calculateBackupCapacity({
+      sourceDatabaseBytes: fs.statSync(resolvedDatabase).size,
+      sourceLogicalBytes: pageSize * pageCount,
+      sourceWalBytes: fileSizeIfPresent(`${resolvedDatabase}-wal`),
+      availableBytes: Number(filesystem.bavail) * Number(filesystem.bsize)
+    });
+    if (!capacityPreflight.ok) {
+      throw new Error(
+        'Insufficient free space for a verified backup: '
+        + `require ${capacityPreflight.required_free_bytes} bytes, `
+        + `have ${capacityPreflight.available_bytes}; logical database `
+        + `${capacityPreflight.source_logical_bytes} bytes, WAL `
+        + `${capacityPreflight.source_wal_bytes} bytes; `
+        + `${artifactsBeforeBackup.orphans.length} orphaned managed artifact(s) require review`
+      );
     }
     created = await createBackup(
       database,
@@ -364,7 +474,7 @@ async function createRoutineBackup({
       destination,
       now.toISOString(),
       {
-        rate: pageRate,
+        copyStrategy: 'vacuum_into',
         healthCheckOptions: { runQuickCheck: false },
         tableManifestOptions: { includeRowCounts: false },
         onIoPass: observeIo,
@@ -401,7 +511,10 @@ async function createRoutineBackup({
   });
   return {
     ...created,
-    backup_page_rate: pageRate,
+    capacity_preflight: capacityPreflight,
+    deprecated_options: pageRate == null
+      ? []
+      : [`page_rate=${pageRate} ignored for vacuum_into`],
     io_operations: ioOperations,
     io_operation_counts: Object.fromEntries(
       [...new Set(ioOperations)].map(operation => [
@@ -410,13 +523,15 @@ async function createRoutineBackup({
       ])
     ),
     full_file_passes: [
-      'source_online_copy',
+      'source_vacuum_snapshot',
       'backup_integrity_check',
       'backup_sha256'
     ],
     retained: pruned.retained.length,
     removed: pruned.removed,
     invalid_backups: pruned.invalid,
+    exclusive_run: exclusiveRun,
+    removed_abandoned_partials: removedAbandonedPartials,
     removed_stale_partials: removedStalePartials,
     pending_partials: remainingArtifacts.partials,
     orphaned_artifacts: remainingArtifacts.orphans
@@ -434,10 +549,15 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     databasePath,
     directory: options.directory || env.BACKUP_DIRECTORY,
     retain: options.retain,
-    pageRate: options.pageRate == null
-      ? DEFAULT_BACKUP_PAGE_RATE
-      : options.pageRate
+    pageRate: options.pageRate,
+    exclusiveRun: options.exclusive
   });
+  if (options.pageRate != null) {
+    process.stderr.write(
+      'WARNING: --page-rate is deprecated and ignored; routine VACUUM backups '
+      + 'are throttled by the service I/O cgroup.\n'
+    );
+  }
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 
@@ -450,7 +570,9 @@ if (require.main === module) {
 
 module.exports = {
   DEFAULT_BACKUP_PAGE_RATE,
+  MINIMUM_BACKUP_FREE_BYTES,
   STALE_PARTIAL_AGE_MS,
+  calculateBackupCapacity,
   createRoutineBackup,
   inspectManagedArtifacts,
   main,
@@ -458,6 +580,7 @@ module.exports = {
   managedBackupManifests,
   parseArguments,
   pruneBackups,
+  removeAbandonedManagedPartials,
   removeStaleManagedPartials,
   trustedManagedBackups,
   verifiedManagedBackups,

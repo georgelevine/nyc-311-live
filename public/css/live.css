@@ -254,10 +254,13 @@ button, input, select { font: inherit; }
 
 .live-marker { width: 18px; height: 18px; border: 3px solid white; border-radius: 50%; background: var(--blue); box-shadow: 0 2px 10px rgba(23,54,78,.35); }
 .live-marker.closed { background: #8796a2; }
+.live-marker.pending { background: #d18412; }
 .marker-cluster-small, .marker-cluster-medium, .marker-cluster-large { background: rgba(23,105,224,.18); }
 .marker-cluster div { position: relative; color: white; background: var(--blue); font-weight: 750; }
 .marker-cluster.closed { background: rgba(135,150,162,.2); }
 .marker-cluster.closed > div { background: #8796a2; }
+.marker-cluster.pending { background: rgba(209,132,18,.2); }
+.marker-cluster.pending > div { background: #d18412; }
 
 .request-detail {
   position: absolute; z-index: 750; top: 18px; right: 18px; width: min(340px, calc(100% - 36px));

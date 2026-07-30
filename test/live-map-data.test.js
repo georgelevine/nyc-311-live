@@ -6,7 +6,8 @@ const {
   MAP_RECORD_FIELDS,
   buildLiveMapPayload,
   mapSubmittedSince,
-  projectLiveMapRow
+  projectLiveMapRow,
+  validTimestampValue
 } = require('../live-map-data');
 
 test('projects the exact lightweight map record contract across database types', () => {
@@ -109,6 +110,14 @@ test('accepts only a strict UTC timestamp for a recent map window', () => {
   );
   assert.throws(() => mapSubmittedSince('2026-07-25 15:30:00'), /ISO UTC timestamp/);
   assert.throws(() => mapSubmittedSince('2026-02-30T15:30:00.000Z'), /ISO UTC timestamp/);
+});
+
+test('submitted-time projection skips malformed live values and uses a valid detail fallback', () => {
+  assert.equal(
+    validTimestampValue('not-a-timestamp', '2026-07-29T12:00:00.000Z'),
+    '2026-07-29T12:00:00.000Z'
+  );
+  assert.equal(validTimestampValue('not-a-timestamp', 'also-bad'), null);
 });
 
 test('projects lifecycle status consistently for closing, closed, and reopened requests', () => {

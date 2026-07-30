@@ -47,6 +47,114 @@
       && !normalizedText(record.details_fetched_at));
   }
 
+  function recordSuffix(record) {
+    const explicit = Number(record && record.suffix);
+    if (Number.isSafeInteger(explicit) && explicit > 0) return explicit;
+    const match = normalizedText(record && record.srnumber).match(/^311-(\d{8})$/);
+    const derived = match ? Number(match[1]) : NaN;
+    return Number.isSafeInteger(derived) && derived > 0 ? derived : null;
+  }
+
+  function collectionHas(collection, value) {
+    if (!collection) return false;
+    if (typeof collection.has === 'function') return collection.has(value);
+    return Array.isArray(collection) && collection.includes(value);
+  }
+
+  function validatePaginatedRecords(records, {
+    beforeSuffix = null,
+    expectedSnapshot = null,
+    requireSnapshot = false,
+    page = {},
+    existingNumbers = null,
+    expectedTotal = null,
+    loadedCount = 0,
+    label = 'Data service'
+  } = {}) {
+    if (!Array.isArray(records)) throw new Error(`${label} returned an invalid records page`);
+    const cursor = beforeSuffix == null ? null : Number(beforeSuffix);
+    if (cursor != null && (!Number.isSafeInteger(cursor) || cursor < 1)) {
+      throw new Error(`${label} received an invalid request cursor`);
+    }
+    const seen = new Set();
+    let previous = cursor == null ? Number.POSITIVE_INFINITY : cursor;
+    for (const record of records) {
+      const number = normalizedText(record && record.srnumber);
+      const suffix = recordSuffix(record);
+      if (!number || suffix == null || suffix >= previous) {
+        throw new Error(`${label} returned records out of order`);
+      }
+      if (seen.has(number) || collectionHas(existingNumbers, number)) {
+        throw new Error(`${label} repeated ${number}`);
+      }
+      seen.add(number);
+      previous = suffix;
+    }
+
+    if (page.returned != null && Number(page.returned) !== records.length) {
+      throw new Error(`${label} returned an inconsistent record count`);
+    }
+    const snapshotAt = normalizedText(page.snapshot_at) || null;
+    if (requireSnapshot && !snapshotAt) {
+      throw new Error(`${label} omitted its snapshot`);
+    }
+    if (expectedSnapshot && snapshotAt !== expectedSnapshot) {
+      throw new Error(`${label} changed snapshots during pagination`);
+    }
+
+    const hasMore = page.has_more === true;
+    const nextSuffix = page.next_before_suffix == null
+      ? null
+      : Number(page.next_before_suffix);
+    if (hasMore) {
+      if (!records.length) throw new Error(`${label} made no pagination progress`);
+      const lastSuffix = recordSuffix(records[records.length - 1]);
+      if (!Number.isSafeInteger(nextSuffix) || nextSuffix !== lastSuffix) {
+        throw new Error(`${label} returned an invalid page cursor`);
+      }
+    }
+
+    const total = expectedTotal == null ? null : Number(expectedTotal);
+    const accumulated = Number(loadedCount) + records.length;
+    if (total != null) {
+      if (!Number.isSafeInteger(total) || total < 0) {
+        throw new Error(`${label} returned an invalid total`);
+      }
+      if (accumulated > total || (hasMore && accumulated >= total)
+          || (!hasMore && accumulated !== total)) {
+        throw new Error(`${label} changed while loading`);
+      }
+    }
+
+    return { hasMore, nextSuffix, snapshotAt };
+  }
+
+  function feedHeadMembershipDelta(currentRecords, incomingRecords) {
+    const current = Array.isArray(currentRecords)
+      ? currentRecords.filter(record => recordSuffix(record) != null)
+      : [];
+    const incoming = Array.isArray(incomingRecords)
+      ? incomingRecords.filter(record => recordSuffix(record) != null)
+      : [];
+    const currentNumbers = new Set(current.map(record => normalizedText(record.srnumber)));
+    const incomingNumbers = new Set(incoming.map(record => normalizedText(record.srnumber)));
+    if (!incoming.length) return -currentNumbers.size;
+    const oldestIncoming = incoming.reduce(
+      (minimum, record) => Math.min(minimum, recordSuffix(record)),
+      Number.POSITIVE_INFINITY
+    );
+    const added = [...incomingNumbers].filter(number => !currentNumbers.has(number)).length;
+    const removed = current.filter(record => (
+      recordSuffix(record) >= oldestIncoming
+      && !incomingNumbers.has(normalizedText(record.srnumber))
+    )).length;
+    return added - removed;
+  }
+
+  function boundaryCatalogIsUsable(items, boundaryVersion) {
+    return Array.isArray(items) && items.length > 0 && Boolean(normalizedText(boundaryVersion));
+  }
+
   function feedCardModel(record) {
     const problem = normalizedText(record && record.problem) || 'Service Request';
     const problemDetails = normalizedText(record && record.problem_details);
@@ -73,13 +181,17 @@
 
   return {
     activeFilterLabel,
+    boundaryCatalogIsUsable,
     coordinateNumber,
     exactSrnumberQuery,
+    feedHeadMembershipDelta,
     feedCardModel,
     isClosed,
     normalizedText,
     recordCoordinates,
     recordDetailsPending,
-    recordHasMapPin
+    recordHasMapPin,
+    recordSuffix,
+    validatePaginatedRecords
   };
 }));

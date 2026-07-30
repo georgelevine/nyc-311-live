@@ -66,7 +66,7 @@ stale.
   requests through closure.
 - `web`: serves the live dashboard and API from the same SQLite archive.
 - `proxy`: exposes the web service through Caddy on ports 80 and 443.
-- `backup`: uses SQLite's online backup API, validates the complete archive,
+- `backup`: uses one stable SQLite `VACUUM INTO` snapshot, validates the complete archive,
   records a SHA-256 manifest, and retains three verified local copies.
 
 The Node services run as UID 10001 with a read-only container filesystem and
@@ -365,12 +365,19 @@ Do not reopen the Mac collector. Preserve its original database unchanged.
 ## Backups, restore, and rollback
 
 The timer runs nightly and keeps three verified local backups. Each run uses
-SQLite's online backup API, then verifies the new copy with one full
+SQLite `VACUUM INTO` to read one stable snapshot without restarting when the
+live WAL changes, then verifies the new copy with one full
 `integrity_check`, a foreign-key check, the migration and archive contracts, and
 one SHA-256 pass. `quick_check` is deliberately omitted because
 `integrity_check` is the stronger superset. The command's JSON result lists
-`io_operations`, `io_operation_counts`, and the three whole-file operations in
-`full_file_passes`; every listed new-backup operation should have a count of one.
+the logical database size, current WAL size, required safety headroom, and
+available space checked before the snapshot begins. The exclusive service lock
+also permits the next run to remove incomplete partials left by an interrupted
+earlier run. The backup container's 1 MiB/s read and write cgroup limits—not
+SQLite page batching—keep this work subordinate to the live services.
+The result also includes `io_operations`, `io_operation_counts`, and the three
+whole-file operations in `full_file_passes`; every listed new-backup operation
+should have a count of one.
 
 Retention does not re-hash or reopen unchanged older databases every night.
 Instead, it trusts their atomically published verification manifests, exact
@@ -379,8 +386,10 @@ database file has not changed since its manifest was written. Existing legacy
 manifests created by the prior atomic routine remain eligible because that
 routine verified them before returning. A changed, malformed, unpaired, or
 untrusted artifact is preserved for investigation and never consumes a
-retention slot. Stale managed `.partial` files are still removed after 24 hours,
-and the job refuses to start without safe free space.
+retention slot. Under the service's exclusive lock, all pre-existing managed
+`.partial` files are known to be abandoned and are removed before the
+free-space check; non-exclusive library callers preserve partials they cannot
+prove are inactive. The job refuses to start without safe free space.
 
 Use the explicit snapshot verifier when you want to re-read and deeply scrub a
 retained backup (for example, during a restore rehearsal or periodic audit):

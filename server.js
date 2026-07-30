@@ -15,7 +15,8 @@ const {
 const {
   buildLiveMapPayload,
   businessImprovementDistrictIds,
-  mapSubmittedSince
+  mapSubmittedSince,
+  validTimestampValue
 } = require('./live-map-data');
 const { buildCatchupStatus, parseState } = require('./catchup-status');
 const { reconcileStoredDetails } = require('./detail-queue');
@@ -57,6 +58,37 @@ function tableExists(database, name) {
   ).get(name));
 }
 
+function requestedBoundaryVersion(req, name) {
+  const raw = req.query && req.query[name];
+  if (raw == null || String(raw).trim() === '') return null;
+  if (Array.isArray(raw) || typeof raw === 'object') {
+    const error = new Error(`${name} must be a single boundary version`);
+    error.statusCode = 400;
+    throw error;
+  }
+  const version = String(raw).trim();
+  if (version.length > 100 || !/^[A-Za-z0-9._:-]+$/.test(version)) {
+    const error = new Error(`${name} is not a valid boundary version`);
+    error.statusCode = 400;
+    throw error;
+  }
+  return version;
+}
+
+function activeBoundaryVersion(database, tableName) {
+  if (![
+    'police_precinct_boundary_versions',
+    'business_improvement_district_boundary_versions'
+  ].includes(tableName)) {
+    throw new TypeError('Unsupported boundary version table');
+  }
+  if (!tableExists(database, tableName)) return null;
+  const row = database.prepare(`
+    SELECT version FROM ${tableName} WHERE active=1 LIMIT 1
+  `).get();
+  return row && row.version ? String(row.version) : null;
+}
+
 function policePrecinctFilter(req, database) {
   const raw = req.query && req.query.police_precinct;
   if (raw == null || String(raw).trim() === '') return null;
@@ -66,21 +98,29 @@ function policePrecinctFilter(req, database) {
     throw error;
   }
   const precinct = Number(raw);
-  const boundary = tableExists(database, 'police_precincts')
-    && tableExists(database, 'police_precinct_boundary_versions')
+  const expectedVersion = requestedBoundaryVersion(req, 'precinct_boundary_version');
+  const boundaryVersion = activeBoundaryVersion(
+    database,
+    'police_precinct_boundary_versions'
+  );
+  if (boundaryVersion && expectedVersion && expectedVersion !== boundaryVersion) {
+    const error = new Error('Police precinct boundary release changed; reload the filter');
+    error.statusCode = 409;
+    throw error;
+  }
+  const exists = boundaryVersion
+    && tableExists(database, 'police_precincts')
     && database.prepare(`
-      SELECT precinct.boundary_version
-      FROM police_precincts AS precinct
-      JOIN police_precinct_boundary_versions AS version
-        ON version.version=precinct.boundary_version AND version.active=1
-      WHERE precinct.precinct_number=?
-    `).get(precinct);
-  if (!boundary) {
+      SELECT 1
+      FROM police_precincts
+      WHERE boundary_version=? AND precinct_number=?
+    `).get(boundaryVersion, precinct);
+  if (!exists) {
     const error = new Error(`Police precinct ${precinct} is not in the active boundary release`);
     error.statusCode = 400;
     throw error;
   }
-  return { precinct, boundaryVersion: boundary.boundary_version };
+  return { precinct, boundaryVersion };
 }
 
 function businessImprovementDistrictFilter(req, database) {
@@ -92,21 +132,29 @@ function businessImprovementDistrictFilter(req, database) {
     throw error;
   }
   const bidId = Number(raw);
-  const boundary = tableExists(database, 'business_improvement_districts')
-    && tableExists(database, 'business_improvement_district_boundary_versions')
+  const expectedVersion = requestedBoundaryVersion(req, 'bid_boundary_version');
+  const boundaryVersion = activeBoundaryVersion(
+    database,
+    'business_improvement_district_boundary_versions'
+  );
+  if (boundaryVersion && expectedVersion && expectedVersion !== boundaryVersion) {
+    const error = new Error('Business improvement district boundary release changed; reload the filter');
+    error.statusCode = 409;
+    throw error;
+  }
+  const boundary = boundaryVersion
+    && tableExists(database, 'business_improvement_districts')
     && database.prepare(`
-      SELECT district.boundary_version,district.name
-      FROM business_improvement_districts AS district
-      JOIN business_improvement_district_boundary_versions AS version
-        ON version.version=district.boundary_version AND version.active=1
-      WHERE district.bid_id=?
-    `).get(bidId);
+      SELECT name
+      FROM business_improvement_districts
+      WHERE boundary_version=? AND bid_id=?
+    `).get(boundaryVersion, bidId);
   if (!boundary) {
     const error = new Error(`BID ${bidId} is not in the active boundary release`);
     error.statusCode = 400;
     throw error;
   }
-  return { bidId, name: boundary.name, boundaryVersion: boundary.boundary_version };
+  return { bidId, name: boundary.name, boundaryVersion };
 }
 
 function requestGeographyScope(req, database) {
@@ -416,11 +464,61 @@ function optionalRecordFilters(req) {
   };
 }
 
-function recordFilterPredicates(alias, filters) {
+function effectiveTextSql(alias, column, detailsAlias = null, detailColumn = column) {
+  const liveColumn = `${alias}.${column}`;
+  if (!detailsAlias) return `NULLIF(TRIM(${liveColumn}),'')`;
+  return `COALESCE(
+    NULLIF(TRIM(${liveColumn}),''),
+    NULLIF(TRIM(${detailsAlias}.${detailColumn}),'')
+  )`;
+}
+
+function effectiveStatusSql(alias, {
+  detailsAlias = null,
+  followupAlias = null
+} = {}) {
+  return `nyc311_effective_status(
+    ${alias}.status,
+    ${detailsAlias ? `${detailsAlias}.status` : 'NULL'},
+    ${followupAlias ? `${followupAlias}.state` : 'NULL'},
+    ${detailsAlias ? `${detailsAlias}.date_closed` : 'NULL'}
+  )`;
+}
+
+function effectiveSubmittedJulianDaySql(alias, detailsAlias = null) {
+  return `COALESCE(
+    julianday(${alias}.submitted_at),
+    ${detailsAlias ? `julianday(${detailsAlias}.date_reported)` : 'NULL'}
+  )`;
+}
+
+function registerEffectiveRecordSqlFunctions(database) {
+  database.function('nyc311_effective_status', { deterministic: true }, (
+    liveStatus,
+    detailStatus,
+    followupState,
+    detailDateClosed
+  ) => {
+    const status = hasText(liveStatus)
+      ? liveStatus
+      : hasText(detailStatus) ? detailStatus : null;
+    return currentLifecycleProjection({
+      status,
+      followup_state: followupState,
+      date_closed: detailDateClosed
+    }).status;
+  });
+}
+
+function recordFilterPredicates(alias, filters, {
+  detailsAlias = null,
+  followupAlias = null
+} = {}) {
   const predicates = [];
+  const effectiveStatus = effectiveStatusSql(alias, { detailsAlias, followupAlias });
   if (filters.status) {
     predicates.push(
-      `NULLIF(TRIM(${alias}.status),'')=@filter_status COLLATE NOCASE`
+      `${effectiveStatus}=@filter_status COLLATE NOCASE`
     );
   }
   if (filters.query) {
@@ -430,9 +528,9 @@ function recordFilterPredicates(alias, filters) {
     } else {
       const expressions = [
         `${alias}.srnumber`,
-        `${alias}.problem`,
-        `${alias}.address`,
-        `${alias}.status`
+        effectiveTextSql(alias, 'problem', detailsAlias),
+        effectiveTextSql(alias, 'address', detailsAlias),
+        effectiveStatus
       ];
       predicates.push(`(${expressions
         .map(expression => `INSTR(LOWER(COALESCE(${expression},'')),@filter_query)>0`)
@@ -1251,11 +1349,13 @@ function serveBoundaryGeometry(req, res, {
   id,
   idLabel,
   maxIdDigits,
+  versionTable,
   unavailableMessage,
   logLabel
 }) {
   const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
   let database;
+  let readTransaction = false;
   res.setHeader('Cache-Control', 'no-store');
   res.setHeader('Vary', 'Authorization');
   try {
@@ -1265,22 +1365,54 @@ function serveBoundaryGeometry(req, res, {
     }
     const { DatabaseSync } = require('node:sqlite');
     database = new DatabaseSync(databasePath, { readOnly: true });
+    database.exec('BEGIN');
+    readTransaction = true;
+    const expectedVersion = requestedBoundaryVersion(req, 'boundary_version');
+    const currentVersion = activeBoundaryVersion(database, versionTable);
+    if (expectedVersion && currentVersion && expectedVersion !== currentVersion) {
+      throw new BoundaryLookupError(
+        `${idLabel} boundary release changed; reload the filter`,
+        409
+      );
+    }
     const feature = load(database, parsedId);
+    const actualVersion = feature && feature.properties
+      && feature.properties.boundary_version;
+    if (expectedVersion && expectedVersion !== actualVersion) {
+      throw new BoundaryLookupError(
+        `${idLabel} boundary release changed; reload the filter`,
+        409
+      );
+    }
+    database.exec('COMMIT');
+    readTransaction = false;
     res.setHeader('Content-Type', 'application/geo+json; charset=utf-8');
     res.setHeader('Cache-Control', 'private, max-age=300, must-revalidate');
     return res.json(feature);
   } catch (error) {
     const expected = error instanceof BoundaryLookupError;
-    const statusCode = expected ? error.statusCode : 503;
+    const explicitStatus = Number(error && error.statusCode);
+    const statusCode = expected
+      ? error.statusCode
+      : Number.isInteger(explicitStatus) && explicitStatus >= 400 && explicitStatus < 500
+        ? explicitStatus
+        : 503;
     if (statusCode >= 500) {
       const cause = error.cause && error.cause.message ? `: ${error.cause.message}` : '';
       console.error(`${logLabel}: ${error.message}${cause}`);
     }
     return res.status(statusCode).json({
-      error: expected ? error.message : unavailableMessage
+      error: expected || statusCode < 500 ? error.message : unavailableMessage
     });
   } finally {
-    if (database) database.close();
+    if (database) {
+      if (readTransaction) {
+        try {
+          database.exec('ROLLBACK');
+        } catch (_) {}
+      }
+      database.close();
+    }
   }
 }
 
@@ -1290,6 +1422,7 @@ app.get('/api/police-precincts/:precinct/geometry', (req, res) => {
     id: req.params.precinct,
     idLabel: 'Police precinct',
     maxIdDigits: 3,
+    versionTable: 'police_precinct_boundary_versions',
     unavailableMessage: 'Police precinct boundaries are temporarily unavailable',
     logLabel: 'Police precinct geometry error'
   });
@@ -1301,6 +1434,7 @@ app.get('/api/business-improvement-districts/:bidId/geometry', (req, res) => {
     id: req.params.bidId,
     idLabel: 'Business improvement district ID',
     maxIdDigits: 6,
+    versionTable: 'business_improvement_district_boundary_versions',
     unavailableMessage: 'Business improvement district boundaries are temporarily unavailable',
     logLabel: 'Business improvement district geometry error'
   });
@@ -1309,6 +1443,7 @@ app.get('/api/business-improvement-districts/:bidId/geometry', (req, res) => {
 app.get('/api/live-map', (req, res) => {
   const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
   let database;
+  let readTransaction = false;
   res.setHeader('Cache-Control', 'no-store');
   try {
     const includeTotals = liveMapIncludeTotals(req);
@@ -1330,10 +1465,13 @@ app.get('/api/live-map', (req, res) => {
     if (!require('fs').existsSync(databasePath)) return res.json(emptyPayload());
     const { DatabaseSync } = require('node:sqlite');
     database = new DatabaseSync(databasePath, { readOnly: true });
+    registerEffectiveRecordSqlFunctions(database);
     const tables = new Set(database.prepare(`
       SELECT name FROM sqlite_master WHERE type='table'
     `).all().map(row => row.name));
     if (!tables.has('live_portal_requests')) return res.json(emptyPayload());
+    database.exec('BEGIN');
+    readTransaction = true;
     const scope = requestGeographyScope(req, database);
     const rawPageLimit = req.query && req.query.limit;
     // Always bound the work, including requests from older cached clients
@@ -1403,6 +1541,12 @@ app.get('/api/live-map', (req, res) => {
     const followUpJoin = hasFollowUps
       ? 'LEFT JOIN request_followup_queue AS followup ON followup.srnumber=live.srnumber'
       : '';
+    const exactQuery = Boolean(filters.query && /^311-\d{8}$/i.test(filters.query));
+    const needsEffectiveFilters = Boolean(filters.status || (filters.query && !exactQuery));
+    const filterDetailJoin = hasDetails && (submittedSince != null || needsEffectiveFilters)
+      ? detailJoin
+      : '';
+    const filterFollowUpJoin = hasFollowUps && needsEffectiveFilters ? followUpJoin : '';
     const currentClosureColumns = hasFollowUps && hasClosureSnapshots
       ? `current_final.date_closed AS current_cycle_date_closed,
          1 AS closure_cycle_tracking`
@@ -1418,12 +1562,17 @@ app.get('/api/live-map', (req, res) => {
     const liveSource = scopedLiveRequestSource('live', scope, bidScopeAlias);
     const livePredicates = [
       ...scopePredicates('live', scope, bidScopeAlias),
-      ...recordFilterPredicates('live', filters)
+      ...recordFilterPredicates('live', filters, {
+        detailsAlias: hasDetails ? 'details' : null,
+        followupAlias: hasFollowUps ? 'followup' : null
+      })
     ];
     if (submittedSince != null) {
       livePredicates.push(
-        "live.submitted_at GLOB '????-??-??T??:??:??.???Z'",
-        'live.submitted_at >= @submitted_since'
+        `${effectiveSubmittedJulianDaySql(
+          'live',
+          hasDetails ? 'details' : null
+        )} >= julianday(@submitted_since)`
       );
     }
     if (snapshotAt != null) livePredicates.push('live.first_seen_at <= @snapshot_at');
@@ -1436,7 +1585,7 @@ app.get('/api/live-map', (req, res) => {
     if (beforeSuffix != null) mappedPredicates.push('live.suffix < @before_suffix');
     const mappedWhere = sqlWhere(mappedPredicates);
     const liveIndexClause = liveMapRequestIndexClause(database, scope, {
-      exactSrnumber: Boolean(filters.query && /^311-\d{8}$/i.test(filters.query))
+      exactSrnumber: exactQuery
     });
     const liveRecordSource = scope && scope.bid
       ? liveSource
@@ -1456,6 +1605,8 @@ app.get('/api/live-map', (req, res) => {
               AND live.longitude BETWEEN -180 AND 180
             ), 0) AS mapped_total
           FROM ${liveSource}
+          ${filterDetailJoin}
+          ${filterFollowUpJoin}
           ${totalsWhere}
         `).get(commonParameters)
       : null;
@@ -1504,6 +1655,8 @@ app.get('/api/live-map', (req, res) => {
       next_before_suffix: lastRecord ? lastRecord.suffix : null,
       snapshot_at: snapshotAt
     };
+    database.exec('COMMIT');
+    readTransaction = false;
     return res.json(payload);
   } catch (error) {
     if (!error.statusCode || error.statusCode >= 500) {
@@ -1513,7 +1666,14 @@ app.get('/api/live-map', (req, res) => {
       error.statusCode ? { error: error.message } : buildLiveMapPayload([])
     );
   } finally {
-    if (database) database.close();
+    if (database) {
+      if (readTransaction) {
+        try {
+          database.exec('ROLLBACK');
+        } catch (_) {}
+      }
+      database.close();
+    }
   }
 });
 
@@ -1524,6 +1684,7 @@ app.get('/api/live-map', (req, res) => {
 app.get('/api/live-summary', (req, res) => {
   const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
   let database;
+  let readTransaction = false;
   res.setHeader('Cache-Control', 'no-store');
   try {
     if (!require('fs').existsSync(databasePath)) {
@@ -1531,15 +1692,27 @@ app.get('/api/live-summary', (req, res) => {
     }
     const { DatabaseSync } = require('node:sqlite');
     database = new DatabaseSync(databasePath, { readOnly: true });
+    database.exec('BEGIN');
+    readTransaction = true;
     const scope = requestGeographyScope(req, database);
-    return res.json(cachedLiveSummary(database, databasePath, scope));
+    const payload = cachedLiveSummary(database, databasePath, scope);
+    database.exec('COMMIT');
+    readTransaction = false;
+    return res.json(payload);
   } catch (error) {
     console.error('Live summary error:', error.message);
     return res.status(error.statusCode || 503).json({
       error: error.statusCode ? error.message : 'Live summary is temporarily unavailable'
     });
   } finally {
-    if (database) database.close();
+    if (database) {
+      if (readTransaction) {
+        try {
+          database.exec('ROLLBACK');
+        } catch (_) {}
+      }
+      database.close();
+    }
   }
 });
 
@@ -1706,6 +1879,7 @@ app.get('/api/live-dashboard', (req, res) => {
     });
   }
   let database;
+  let readTransaction = false;
   try {
     if (!require('fs').existsSync(databasePath)) {
       return res.json({
@@ -1717,6 +1891,9 @@ app.get('/api/live-dashboard', (req, res) => {
     }
     const { DatabaseSync } = require('node:sqlite');
     database = new DatabaseSync(databasePath, { readOnly: true });
+    registerEffectiveRecordSqlFunctions(database);
+    database.exec('BEGIN');
+    readTransaction = true;
     const snapshotAt = requestedSnapshotAt || archiveSnapshotAt();
     const scope = requestGeographyScope(req, database);
     const hasDetails = database.prepare(`
@@ -1764,6 +1941,12 @@ app.get('/api/live-dashboard', (req, res) => {
     const followUpJoin = hasFollowUps
       ? 'LEFT JOIN request_followup_queue AS followup ON followup.srnumber = live.srnumber'
       : '';
+    const exactQuery = Boolean(filters.query && /^311-\d{8}$/i.test(filters.query));
+    const needsEffectiveFilters = Boolean(filters.status || (filters.query && !exactQuery));
+    const filterDetailJoin = hasDetails && (submittedSince != null || needsEffectiveFilters)
+      ? detailJoin
+      : '';
+    const filterFollowUpJoin = hasFollowUps && needsEffectiveFilters ? followUpJoin : '';
     const currentClosureColumns = hasFollowUps && hasClosureSnapshots
       ? `current_final.date_closed AS current_cycle_date_closed,
          current_final.final_state AS current_cycle_final_state,
@@ -1785,13 +1968,18 @@ app.get('/api/live-dashboard', (req, res) => {
     const liveSource = scopedLiveRequestSource('live', scope, bidScopeAlias);
     const livePredicates = [
       ...scopePredicates('live', scope, bidScopeAlias),
-      ...recordFilterPredicates('live', filters),
+      ...recordFilterPredicates('live', filters, {
+        detailsAlias: hasDetails ? 'details' : null,
+        followupAlias: hasFollowUps ? 'followup' : null
+      }),
       'live.first_seen_at <= @snapshot_at'
     ];
     if (submittedSince != null) {
       livePredicates.push(
-        "live.submitted_at GLOB '????-??-??T??:??:??.???Z'",
-        'live.submitted_at >= @submitted_since'
+        `${effectiveSubmittedJulianDaySql(
+          'live',
+          hasDetails ? 'details' : null
+        )} >= julianday(@submitted_since)`
       );
     }
     const scopedParameters = scopeParameters(scope);
@@ -1848,9 +2036,10 @@ app.get('/api/live-dashboard', (req, res) => {
       record.business_improvement_district_ids = businessImprovementDistrictIds(
         record.business_improvement_district_ids
       );
-      record.submitted_at = hasText(record.submitted_at)
-        ? record.submitted_at
-        : record.date_reported;
+      record.submitted_at = validTimestampValue(
+        record.submitted_at,
+        record.date_reported
+      );
       // Detail rows intentionally retain an older closure date for history.
       // Do not present that date as the current cycle after a reopen, or while
       // a newly observed closure is still being verified.
@@ -1867,6 +2056,8 @@ app.get('/api/live-dashboard', (req, res) => {
       ? Number(database.prepare(`
           SELECT COUNT(*) AS count
           FROM ${liveSource}
+          ${filterDetailJoin}
+          ${filterFollowUpJoin}
           ${sqlWhere(livePredicates)}
         `).get({
           snapshot_at: snapshotAt,
@@ -1886,10 +2077,13 @@ app.get('/api/live-dashboard', (req, res) => {
       ...(matchingTotal == null ? {} : { matching_total: matchingTotal })
     };
     if (compact) {
+      const stats = compactLiveDashboardStats(database);
+      database.exec('COMMIT');
+      readTransaction = false;
       return res.json({
         records,
         page,
-        stats: compactLiveDashboardStats(database)
+        stats
       });
     }
     const capturedBidAlias = 'captured_scope_bid';
@@ -1903,15 +2097,36 @@ app.get('/api/live-dashboard', (req, res) => {
       ? `LEFT JOIN portal_requests AS ${capturedDetailsAlias}
            ON ${capturedDetailsAlias}.srnumber=captured.srnumber`
       : '';
+    const capturedFollowUpAlias = hasFollowUps ? 'captured_followup' : null;
+    const capturedFollowUpJoin = hasFollowUps
+      ? `LEFT JOIN request_followup_queue AS ${capturedFollowUpAlias}
+           ON ${capturedFollowUpAlias}.srnumber=captured.srnumber`
+      : '';
+    const capturedFilterDetailJoin = hasDetails
+        && (submittedSince != null || needsEffectiveFilters)
+      ? capturedDetailsJoin
+      : '';
+    const capturedFilterFollowUpJoin = hasFollowUps && needsEffectiveFilters
+      ? capturedFollowUpJoin
+      : '';
+    const capturedFilterJoins = `${capturedFilterDetailJoin}
+      ${capturedFilterFollowUpJoin}`;
+    const capturedClosureJoins = `${capturedFilterDetailJoin}
+      ${capturedFilterFollowUpJoin || capturedFollowUpJoin}`;
     const capturedPredicates = [
       ...scopePredicates('captured', scope, capturedBidAlias),
-      ...recordFilterPredicates('captured', filters),
+      ...recordFilterPredicates('captured', filters, {
+        detailsAlias: capturedDetailsAlias,
+        followupAlias: capturedFollowUpAlias
+      }),
       'captured.first_seen_at <= @snapshot_at'
     ];
     if (submittedSince != null) {
       capturedPredicates.push(
-        "captured.submitted_at GLOB '????-??-??T??:??:??.???Z'",
-        'captured.submitted_at >= @submitted_since'
+        `${effectiveSubmittedJulianDaySql(
+          'captured',
+          capturedDetailsAlias
+        )} >= julianday(@submitted_since)`
       );
     }
     if (requestedSrnumber) capturedPredicates.push('captured.srnumber=@srnumber');
@@ -1925,31 +2140,29 @@ app.get('/api/live-dashboard', (req, res) => {
     };
     const detailStats = hasDetails
       ? `(SELECT COUNT(*) FROM ${capturedSource}
-          ${capturedDetailsJoin}
+          ${capturedFilterJoins}
           JOIN portal_requests AS stored ON stored.srnumber=captured.srnumber
           ${capturedWhere}) AS details_loaded,
          (SELECT COUNT(*) FROM ${capturedSource}
-          ${capturedDetailsJoin}
+          ${capturedFilterJoins}
           LEFT JOIN portal_requests AS stored ON stored.srnumber = captured.srnumber
           ${sqlWhere([...capturedPredicates, 'stored.srnumber IS NULL'])}) AS details_pending`
       : `0 AS details_loaded,
          (SELECT COUNT(*) FROM ${capturedSource}
+          ${capturedFilterJoins}
           ${capturedWhere}) AS details_pending`;
     const closureStats = hasFollowUps
       ? `(SELECT COUNT(*) FROM ${capturedSource}
-          ${capturedDetailsJoin}
-          JOIN request_followup_queue AS followup ON followup.srnumber=captured.srnumber
-          ${sqlWhere([...capturedPredicates, "followup.state='closing'"])})
+          ${capturedClosureJoins}
+          ${sqlWhere([...capturedPredicates, `${capturedFollowUpAlias}.state='closing'`])})
             AS closure_refreshes_pending,
          (SELECT COUNT(*) FROM ${capturedSource}
-          ${capturedDetailsJoin}
-          JOIN request_followup_queue AS followup ON followup.srnumber=captured.srnumber
-          ${sqlWhere([...capturedPredicates, "followup.state='open'"])})
+          ${capturedClosureJoins}
+          ${sqlWhere([...capturedPredicates, `${capturedFollowUpAlias}.state='open'`])})
             AS open_followups_scheduled,
          (SELECT COUNT(*) FROM ${capturedSource}
-          ${capturedDetailsJoin}
-          JOIN request_followup_queue AS followup ON followup.srnumber=captured.srnumber
-          ${sqlWhere([...capturedPredicates, "followup.state='closed'"])})
+          ${capturedClosureJoins}
+          ${sqlWhere([...capturedPredicates, `${capturedFollowUpAlias}.state='closed'`])})
             AS closures_finalized`
       : `0 AS closure_refreshes_pending,
          0 AS open_followups_scheduled,
@@ -1957,10 +2170,10 @@ app.get('/api/live-dashboard', (req, res) => {
     const totalsStatement = database.prepare(`
       SELECT
         (SELECT COUNT(*) FROM ${capturedSource}
-          ${capturedDetailsJoin}
+          ${capturedFilterJoins}
           ${capturedWhere}) AS total,
         (SELECT COUNT(*) FROM ${capturedSource}
-          ${capturedDetailsJoin}
+          ${capturedFilterJoins}
           ${sqlWhere([
             ...capturedPredicates,
             '(captured.latitude IS NULL OR captured.longitude IS NULL)'
@@ -2037,11 +2250,20 @@ app.get('/api/live-dashboard', (req, res) => {
     } else {
       totals.catchup = null;
     }
+    database.exec('COMMIT');
+    readTransaction = false;
     res.json({ records, page, stats: totals });
   } catch (error) {
     res.status(error.statusCode || 503).json({ error: error.message, records: [], stats: {} });
   } finally {
-    if (database) database.close();
+    if (database) {
+      if (readTransaction) {
+        try {
+          database.exec('ROLLBACK');
+        } catch (_) {}
+      }
+      database.close();
+    }
   }
 });
 

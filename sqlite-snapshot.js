@@ -9,7 +9,8 @@ const {
   inspectMigrationState,
   openDatabase,
   sha256File,
-  tableManifest
+  tableManifest,
+  validateBackupCopyStrategy
 } = require('./sqlite-finalization');
 
 const REQUIRED_ARCHIVE_COLUMNS = Object.freeze({
@@ -623,6 +624,11 @@ async function verifySnapshot({ databasePath, manifestPath }) {
   }
   if (manifest.format !== 'nyc-311-sqlite-backup-manifest-v1') {
     throw new Error(`Unsupported snapshot manifest format: ${manifest.format || 'missing'}`);
+  }
+  try {
+    validateBackupCopyStrategy(manifest.copy_strategy, { allowMissing: true });
+  } catch (error) {
+    throw new Error(`Unsupported snapshot copy strategy: ${error.message}`);
   }
 
   const stat = fs.statSync(resolvedDatabase);

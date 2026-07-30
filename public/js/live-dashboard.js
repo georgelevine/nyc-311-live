@@ -32,26 +32,50 @@
   geographyPane.style.zIndex = '350';
   geographyPane.style.pointerEvents = 'none';
   const geographyRenderer = L.svg({ pane: GEOGRAPHY_PANE });
-  const markerLayer = L.markerClusterGroup({
-    chunkedLoading: true,
-    chunkInterval: 100,
-    chunkDelay: 25,
-    removeOutsideVisibleBounds: true,
-    maxClusterRadius: 42,
-    showCoverageOnHover: false,
-    iconCreateFunction: cluster => {
-      const markers = cluster.getAllChildMarkers();
-      const count = markers.length;
-      const kinds = new Set(markers.map(marker => marker.options.requestKind));
-      const kind = kinds.size === 1 && kinds.has('closed') ? 'closed' : 'active';
-      const size = count < 10 ? 'small' : count < 100 ? 'medium' : 'large';
-      return L.divIcon({
-        html: `<div><span>${count}</span></div>`,
-        className: `marker-cluster marker-cluster-${size} ${kind}`,
-        iconSize: L.point(40, 40)
-      });
-    }
-  });
+  let markerLayerBuildGeneration = 0;
+  let markerLayerBuilding = false;
+  let markerLayerDeferredRender = false;
+  function createMarkerClusterLayer() {
+    const generation = ++markerLayerBuildGeneration;
+    return L.markerClusterGroup({
+      chunkedLoading: true,
+      chunkInterval: 100,
+      chunkDelay: 25,
+      removeOutsideVisibleBounds: true,
+      maxClusterRadius: 42,
+      showCoverageOnHover: false,
+      chunkProgress: (processed, total) => {
+        if (generation !== markerLayerBuildGeneration) return;
+        markerLayerBuilding = processed < total;
+        if (!markerLayerBuilding) {
+          if (markerLayerDeferredRender) {
+            renderMap();
+          }
+          updateMapCountText();
+          if (!markerLayerDeferredRender && mapArchiveLoaded
+              && !mapRefreshInFlight && mapRetryTimer === null
+              && !mapNeedsRefresh) {
+            updateMapRenderingStatus();
+          }
+        }
+      },
+      iconCreateFunction: cluster => {
+        const markers = cluster.getAllChildMarkers();
+        const count = markers.length;
+        const kinds = new Set(markers.map(marker => marker.options.requestKind));
+        const kind = kinds.size === 1 && kinds.has('closed')
+          ? 'closed'
+          : kinds.size === 1 && kinds.has('pending') ? 'pending' : 'active';
+        const size = count < 10 ? 'small' : count < 100 ? 'medium' : 'large';
+        return L.divIcon({
+          html: `<div><span>${count}</span></div>`,
+          className: `marker-cluster marker-cluster-${size} ${kind}`,
+          iconSize: L.point(40, 40)
+        });
+      }
+    });
+  }
+  let markerLayer = createMarkerClusterLayer();
   map.addLayer(markerLayer);
 
   const feed = document.getElementById('request-feed');
@@ -90,12 +114,15 @@
   } = window.NYC311StatusUpdateModel;
   const {
     activeFilterLabel,
+    boundaryCatalogIsUsable,
     exactSrnumberQuery: normalizeExactSrnumberQuery,
+    feedHeadMembershipDelta,
     feedCardModel,
     isClosed,
     recordCoordinates,
     recordDetailsPending,
-    recordHasMapPin
+    recordHasMapPin,
+    validatePaginatedRecords
   } = window.NYC311LiveDashboardModel;
   const compactLayout = window.matchMedia('(max-width: 900px)');
   // The map is hidden behind a tab on phones. Avoid making its external tile
@@ -237,8 +264,12 @@
   const MAP_REFRESH_MS = 5 * 60_000;
   const MAP_REQUEST_TIMEOUT_MS = 15_000;
   const MAP_RETRY_MS = 3_000;
+  const MAP_MAX_FAST_RETRIES = 3;
   const MAP_PAGE_YIELD_MS = 100;
   const DASHBOARD_REQUEST_TIMEOUT_MS = 8_000;
+  const GEOGRAPHY_CATALOG_TIMEOUT_MS = 5_000;
+  const GEOGRAPHY_CATALOG_RETRY_MAX_MS = 60_000;
+  const GEOGRAPHY_CATALOG_REFRESH_MS = 5 * 60_000;
   const EMAIL_UPDATES_REFRESH_MS = 15_000;
   const EMAIL_METRICS_REFRESH_MS = 60_000;
   const EMAIL_METRICS_REFRESHING_RETRY_MS = 2_500;
@@ -263,11 +294,14 @@
     totals_available: false
   };
   let mapShownCount = 0;
+  let mapPendingShownCount = 0;
   let mapRenderFrame = null;
   let refreshInFlight = false;
   let mapRefreshInFlight = false;
   let mapAbortController = null;
   let mapRetryTimer = null;
+  let mapRetryAttempt = 0;
+  let mapNeedsRefresh = true;
   let mapArchiveLoaded = false;
   let mapRequestSequence = 0;
   let dashboardRequestSequence = 0;
@@ -309,6 +343,9 @@
   let feedSnapshotAt = null;
   let feedMatchingTotal = null;
   let feedLoadingMore = false;
+  let feedPaginationSequence = 0;
+  let feedLoadMoreAbortController = null;
+  let feedHeadRestartRequired = false;
   let feedQueryKey = '';
   let filterRefreshTimer = null;
   const expandedResponseTables = new Set();
@@ -317,14 +354,22 @@
   let archiveSearchSequence = 0;
   let archiveSearchTimer = null;
   let bidById = new Map();
+  let precinctBoundaryVersion = null;
+  let bidBoundaryVersion = null;
+  let precinctCatalogRetryTimer = null;
+  let bidCatalogRetryTimer = null;
+  let precinctCatalogLoading = false;
+  let bidCatalogLoading = false;
   const boundaryStates = {
     precinct: {
       requestedValue: '', layer: null, label: '', loading: false,
-      error: '', attempt: 0, retryTimer: null, sequence: 0, controller: null
+      requestedVersion: null, error: '', attempt: 0,
+      retryTimer: null, sequence: 0, controller: null
     },
     bid: {
       requestedValue: '', layer: null, label: '', loading: false,
-      error: '', attempt: 0, retryTimer: null, sequence: 0, controller: null
+      requestedVersion: null, error: '', attempt: 0,
+      retryTimer: null, sequence: 0, controller: null
     }
   };
   const boundaryStyles = {
@@ -353,23 +398,29 @@
     mapRetryTimer = null;
   }
 
-  function invalidateMapLoad(message = 'Map selection changed · loading when visible…') {
+  function invalidateMapLoad(
+    message = 'Map selection changed · loading when visible…',
+    { preserveArchive = false } = {}
+  ) {
     if (mapAbortController) mapAbortController.abort();
     mapAbortController = null;
     clearMapRetry();
     mapRequestSequence += 1;
     mapRefreshInFlight = false;
     lastMapRefreshStartedAt = 0;
-    mapArchiveLoaded = false;
+    mapNeedsRefresh = true;
+    if (!preserveArchive) mapArchiveLoaded = false;
     setMapLoadState('loading', message);
   }
 
   function scheduleMapRetry() {
-    if (mapRetryTimer !== null) return;
+    if (mapRetryTimer !== null || mapRetryAttempt >= MAP_MAX_FAST_RETRIES) return false;
+    mapRetryAttempt += 1;
     mapRetryTimer = window.setTimeout(() => {
       mapRetryTimer = null;
       refreshMap(mapStats, true);
     }, MAP_RETRY_MS);
+    return true;
   }
 
   const esc = value => String(value || '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]);
@@ -559,6 +610,10 @@
   }
 
   function resetFeedPagination({ clearRecords = true } = {}) {
+    feedPaginationSequence += 1;
+    if (feedLoadMoreAbortController) feedLoadMoreAbortController.abort();
+    feedLoadMoreAbortController = null;
+    feedHeadRestartRequired = false;
     feedHasMore = false;
     feedNextBeforeSuffix = null;
     feedSnapshotAt = null;
@@ -575,6 +630,20 @@
     feedCardSignatureByNumber.clear();
     feed.replaceChildren();
     updateFeedCoverage();
+  }
+
+  function requestFeedHeadRestart() {
+    feedPaginationSequence += 1;
+    if (feedLoadMoreAbortController) feedLoadMoreAbortController.abort();
+    feedLoadMoreAbortController = null;
+    feedLoadingMore = false;
+    feedHasMore = false;
+    feedNextBeforeSuffix = null;
+    feedSnapshotAt = null;
+    feedMatchingTotal = null;
+    feedHeadRestartRequired = true;
+    renderFeedPagination();
+    void refreshNowAndReschedule({ force: true });
   }
 
   function renderFeedPagination() {
@@ -665,10 +734,10 @@
   function matchesFilters(record) {
     const query = search.value.trim().toLowerCase();
     const exact = exactSrnumberQuery();
-    const status = statusFilter.value;
+    const status = statusFilter.value.trim().toLowerCase();
     const precinct = precinctFilter.value;
     const bidId = bidFilter.value;
-    if (status && record.status !== status) return false;
+    if (status && String(record.status || '').trim().toLowerCase() !== status) return false;
     if (precinct && Number(record.police_precinct) !== Number(precinct)) return false;
     if (bidId && !(Array.isArray(record.business_improvement_district_ids)
         && record.business_improvement_district_ids.some(id => Number(id) === Number(bidId)))) {
@@ -860,7 +929,8 @@
   }
 
   function markerClass(record) {
-    return isClosed(record.status) ? 'closed' : '';
+    if (isClosed(record.status)) return 'closed';
+    return recordDetailsPending(record) ? 'pending' : '';
   }
 
   function markerIcon(record) {
@@ -887,13 +957,14 @@
       coordinates.lat,
       coordinates.lng,
       record.status,
+      markerClass(record),
       record.problem_details || record.problem || record.srnumber
     ]);
   }
 
   function updateMapCountText() {
     if (!mapStats.totals_available) {
-      const label = `${mapShownCount.toLocaleString()} shown · ${mapRecords.length.toLocaleString()} pins loaded`;
+      const label = `${mapShownCount.toLocaleString()} matching · ${mapRecords.length.toLocaleString()} pins loaded`;
       if (mapCounts.textContent !== label) mapCounts.textContent = label;
       return;
     }
@@ -908,12 +979,28 @@
     const loadedLabel = mapArchiveLoaded && loaded >= mapped
       ? `all ${mapped.toLocaleString()} map pins loaded`
       : `${loaded.toLocaleString()} of ${mapped.toLocaleString()} map pins loaded`;
-    const awaitingDetails = Math.max(0, loaded - mapShownCount);
-    const awaitingDetailsLabel = awaitingDetails
-      ? ` · ${awaitingDetails.toLocaleString()} awaiting submitted details`
+    const pendingDetailsLabel = mapPendingShownCount
+      ? ` · ${mapPendingShownCount.toLocaleString()} showing while submitted details load`
       : '';
-    const label = `${mapShownCount.toLocaleString()} shown · ${loadedLabel}${awaitingDetailsLabel} · ${unmapped.toLocaleString()} without coordinates`;
+    const label = `${mapShownCount.toLocaleString()} matching · ${loadedLabel}${pendingDetailsLabel} · ${unmapped.toLocaleString()} without coordinates`;
     if (mapCounts.textContent !== label) mapCounts.textContent = label;
+  }
+
+  function updateMapRenderingStatus() {
+    const count = mapStats.totals_available
+      ? Number(mapStats.mapped_total || 0)
+      : mapRecords.length;
+    if (mapRenderFrame !== null || markerLayerBuilding || markerLayerDeferredRender) {
+      setMapLoadState(
+        'loading',
+        `Data complete · drawing ${count.toLocaleString()} map ${count === 1 ? 'pin' : 'pins'}…`
+      );
+      return;
+    }
+    setMapLoadState(
+      'ready',
+      `Complete · ${count.toLocaleString()} map ${count === 1 ? 'pin' : 'pins'} loaded`
+    );
   }
 
   function mapScopeLabel() {
@@ -954,11 +1041,26 @@
 
   function setMapScope(nextScope) {
     const normalizedScope = ['all', '24h', '7d'].includes(nextScope) ? nextScope : 'all';
-    if (normalizedScope !== mapScope) mapArchiveLoaded = false;
+    if (normalizedScope !== mapScope) {
+      mapArchiveLoaded = false;
+      mapRetryAttempt = 0;
+      mapNeedsRefresh = true;
+    }
     mapScope = normalizedScope;
     mapScopeControl.querySelectorAll('button[data-map-scope]').forEach(scopeButton => {
       scopeButton.setAttribute('aria-pressed', String(scopeButton.dataset.mapScope === mapScope));
     });
+  }
+
+  function replaceMarkerClusterLayer() {
+    const previous = markerLayer;
+    markerLayer = createMarkerClusterLayer();
+    markerLayerBuilding = false;
+    markerLayerDeferredRender = false;
+    markerByNumber = new Map();
+    markerSignatureByNumber = new Map();
+    if (previous && map.hasLayer(previous)) map.removeLayer(previous);
+    map.addLayer(markerLayer);
   }
 
   function renderMapNow() {
@@ -975,14 +1077,27 @@
           ? archiveSearchRecord
           : mapRecord);
       const coordinates = recordCoordinates(record);
-      if (!coordinates || recordDetailsPending(record)
-          || !matchesMapScope(record, now)) continue;
+      if (!coordinates || !matchesMapScope(record, now) || !matchesFilters(record)) continue;
       desired.set(record.srnumber, {
         record,
         coordinates,
         signature: markerSignature(record, coordinates)
       });
     }
+
+    const desiredChanged = markerByNumber.size !== desired.size
+      || [...desired].some(([number, next]) => (
+        !markerByNumber.has(number)
+        || markerSignatureByNumber.get(number) !== next.signature
+      ));
+    // Leaflet.markercluster cannot cancel its own queued chunk callbacks.
+    // Defer a changed generation until the current chunk finishes instead of
+    // repeatedly rebuilding a large all-date map under live arrivals.
+    if (markerLayerBuilding && desiredChanged) {
+      markerLayerDeferredRender = true;
+      return;
+    }
+    markerLayerDeferredRender = false;
 
     const removals = [];
     for (const [number, marker] of markerByNumber) {
@@ -1002,11 +1117,20 @@
       markerSignatureByNumber.set(number, next.signature);
       additions.push(marker);
     }
-    if (additions.length) markerLayer.addLayers(additions);
+    if (additions.length) {
+      markerLayerBuilding = true;
+      markerLayer.addLayers(additions);
+    }
 
     mapShownCount = desired.size;
+    mapPendingShownCount = [...desired.values()]
+      .filter(item => recordDetailsPending(item.record)).length;
     updateMapCountText();
     updateMapDateRange(desired);
+    if (mapArchiveLoaded && !mapRefreshInFlight && mapRetryTimer === null
+        && !mapNeedsRefresh) {
+      updateMapRenderingStatus();
+    }
   }
 
   function renderMap() {
@@ -1720,7 +1844,7 @@
       cancelPendingBoundaryFit();
       map.flyTo([coordinates.lat, coordinates.lng], Math.max(map.getZoom(), 15), { duration: .6 });
       const marker = markerByNumber.get(number);
-      if (marker) markerLayer.zoomToShowLayer(marker);
+      if (marker && marker.__parent) markerLayer.zoomToShowLayer(marker);
     }
   }
 
@@ -1841,8 +1965,16 @@
 
   function scopedUrl(pathname, parameters = {}) {
     const params = new URLSearchParams(parameters);
-    if (precinctFilter.value) params.set('police_precinct', precinctFilter.value);
-    if (bidFilter.value) params.set('bid_id', bidFilter.value);
+    if (precinctFilter.value) {
+      params.set('police_precinct', precinctFilter.value);
+      if (precinctBoundaryVersion) {
+        params.set('precinct_boundary_version', precinctBoundaryVersion);
+      }
+    }
+    if (bidFilter.value) {
+      params.set('bid_id', bidFilter.value);
+      if (bidBoundaryVersion) params.set('bid_boundary_version', bidBoundaryVersion);
+    }
     const query = params.toString();
     return query ? `${pathname}?${query}` : pathname;
   }
@@ -1894,7 +2026,10 @@
         ensureBaseTiles();
         map.invalidateSize({ pan: false, debounceMoveend: true });
         renderMap();
-        if (!mapArchiveLoaded && !mapRefreshInFlight) refreshMap(mapStats);
+        if ((mapNeedsRefresh || !mapArchiveLoaded) && !mapRefreshInFlight
+            && mapRetryTimer === null) {
+          refreshMap(mapStats);
+        }
         if (attemptBoundaryFit) fitSelectedBoundaryUnion(fitRevision);
       });
     });
@@ -1950,7 +2085,15 @@
     if (kind === 'precinct') {
       return {
         value: precinctFilter.value,
-        url: value => `/api/police-precincts/${encodeURIComponent(value)}/geometry`,
+        version: precinctBoundaryVersion,
+        url: value => {
+          const params = new URLSearchParams();
+          if (precinctBoundaryVersion) {
+            params.set('boundary_version', precinctBoundaryVersion);
+          }
+          const query = params.toString();
+          return `/api/police-precincts/${encodeURIComponent(value)}/geometry${query ? `?${query}` : ''}`;
+        },
         serviceLabel: 'Police precinct boundary service',
         featureLabel: feature => String(
           feature && feature.properties && feature.properties.label
@@ -1960,7 +2103,13 @@
     }
     return {
       value: bidFilter.value,
-      url: value => `/api/business-improvement-districts/${encodeURIComponent(value)}/geometry`,
+      version: bidBoundaryVersion,
+      url: value => {
+        const params = new URLSearchParams();
+        if (bidBoundaryVersion) params.set('boundary_version', bidBoundaryVersion);
+        const query = params.toString();
+        return `/api/business-improvement-districts/${encodeURIComponent(value)}/geometry${query ? `?${query}` : ''}`;
+      },
       serviceLabel: 'Business improvement district boundary service',
       featureLabel: feature => {
         const selected = bidById.get(String(bidFilter.value));
@@ -1980,7 +2129,10 @@
     const state = boundaryStates[kind];
     const config = boundaryConfiguration(kind);
     const value = String(config.value || '');
-    if (!force && state.requestedValue === value && (state.layer || state.loading || !value)) return;
+    const version = config.version || null;
+    if (!force && state.requestedValue === value
+        && state.requestedVersion === version
+        && (state.layer || state.loading || !value)) return;
 
     state.sequence += 1;
     const sequence = state.sequence;
@@ -1994,6 +2146,7 @@
     state.error = '';
     if (!force) state.attempt = 0;
     state.requestedValue = value;
+    state.requestedVersion = version;
     removeBoundaryLayer(state);
     state.label = value ? config.featureLabel(null) : '';
     updateBoundaryKey();
@@ -2012,7 +2165,8 @@
       const feature = await fetchJson(config.url(value), config.serviceLabel, {
         signal: controller.signal
       });
-      if (sequence !== state.sequence || state.requestedValue !== value) return;
+      if (sequence !== state.sequence || state.requestedValue !== value
+          || state.requestedVersion !== version) return;
       if (!validBoundaryFeature(feature)) throw new Error(`${config.serviceLabel} returned invalid GeoJSON`);
       state.layer = L.geoJSON(feature, {
         pane: GEOGRAPHY_PANE,
@@ -2025,12 +2179,17 @@
       state.error = '';
       updateBoundaryKey();
     } catch (error) {
-      if (sequence === state.sequence && state.requestedValue === value) {
+      if (sequence === state.sequence && state.requestedValue === value
+          && state.requestedVersion === version) {
         state.error = error.name === 'AbortError'
           ? 'Boundary request timed out'
           : error.message;
         console.warn(error);
-        if (state.attempt < 3) {
+        if (error.status === 409) {
+          state.error = 'Boundary release changed · refreshing the catalog';
+          if (kind === 'precinct') void loadPolicePrecincts();
+          else void loadBusinessImprovementDistricts();
+        } else if (state.attempt < 3) {
           state.retryTimer = window.setTimeout(() => {
             state.retryTimer = null;
             loadSelectedBoundary(kind, { force: true });
@@ -2131,27 +2290,100 @@
     }, 150);
   }
 
-  async function loadPolicePrecincts() {
+  function geographyCatalogRetryDelay(attempt) {
+    return Math.min(
+      GEOGRAPHY_CATALOG_RETRY_MAX_MS,
+      1_000 * (2 ** Math.min(attempt, 6))
+    );
+  }
+
+  async function loadPolicePrecincts({ attempt = 0 } = {}) {
+    if (precinctCatalogLoading) return;
+    precinctCatalogLoading = true;
+    if (precinctCatalogRetryTimer !== null) {
+      window.clearTimeout(precinctCatalogRetryTimer);
+      precinctCatalogRetryTimer = null;
+    }
+    const selected = precinctFilter.value;
+    const previousVersion = precinctBoundaryVersion;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(
+      () => controller.abort(),
+      GEOGRAPHY_CATALOG_TIMEOUT_MS
+    );
     try {
-      const payload = await fetchJson('/api/police-precincts', 'Police precinct service');
+      const payload = await fetchJson(
+        '/api/police-precincts',
+        'Police precinct service',
+        { signal: controller.signal }
+      );
       const precincts = Array.isArray(payload.precincts) ? payload.precincts : [];
+      const version = typeof payload.boundary_version === 'string'
+        && payload.boundary_version.trim()
+        ? payload.boundary_version.trim()
+        : null;
+      if (!boundaryCatalogIsUsable(precincts, version)) {
+        throw new Error('Police precinct service returned no active boundary catalog');
+      }
+      precinctBoundaryVersion = version;
       precinctFilter.innerHTML = '<option value="">All police precincts</option>'
         + precincts.map(precinct => `<option value="${Number(precinct.precinct_number)}">${esc(precinct.label || precinctLabel(precinct.precinct_number))}</option>`).join('');
       precinctFilter.disabled = precincts.length === 0;
+      if (selected && precincts.some(item => String(item.precinct_number) === selected)) {
+        precinctFilter.value = selected;
+      }
+      const selectionLost = Boolean(selected && precinctFilter.value !== selected);
+      const releaseChanged = Boolean(
+        selected && previousVersion && version && previousVersion !== version
+      );
+      if (selectionLost || releaseChanged) handleGeographyFilterChange();
     } catch (error) {
-      precinctFilter.innerHTML = '<option value="">Precinct filter unavailable</option>';
-      precinctFilter.disabled = true;
+      if (!precinctBoundaryVersion) {
+        precinctFilter.innerHTML = '<option value="">Precinct filter unavailable · retrying</option>';
+        precinctFilter.disabled = true;
+      }
+      precinctCatalogRetryTimer = window.setTimeout(() => {
+        precinctCatalogRetryTimer = null;
+        loadPolicePrecincts({ attempt: attempt + 1 });
+      }, geographyCatalogRetryDelay(attempt));
       console.warn(error);
+    } finally {
+      window.clearTimeout(timeout);
+      precinctCatalogLoading = false;
     }
   }
 
-  async function loadBusinessImprovementDistricts() {
+  async function loadBusinessImprovementDistricts({ attempt = 0 } = {}) {
+    if (bidCatalogLoading) return;
+    bidCatalogLoading = true;
+    if (bidCatalogRetryTimer !== null) {
+      window.clearTimeout(bidCatalogRetryTimer);
+      bidCatalogRetryTimer = null;
+    }
+    const selected = bidFilter.value;
+    const previousVersion = bidBoundaryVersion;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(
+      () => controller.abort(),
+      GEOGRAPHY_CATALOG_TIMEOUT_MS
+    );
     try {
       const payload = await fetchJson(
         '/api/business-improvement-districts',
-        'Business improvement district service'
+        'Business improvement district service',
+        { signal: controller.signal }
       );
       const districts = Array.isArray(payload.districts) ? payload.districts : [];
+      const version = typeof payload.boundary_version === 'string'
+        && payload.boundary_version.trim()
+        ? payload.boundary_version.trim()
+        : null;
+      if (!boundaryCatalogIsUsable(districts, version)) {
+        throw new Error(
+          'Business improvement district service returned no active boundary catalog'
+        );
+      }
+      bidBoundaryVersion = version;
       bidById = new Map(districts.map(district => [String(district.bid_id), district]));
       bidFilter.innerHTML = '<option value="">All business improvement districts</option>'
         + districts.map(district => {
@@ -2159,15 +2391,30 @@
           return `<option value="${Number(district.bid_id)}">${esc(district.name)}${esc(suffix)}</option>`;
         }).join('');
       bidFilter.disabled = districts.length === 0;
+      if (selected && bidById.has(selected)) bidFilter.value = selected;
+      const selectionLost = Boolean(selected && bidFilter.value !== selected);
+      const releaseChanged = Boolean(
+        selected && previousVersion && version && previousVersion !== version
+      );
+      if (selectionLost || releaseChanged) handleGeographyFilterChange();
       if (dashboardPayloadLoaded) {
         renderFeed();
         renderMap();
         if (selectedNumber) renderDetail(findRecord(selectedNumber));
       }
     } catch (error) {
-      bidFilter.innerHTML = '<option value="">BID filter unavailable</option>';
-      bidFilter.disabled = true;
+      if (!bidBoundaryVersion) {
+        bidFilter.innerHTML = '<option value="">BID filter unavailable · retrying</option>';
+        bidFilter.disabled = true;
+      }
+      bidCatalogRetryTimer = window.setTimeout(() => {
+        bidCatalogRetryTimer = null;
+        loadBusinessImprovementDistricts({ attempt: attempt + 1 });
+      }, geographyCatalogRetryDelay(attempt));
       console.warn(error);
+    } finally {
+      window.clearTimeout(timeout);
+      bidCatalogLoading = false;
     }
   }
 
@@ -2194,9 +2441,13 @@
   }
 
   function resetMapDataset() {
+    mapRetryAttempt = 0;
     invalidateMapLoad();
     mapByNumber = new Map();
     mapRecords = [];
+    mapShownCount = 0;
+    mapPendingShownCount = 0;
+    replaceMarkerClusterLayer();
     mapStats = {
       total: 0,
       mapped_total: 0,
@@ -2207,13 +2458,11 @@
     updateMapCountText();
   }
 
-  function updateMapRecords(payload, dashboardStats, { replace = false } = {}) {
+  function replaceMapDataset(payload, dashboardStats) {
     const incoming = Array.isArray(payload) ? payload : payload.records || [];
     const stats = Array.isArray(payload) ? {} : payload.stats || {};
-    if (replace) {
-      mapByNumber = new Map();
-      mapRecords = [];
-    }
+    mapByNumber = new Map();
+    mapRecords = [];
     const mergeResult = mergeMapRecords(incoming);
     const payloadHasTotals = Number.isFinite(Number(stats.total))
       || Number.isFinite(Number(stats.mapped_total));
@@ -2245,7 +2494,11 @@
 
   async function fetchJson(url, label, options = {}) {
     const response = await fetch(url, { cache: 'no-store', ...options });
-    if (!response.ok) throw new Error(`${label} returned ${response.status}`);
+    if (!response.ok) {
+      const error = new Error(`${label} returned ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
     return response.json();
   }
 
@@ -3237,7 +3490,8 @@
     if (total !== null) feedMatchingTotal = total;
     if (pageSnapshot) feedSnapshotAt = pageSnapshot;
     if (preserveDepth) {
-      feedNextBeforeSuffix = oldestLoadedSuffix();
+      if (total !== null) feedHasMore = records.length < total;
+      feedNextBeforeSuffix = feedHasMore ? oldestLoadedSuffix() : null;
       return;
     }
     feedHasMore = pageHasMore;
@@ -3250,6 +3504,11 @@
     if (feedLoadingMore || !feedHasMore || !feedNextBeforeSuffix) return;
     const queryKey = currentFeedQueryKey();
     const beforeSuffix = feedNextBeforeSuffix;
+    const snapshotAt = feedSnapshotAt;
+    const sequence = feedPaginationSequence;
+    const controller = new AbortController();
+    feedLoadMoreAbortController = controller;
+    const timeout = window.setTimeout(() => controller.abort(), DASHBOARD_REQUEST_TIMEOUT_MS);
     feedLoadingMore = true;
     renderFeedPagination();
     try {
@@ -3258,22 +3517,46 @@
         compact: 1,
         paginate: 1,
         before_suffix: beforeSuffix,
-        ...(feedSnapshotAt ? { snapshot_at: feedSnapshotAt } : {}),
+        ...(snapshotAt ? { snapshot_at: snapshotAt } : {}),
         ...activeDataFilters()
-      }), 'Request archive');
-      if (queryKey !== currentFeedQueryKey()) return;
-      updateFeedRecords(Array.isArray(payload.records) ? payload.records : []);
+      }), 'Request archive', { signal: controller.signal });
+      if (sequence !== feedPaginationSequence
+          || queryKey !== currentFeedQueryKey()
+          || snapshotAt !== feedSnapshotAt) return;
+      const pageRecords = Array.isArray(payload.records) ? payload.records : [];
+      const pageState = validatePaginatedRecords(pageRecords, {
+        beforeSuffix,
+        expectedSnapshot: snapshotAt,
+        requireSnapshot: true,
+        page: payloadPage(payload),
+        existingNumbers: feedByNumber,
+        label: 'Request archive'
+      });
+      updateFeedRecords(pageRecords);
       applyFeedPageState(payload);
+      if (!pageState.hasMore && feedMatchingTotal !== null
+          && records.length !== Number(feedMatchingTotal)) {
+        requestFeedHeadRestart();
+        return;
+      }
     } catch (error) {
-      console.warn(error);
+      if (error.name !== 'AbortError') console.warn(error);
     } finally {
-      feedLoadingMore = false;
-      renderFeed();
+      window.clearTimeout(timeout);
+      if (sequence === feedPaginationSequence) {
+        feedLoadingMore = false;
+        if (feedLoadMoreAbortController === controller) feedLoadMoreAbortController = null;
+        renderFeed();
+      }
     }
   }
 
   async function refreshMap(dashboardStats, force = false) {
-    if (force) invalidateMapLoad('Loading map records…');
+    if (force) {
+      invalidateMapLoad('Loading map records…', {
+        preserveArchive: mapArchiveLoaded
+      });
+    }
     if (!mapHasLayout()) return;
     const now = Date.now();
     if (mapRefreshInFlight || now - lastMapRefreshStartedAt < MAP_REFRESH_MS) return;
@@ -3281,15 +3564,70 @@
     lastMapRefreshStartedAt = now;
     const sequence = ++mapRequestSequence;
     const submittedSince = mapSubmittedSince(now);
-    const dataFilters = activeDataFilters();
+    // Status and text can change while a long all-date crawl is in progress.
+    // Traverse the stable geography/date membership without those mutable
+    // predicates, then apply them to the complete client snapshot. A separate
+    // one-row query supplies the matching total/unmapped disclosure.
+    const displayFilters = activeDataFilters();
+    const hasMutableDisplayFilters = Object.keys(displayFilters).length > 0;
     let recordsLoadedForRequest = 0;
+    // Keep only the traversal order, identities, and changed rows while a
+    // replacement snapshot is validated. Reusing unchanged objects from the
+    // last complete map avoids holding a second full archive object graph
+    // during an all-date refresh.
+    const stagedNumbers = [];
+    const stagedNumberSet = new Set();
+    const stagedChanges = new Map();
+    let stagedStats = null;
+    let displayStats = null;
+    let expectedMapped = null;
     setMapLoadState('loading', mapArchiveLoaded ? 'Refreshing map records…' : 'Loading map records…');
     try {
       let beforeSuffix = null;
       let snapshotAt = null;
       let pagesLoaded = 0;
       let hasMore = true;
-      while (hasMore && pagesLoaded < 500) {
+      if (hasMutableDisplayFilters) {
+        const controller = new AbortController();
+        mapAbortController = controller;
+        const timeout = window.setTimeout(() => controller.abort(), MAP_REQUEST_TIMEOUT_MS);
+        let filteredPayload;
+        try {
+          filteredPayload = await fetchJson(scopedUrl('/api/live-map', {
+            limit: 1,
+            paginate: 1,
+            include_totals: 1,
+            ...displayFilters,
+            ...(submittedSince != null ? { submitted_since: submittedSince } : {})
+          }), 'Map filter totals', { signal: controller.signal });
+        } finally {
+          window.clearTimeout(timeout);
+        }
+        if (sequence !== mapRequestSequence) return;
+        const filteredRecords = Array.isArray(filteredPayload && filteredPayload.records)
+          ? filteredPayload.records
+          : [];
+        const filteredPage = filteredPayload && filteredPayload.page;
+        const filteredPageState = validatePaginatedRecords(filteredRecords, {
+          requireSnapshot: true,
+          page: filteredPage,
+          label: 'Map filter totals'
+        });
+        displayStats = filteredPayload && filteredPayload.stats || {};
+        for (const name of ['total', 'mapped_total', 'unmapped_total']) {
+          const value = Number(displayStats[name]);
+          if (!Number.isSafeInteger(value) || value < 0) {
+            throw new Error(`Map filter totals returned an invalid ${name}`);
+          }
+        }
+        if (mapArchiveLoaded) {
+          mapStats = { ...displayStats, totals_available: true };
+          renderMap();
+          updateMapCountText();
+        }
+        snapshotAt = filteredPageState.snapshotAt;
+      }
+      while (hasMore) {
         const controller = new AbortController();
         mapAbortController = controller;
         const timeout = window.setTimeout(() => controller.abort(), MAP_REQUEST_TIMEOUT_MS);
@@ -3300,7 +3638,6 @@
             limit: pageLimit,
             paginate: 1,
             include_totals: pagesLoaded === 0 ? 1 : 0,
-            ...dataFilters,
             ...(submittedSince != null ? { submitted_since: submittedSince } : {}),
             ...(beforeSuffix != null ? { before_suffix: beforeSuffix } : {}),
             ...(snapshotAt != null ? { snapshot_at: snapshotAt } : {})
@@ -3311,25 +3648,40 @@
           window.clearTimeout(timeout);
         }
         if (sequence !== mapRequestSequence) return;
-        if (pagesLoaded === 0) mapArchiveLoaded = false;
-        updateMapRecords(payload, dashboardStats, { replace: pagesLoaded === 0 });
-        recordsLoadedForRequest += Array.isArray(payload && payload.records)
-          ? payload.records.length
-          : 0;
-        pagesLoaded += 1;
-
+        const pageRecords = Array.isArray(payload && payload.records)
+          ? payload.records
+          : [];
+        if (pagesLoaded === 0) {
+          stagedStats = payload && payload.stats || {};
+          expectedMapped = Number(stagedStats.mapped_total);
+          if (!Number.isSafeInteger(expectedMapped) || expectedMapped < 0) {
+            throw new Error('Map service returned an invalid mapped total');
+          }
+        }
         const page = payload && payload.page;
-        const nextSuffix = Number(page && page.next_before_suffix);
-        const returnedSnapshot = page && page.snapshot_at;
-        if (pagesLoaded === 1 && typeof returnedSnapshot === 'string') {
-          snapshotAt = returnedSnapshot;
+        const pageState = validatePaginatedRecords(pageRecords, {
+          beforeSuffix,
+          expectedSnapshot: snapshotAt,
+          requireSnapshot: true,
+          page,
+          existingNumbers: stagedNumberSet,
+          expectedTotal: expectedMapped,
+          loadedCount: stagedNumberSet.size,
+          label: 'Map service'
+        });
+        for (const record of pageRecords) {
+          stagedNumbers.push(record.srnumber);
+          stagedNumberSet.add(record.srnumber);
+          const previous = mapByNumber.get(record.srnumber);
+          if (!previous || recordSignature(previous) !== recordSignature(record)) {
+            stagedChanges.set(record.srnumber, record);
+          }
         }
-        hasMore = Boolean(page && page.has_more);
-        if (hasMore && (!Number.isSafeInteger(nextSuffix) || nextSuffix < 1
-            || (beforeSuffix != null && nextSuffix >= beforeSuffix))) {
-          throw new Error('Map service returned an invalid page cursor');
-        }
-        beforeSuffix = hasMore ? nextSuffix : null;
+        recordsLoadedForRequest += pageRecords.length;
+        pagesLoaded += 1;
+        snapshotAt = pageState.snapshotAt;
+        hasMore = pageState.hasMore;
+        beforeSuffix = hasMore ? pageState.nextSuffix : null;
         if (hasMore) {
           setMapLoadState(
             'loading',
@@ -3341,32 +3693,56 @@
           if (sequence !== mapRequestSequence) return;
         }
       }
-      if (hasMore) throw new Error('Map service returned too many pages');
       if (sequence !== mapRequestSequence) return;
+      if (expectedMapped !== stagedNumberSet.size) {
+        throw new Error(
+          `Map snapshot changed while loading (${stagedNumberSet.size} of ${expectedMapped})`
+        );
+      }
+      // Commit only after every page and the first-page total agree. A later
+      // page failure therefore leaves the previous complete map untouched.
       mapArchiveLoaded = true;
+      replaceMapDataset({
+        records: stagedNumbers.map(number => (
+          stagedChanges.get(number) || mapByNumber.get(number)
+        )),
+        stats: displayStats || stagedStats || {}
+      }, dashboardStats);
       clearMapRetry();
+      mapRetryAttempt = 0;
+      mapNeedsRefresh = false;
       renderMap();
       updateMapCountText();
-      const completeCount = mapStats.totals_available
-        ? Number(mapStats.mapped_total || 0)
-        : recordsLoadedForRequest;
-      setMapLoadState(
-        'ready',
-        `Complete · ${completeCount.toLocaleString()} map ${completeCount === 1 ? 'pin' : 'pins'} loaded`
-      );
+      updateMapRenderingStatus();
     } catch (error) {
       if (sequence === mapRequestSequence) {
-        const message = error.name === 'AbortError'
-          ? 'Map data took too long. Retrying…'
-          : 'Map data is temporarily unavailable. Retrying…';
+        mapNeedsRefresh = true;
+        if (error.status === 409) {
+          void loadPolicePrecincts();
+          void loadBusinessImprovementDistricts();
+        }
+        const retained = mapArchiveLoaded && mapRecords.length
+          ? ' Last complete map remains visible.'
+          : '';
+        const retryScheduled = scheduleMapRetry();
+        const retryLabel = retryScheduled
+          ? ' Retrying…'
+          : ' Fast retries paused; the next scheduled refresh will try again.';
+        const message = (error.status === 409
+          ? 'Geography release changed. Refreshing filters…'
+          : error.name === 'AbortError'
+          ? 'Map data took too long.'
+          : 'Map data is temporarily unavailable.') + retained + retryLabel;
         setMapLoadState('error', message);
-        scheduleMapRetry();
         console.warn(error);
       }
     } finally {
       if (sequence === mapRequestSequence) {
         mapRefreshInFlight = false;
         mapAbortController = null;
+        if (mapArchiveLoaded && mapRetryTimer === null && !mapNeedsRefresh) {
+          updateMapRenderingStatus();
+        }
       }
     }
   }
@@ -3384,10 +3760,12 @@
       const queryChanged = requestedFeedKey !== feedQueryKey;
       if (queryChanged) resetFeedPagination();
       const firstDashboardPayload = !dashboardPayloadLoaded;
-      const requestLimit = firstDashboardPayload || queryChanged
+      const restartFeedHead = feedHeadRestartRequired;
+      const requestLimit = firstDashboardPayload || queryChanged || restartFeedHead
         ? INITIAL_FEED_PAGE_SIZE
         : FEED_PAGE_SIZE;
-      const preserveFeedDepth = !queryChanged && records.length > requestLimit;
+      const preserveFeedDepth = !queryChanged && !restartFeedHead
+        && records.length > requestLimit;
       const data = await fetchJson(scopedUrl('/api/live-dashboard', {
         limit: requestLimit,
         compact: 1,
@@ -3397,13 +3775,43 @@
         signal: controller.signal
       });
       if (sequence !== dashboardRequestSequence) return;
+      feedPaginationSequence += 1;
+      if (feedLoadMoreAbortController) feedLoadMoreAbortController.abort();
+      feedLoadMoreAbortController = null;
+      feedLoadingMore = false;
       const stats = data.stats || {};
       dashboardPayloadLoaded = true;
-      updateFeedRecords(data.records || [], {
-        reset: firstDashboardPayload || queryChanged,
-        replaceHead: !firstDashboardPayload && !queryChanged
+      feedHeadRestartRequired = false;
+      const previouslyCompleteDeepFeed = preserveFeedDepth && !feedHasMore;
+      const headRecords = Array.isArray(data.records) ? data.records : [];
+      const previousMatchingTotal = feedMatchingTotal;
+      const nextMatchingTotal = pageTotal(payloadPage(data));
+      const expectedTotalDelta = preserveFeedDepth
+        ? feedHeadMembershipDelta(records, headRecords)
+        : 0;
+      const deepSnapshotChanged = preserveFeedDepth
+        && previousMatchingTotal !== null
+        && nextMatchingTotal !== null
+        && nextMatchingTotal - Number(previousMatchingTotal) !== expectedTotalDelta;
+      updateFeedRecords(headRecords, {
+        reset: firstDashboardPayload || queryChanged || restartFeedHead
+          || deepSnapshotChanged,
+        replaceHead: !firstDashboardPayload && !queryChanged && !restartFeedHead
+          && !deepSnapshotChanged
       });
-      applyFeedPageState(data, { preserveDepth: preserveFeedDepth });
+      applyFeedPageState(data, {
+        preserveDepth: preserveFeedDepth && !deepSnapshotChanged
+      });
+      // A late number-audit promotion can insert an older suffix after a user
+      // has already reached the end. If the new snapshot total no longer
+      // equals the supposedly complete local set, restart from its head rather
+      // than claiming that the stale deep list is complete.
+      if (previouslyCompleteDeepFeed
+          && feedMatchingTotal !== null
+          && records.length !== Number(feedMatchingTotal)) {
+        updateFeedRecords(headRecords, { reset: true });
+        applyFeedPageState(data);
+      }
       renderFeedPagination();
       if (firstDashboardPayload && records.length === 0) renderFeed();
       const exact = exactSrnumberQuery();
@@ -3442,8 +3850,14 @@
     } catch (error) {
       if (sequence !== dashboardRequestSequence) return;
       showSummaryUnavailable();
-      connection.classList.add('offline');
-      connectionLabel.textContent = 'Reconnecting…';
+      if (error.status === 409) {
+        void loadPolicePrecincts();
+        void loadBusinessImprovementDistricts();
+        connectionLabel.textContent = 'Refreshing geography…';
+      } else {
+        connection.classList.add('offline');
+        connectionLabel.textContent = 'Reconnecting…';
+      }
       if (error.name !== 'AbortError') console.warn(error);
     } finally {
       window.clearTimeout(timeout);
@@ -3513,7 +3927,17 @@
     filterRefreshTimer = window.setTimeout(() => {
       filterRefreshTimer = null;
       resetFeedPagination();
-      resetMapDataset();
+      if (mapArchiveLoaded) {
+        // Text and status are client-applied to the last complete universal
+        // map immediately. Keep those pins visible while a background crawl
+        // refreshes their source rows and the filtered totals.
+        invalidateMapLoad('Refreshing matching map records…', {
+          preserveArchive: true
+        });
+        renderMap();
+      } else {
+        resetMapDataset();
+      }
       renderFeed({ resetScroll: true });
       refreshNowAndReschedule({ force: true });
     }, delayMs);
@@ -3629,6 +4053,10 @@
 
   loadPolicePrecincts();
   loadBusinessImprovementDistricts();
+  window.setInterval(() => {
+    void loadPolicePrecincts();
+    void loadBusinessImprovementDistricts();
+  }, GEOGRAPHY_CATALOG_REFRESH_MS);
   updateActiveFilterState();
   refreshNowAndReschedule();
   window.setInterval(() => {

@@ -166,8 +166,9 @@ services:
       - /backups
       - --retain
       - ${BACKUP_RETENTION_COUNT:-3}
-      - --page-rate
-      - ${SQLITE_BACKUP_PAGE_RATE:-64}
+      # `flock` above makes it safe for the routine to remove every abandoned
+      # partial from an interrupted earlier run before taking a new snapshot.
+      - --exclusive
     restart: "no"
     volumes:
       - type: bind

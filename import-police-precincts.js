@@ -95,6 +95,25 @@ async function parseBoundarySource(bytes) {
 }
 
 function installBoundaries(database, options, source, precincts, importedAt) {
+  const existingVersion = database.prepare(`
+    SELECT source_sha256 FROM police_precinct_boundary_versions WHERE version=?
+  `).get(options.version);
+  if (existingVersion && existingVersion.source_sha256 !== source.sha256) {
+    throw new Error(
+      `Boundary version ${options.version} is immutable and already has a different SHA-256`
+    );
+  }
+  if (existingVersion) {
+    const installed = Number(database.prepare(`
+      SELECT COUNT(*) AS count FROM police_precincts WHERE boundary_version=?
+    `).get(options.version).count || 0);
+    if (installed !== precincts.length) {
+      throw new Error(
+        `Boundary version ${options.version} is incomplete: expected ${precincts.length}, found ${installed}`
+      );
+    }
+    return { unchanged: true };
+  }
   const insertVersion = database.prepare(`
     INSERT INTO police_precinct_boundary_versions (
       version,source_url,source_sha256,source_date,imported_at,feature_count,active
@@ -144,6 +163,7 @@ function installBoundaries(database, options, source, precincts, importedAt) {
       );
     }
     database.exec('COMMIT');
+    return { unchanged: false };
   } catch (error) {
     database.exec('ROLLBACK');
     throw error;
@@ -165,19 +185,46 @@ function activateBoundaries(database, version, activatedAt = new Date().toISOStr
     }
     const remaining = Number(database.prepare(`
       SELECT COUNT(*) AS count FROM live_portal_requests
-      WHERE latitude IS NOT NULL AND longitude IS NOT NULL
-        AND (police_precinct_boundary_version IS NULL
-          OR police_precinct_boundary_version<>?
-          OR police_precinct_matched_at IS NULL)
+      WHERE live_portal_requests.latitude IS NOT NULL
+        AND live_portal_requests.longitude IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1
+          FROM live_request_police_precinct_assignments AS staged
+          WHERE staged.srnumber=live_portal_requests.srnumber
+            AND staged.boundary_version=?
+            AND staged.latitude=live_portal_requests.latitude
+            AND staged.longitude=live_portal_requests.longitude
+        )
     `).get(version).count || 0);
     if (remaining) {
       throw new Error(`Cannot activate boundary version ${version}; ${remaining} coordinate records remain`);
     }
     database.prepare(`
+      UPDATE live_portal_requests
+      SET police_precinct=(
+            SELECT staged.precinct_number
+            FROM live_request_police_precinct_assignments AS staged
+            WHERE staged.srnumber=live_portal_requests.srnumber
+              AND staged.boundary_version=?
+          ),
+          police_precinct_boundary_version=?,
+          police_precinct_matched_at=(
+            SELECT staged.matched_at
+            FROM live_request_police_precinct_assignments AS staged
+            WHERE staged.srnumber=live_portal_requests.srnumber
+              AND staged.boundary_version=?
+          )
+      WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+    `).run(version, version, version);
+    database.prepare(`
       UPDATE police_precinct_boundary_versions SET active=0 WHERE active=1 AND version<>?
     `).run(version);
     database.prepare(`
       UPDATE police_precinct_boundary_versions SET active=1 WHERE version=?
+    `).run(version);
+    database.prepare(`
+      DELETE FROM live_request_police_precinct_assignments
+      WHERE boundary_version<>?
     `).run(version);
     database.prepare(`
       INSERT INTO live_monitor_state(key,value,updated_at)
@@ -195,17 +242,28 @@ function backfill(database, options, matcher, importedAt) {
   const selectBatch = database.prepare(`
     SELECT srnumber,latitude,longitude
     FROM live_portal_requests
-    WHERE latitude IS NOT NULL AND longitude IS NOT NULL
-      AND (police_precinct_boundary_version IS NULL
-        OR police_precinct_boundary_version<>?
-        OR police_precinct_matched_at IS NULL)
+    WHERE live_portal_requests.latitude IS NOT NULL
+      AND live_portal_requests.longitude IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM live_request_police_precinct_assignments AS staged
+        WHERE staged.srnumber=live_portal_requests.srnumber
+          AND staged.boundary_version=?
+          AND staged.latitude=live_portal_requests.latitude
+          AND staged.longitude=live_portal_requests.longitude
+      )
     ORDER BY suffix
     LIMIT ?
   `);
-  const update = database.prepare(`
-    UPDATE live_portal_requests
-    SET police_precinct=?, police_precinct_boundary_version=?, police_precinct_matched_at=?
-    WHERE srnumber=?
+  const stageAssignment = database.prepare(`
+    INSERT INTO live_request_police_precinct_assignments (
+      srnumber,boundary_version,precinct_number,matched_at,latitude,longitude
+    ) VALUES (?,?,?,?,?,?)
+    ON CONFLICT(srnumber,boundary_version) DO UPDATE SET
+      precinct_number=excluded.precinct_number,
+      matched_at=excluded.matched_at,
+      latitude=excluded.latitude,
+      longitude=excluded.longitude
   `);
   const saveState = database.prepare(`
     INSERT INTO live_monitor_state(key,value,updated_at)
@@ -220,7 +278,14 @@ function backfill(database, options, matcher, importedAt) {
     try {
       for (const row of rows) {
         const match = matcher.match(row.latitude, row.longitude);
-        update.run(match ? match.precinctNumber : null, options.version, importedAt, row.srnumber);
+        stageAssignment.run(
+          row.srnumber,
+          options.version,
+          match ? match.precinctNumber : null,
+          importedAt,
+          row.latitude,
+          row.longitude
+        );
         counts.processed += 1;
         if (match) counts.matched += 1;
         else counts.unmatched += 1;
@@ -237,10 +302,16 @@ function backfill(database, options, matcher, importedAt) {
   }
   const remaining = Number(database.prepare(`
     SELECT COUNT(*) AS count FROM live_portal_requests
-    WHERE latitude IS NOT NULL AND longitude IS NOT NULL
-      AND (police_precinct_boundary_version IS NULL
-        OR police_precinct_boundary_version<>?
-        OR police_precinct_matched_at IS NULL)
+    WHERE live_portal_requests.latitude IS NOT NULL
+      AND live_portal_requests.longitude IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM live_request_police_precinct_assignments AS staged
+        WHERE staged.srnumber=live_portal_requests.srnumber
+          AND staged.boundary_version=?
+          AND staged.latitude=live_portal_requests.latitude
+          AND staged.longitude=live_portal_requests.longitude
+      )
   `).get(options.version).count || 0);
   const completedAt = new Date().toISOString();
   saveState.run(JSON.stringify({

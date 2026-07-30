@@ -31,6 +31,7 @@ const {
   ensureSqliteBusinessImprovementDistrictSchema,
   loadActiveBusinessImprovementDistrictMatcher
 } = require('./business-improvement-districts');
+const { refreshActiveBoundaryMatchers } = require('./boundary-matcher-coherence');
 const {
   claimSubscription,
   completeSubscription,
@@ -190,9 +191,9 @@ db.exec(`
 ensureSqliteRequestGeography(db);
 applyMigrations(db);
 ensureSqlitePolicePrecinctSchema(db);
-const policePrecinctMatcher = loadActivePolicePrecinctMatcher(db);
+let policePrecinctMatcher = loadActivePolicePrecinctMatcher(db);
 ensureSqliteBusinessImprovementDistrictSchema(db);
-const businessImprovementDistrictMatcher = loadActiveBusinessImprovementDistrictMatcher(db);
+let businessImprovementDistrictMatcher = loadActiveBusinessImprovementDistrictMatcher(db);
 
 const closureTracker = createClosureTracker(db);
 
@@ -1006,8 +1007,19 @@ function savePoll(records) {
   let statusChanges = 0;
   let closureRefreshesQueued = 0;
 
-  db.exec('BEGIN');
+  db.exec('BEGIN IMMEDIATE');
   try {
+    const boundaryMatchers = refreshActiveBoundaryMatchers(db, {
+      policePrecinctMatcher,
+      businessImprovementDistrictMatcher
+    }, {
+      loadPolicePrecinctMatcher: loadActivePolicePrecinctMatcher,
+      loadBusinessImprovementDistrictMatcher:
+        loadActiveBusinessImprovementDistrictMatcher
+    });
+    policePrecinctMatcher = boundaryMatchers.policePrecinctMatcher;
+    businessImprovementDistrictMatcher =
+      boundaryMatchers.businessImprovementDistrictMatcher;
     for (const { pin, suffix } of numbered) {
       const data = pin.data || {};
       const number = data.srnumber;

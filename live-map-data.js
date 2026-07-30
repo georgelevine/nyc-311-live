@@ -45,6 +45,19 @@ function timestampValue(...values) {
   return null;
 }
 
+function validTimestampValue(...values) {
+  for (const value of values) {
+    if (value == null || String(value).trim() === '') continue;
+    if (value instanceof Date) {
+      if (!Number.isNaN(value.getTime())) return value.toISOString();
+      continue;
+    }
+    const text = String(value).trim();
+    if (!Number.isNaN(Date.parse(text))) return text;
+  }
+  return null;
+}
+
 function mapSubmittedSince(value) {
   if (value == null || String(value).trim() === '') return null;
   const text = String(value).trim();
@@ -132,7 +145,7 @@ function projectLiveMapRow(row) {
     ),
     latitude,
     longitude,
-    submitted_at: timestampValue(row.submitted_at, row.detail_date_reported),
+    submitted_at: validTimestampValue(row.submitted_at, row.detail_date_reported),
     status: textValue(lifecycle.status),
     portal_url: portalUrl(row),
     first_seen_at: timestampValue(row.first_seen_at),
@@ -191,5 +204,6 @@ module.exports = {
   mapSubmittedSince,
   projectLiveMapRow,
   suffixValue,
-  timestampValue
+  timestampValue,
+  validTimestampValue
 };

@@ -66,12 +66,27 @@ function ensureSqliteBusinessImprovementDistrictSchema(database) {
         REFERENCES business_improvement_districts(boundary_version,bid_id) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS live_request_bid_assignment_versions (
+      srnumber TEXT NOT NULL,
+      boundary_version TEXT NOT NULL,
+      matched_at TEXT NOT NULL,
+      latitude REAL NOT NULL,
+      longitude REAL NOT NULL,
+      PRIMARY KEY(srnumber,boundary_version),
+      FOREIGN KEY(srnumber)
+        REFERENCES live_portal_requests(srnumber) ON DELETE CASCADE,
+      FOREIGN KEY(boundary_version)
+        REFERENCES business_improvement_district_boundary_versions(version) ON DELETE CASCADE
+    );
+
     CREATE INDEX IF NOT EXISTS business_improvement_district_bbox_idx
       ON business_improvement_districts(
         boundary_version,min_longitude,max_longitude,min_latitude,max_latitude
       );
     CREATE INDEX IF NOT EXISTS live_request_bid_memberships_district_idx
       ON live_request_bid_memberships(boundary_version,bid_id,srnumber);
+    CREATE INDEX IF NOT EXISTS live_request_bid_assignment_versions_version_idx
+      ON live_request_bid_assignment_versions(boundary_version,srnumber);
   `);
 }
 

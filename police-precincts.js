@@ -45,8 +45,26 @@ function ensureSqlitePolicePrecinctSchema(database) {
         REFERENCES police_precinct_boundary_versions(version) ON DELETE CASCADE
     );
 
+    CREATE TABLE IF NOT EXISTS live_request_police_precinct_assignments (
+      srnumber TEXT NOT NULL,
+      boundary_version TEXT NOT NULL,
+      precinct_number INTEGER,
+      matched_at TEXT NOT NULL,
+      latitude REAL NOT NULL,
+      longitude REAL NOT NULL,
+      PRIMARY KEY(srnumber,boundary_version),
+      FOREIGN KEY(srnumber)
+        REFERENCES live_portal_requests(srnumber) ON DELETE CASCADE,
+      FOREIGN KEY(boundary_version)
+        REFERENCES police_precinct_boundary_versions(version) ON DELETE CASCADE,
+      FOREIGN KEY(boundary_version,precinct_number)
+        REFERENCES police_precincts(boundary_version,precinct_number) ON DELETE CASCADE
+    );
+
     CREATE INDEX IF NOT EXISTS police_precinct_bbox_idx
       ON police_precincts(boundary_version,min_longitude,max_longitude,min_latitude,max_latitude);
+    CREATE INDEX IF NOT EXISTS live_request_police_precinct_assignments_version_idx
+      ON live_request_police_precinct_assignments(boundary_version,srnumber);
     CREATE INDEX IF NOT EXISTS live_portal_requests_police_precinct_idx
       ON live_portal_requests(police_precinct,suffix DESC);
   `);

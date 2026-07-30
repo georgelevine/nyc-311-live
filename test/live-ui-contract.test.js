@@ -48,11 +48,11 @@ test('dashboard keeps requests, map, and overview as explicit responsive views',
   assert.equal($('#details-pending-items').length, 1);
 });
 
-test('map counts explain why loaded pins can be temporarily withheld', () => {
+test('map counts disclose pins whose submitted details are still loading', () => {
   assert.match(
     dashboard,
-    /awaiting submitted details/,
-    'loaded map records awaiting submitted details must not look silently missing'
+    /showing while submitted details load/,
+    'coordinate-bearing records must remain visible while details load'
   );
 });
 
@@ -240,7 +240,7 @@ test('local dashboard styles and scripts resolve to committed files in load orde
   ]);
 });
 
-test('map startup is self-hosted, bounded, and automatically recoverable', () => {
+test('map startup is self-hosted, exhaustively paginated, and automatically recoverable', () => {
   assert.equal($('script[src*="unpkg.com"], link[href*="unpkg.com"]').length, 0);
   assert.equal($('script[src="/vendor/leaflet/leaflet.js"]').length, 1);
   assert.equal(
@@ -259,7 +259,7 @@ test('map startup is self-hosted, bounded, and automatically recoverable', () =>
   assert.match(dashboard, /const INITIAL_FEED_PAGE_SIZE = 100/);
   assert.match(
     dashboard,
-    /const requestLimit = firstDashboardPayload \|\| queryChanged\s*\? INITIAL_FEED_PAGE_SIZE\s*: FEED_PAGE_SIZE/
+    /const requestLimit = firstDashboardPayload \|\| queryChanged \|\| restartFeedHead\s*\? INITIAL_FEED_PAGE_SIZE\s*: FEED_PAGE_SIZE/
   );
   assert.match(dashboard, /live-dashboard', \{\s*limit: requestLimit,\s*compact: 1,\s*paginate: 1/);
   assert.match(dashboard, /async function loadMoreFeed/);
@@ -267,7 +267,8 @@ test('map startup is self-hosted, bounded, and automatically recoverable', () =>
   assert.match(dashboard, /pagesLoaded === 0 \? MAP_INITIAL_PAGE_SIZE : MAP_PAGE_SIZE/);
   assert.match(dashboard, /include_totals: pagesLoaded === 0 \? 1 : 0/);
   assert.match(dashboard, /paginate:\s*1/);
-  assert.match(dashboard, /while \(hasMore && pagesLoaded < 500\)/);
+  assert.match(dashboard, /while \(hasMore\)/);
+  assert.doesNotMatch(dashboard, /pagesLoaded < 500/);
   assert.match(
     dashboard,
     /await new Promise\(resolve => window\.setTimeout\(resolve, MAP_PAGE_YIELD_MS\)\)/
@@ -280,9 +281,10 @@ test('map startup is self-hosted, bounded, and automatically recoverable', () =>
   );
   assert.match(
     dashboard,
-    /if \(!mapArchiveLoaded && !mapRefreshInFlight\) refreshMap\(mapStats\)/
+    /\(mapNeedsRefresh \|\| !mapArchiveLoaded\)[\s\S]*refreshMap\(mapStats\)/
   );
-  assert.match(dashboard, /Map data took too long\. Retrying/);
+  assert.match(dashboard, /Map data took too long\./);
+  assert.match(dashboard, /\? ' Retrying…'/);
   assert.match(dashboard, /tile\.openstreetmap\.org/);
   assert.match(dashboard, /if \(!compactLayout\.matches\) ensureBaseTiles\(\)/);
   assert.match(
@@ -295,12 +297,12 @@ test('a hidden mobile filter change cannot let an old map request complete the n
   const refreshStart = dashboard.indexOf('async function refreshMap(');
   const refreshEnd = dashboard.indexOf('\n  async function refresh(', refreshStart);
   const refreshSource = dashboard.slice(refreshStart, refreshEnd);
-  const forceIndex = refreshSource.indexOf("if (force) invalidateMapLoad('Loading map records…')");
+  const forceIndex = refreshSource.indexOf('if (force) {');
   const layoutIndex = refreshSource.indexOf('if (!mapHasLayout()) return');
   assert.ok(forceIndex >= 0 && forceIndex < layoutIndex);
   assert.match(
     refreshSource,
-    /if \(sequence !== mapRequestSequence\) return;\s*mapArchiveLoaded = true/
+    /if \(sequence !== mapRequestSequence\) return;\s*if \(expectedMapped !== stagedNumberSet\.size\)/
   );
 
   const invalidationStart = dashboard.indexOf('function invalidateMapLoad(');
@@ -312,7 +314,7 @@ test('a hidden mobile filter change cannot let an old map request complete the n
   assert.match(invalidationSource, /mapArchiveLoaded = false/);
 
   const resetStart = dashboard.indexOf('function resetMapDataset(');
-  const resetEnd = dashboard.indexOf('\n  function updateMapRecords(', resetStart);
+  const resetEnd = dashboard.indexOf('\n  function replaceMapDataset(', resetStart);
   assert.match(dashboard.slice(resetStart, resetEnd), /invalidateMapLoad\(\)/);
 
   const feedStart = dashboard.indexOf('function updateFeedRecords(');
@@ -324,7 +326,19 @@ test('a hidden mobile filter change cannot let an old map request complete the n
   );
   assert.match(
     refreshSource,
-    /if \(pagesLoaded === 0\) mapArchiveLoaded = false;\s*updateMapRecords\(payload/
+    /const stagedNumbers = \[\];\s*const stagedNumberSet = new Set\(\);\s*const stagedChanges = new Map\(\)/
+  );
+  assert.match(
+    refreshSource,
+    /if \(expectedMapped !== stagedNumberSet\.size\)/
+  );
+  assert.match(
+    refreshSource,
+    /mapArchiveLoaded = true;\s*replaceMapDataset\(\{\s*records: stagedNumbers\.map\(number => \(\s*stagedChanges\.get\(number\) \|\| mapByNumber\.get\(number\)/
+  );
+  assert.match(
+    refreshSource,
+    /if \(!previous \|\| recordSignature\(previous\) !== recordSignature\(record\)\) \{\s*stagedChanges\.set/
   );
 
   const layoutStart = dashboard.indexOf('function scheduleMapLayout(');
@@ -333,7 +347,7 @@ test('a hidden mobile filter change cannot let an old map request complete the n
   assert.equal((layoutSource.match(/refreshMap\(mapStats\)/g) || []).length, 1);
   assert.match(
     layoutSource,
-    /if \(!mapArchiveLoaded && !mapRefreshInFlight\) refreshMap\(mapStats\)/
+    /\(mapNeedsRefresh \|\| !mapArchiveLoaded\) && !mapRefreshInFlight[\s\S]*refreshMap\(mapStats\)/
   );
 });
 
@@ -349,10 +363,149 @@ test('map starts recent, keeps the chosen date scope during filters, and disclos
   assert.match(dashboard, /mapRangeDateFormatter/);
 });
 
-test('pending details stay separate from complete request cards and map pins', () => {
+test('pending details stay separate from complete request cards but remain map-visible', () => {
   assert.match(dashboard, /recordDetailsPending/);
   assert.match(dashboard, /renderPendingDetails/);
   assert.match(dashboard, /Complete requests will appear here/);
+  assert.match(dashboard, /return recordDetailsPending\(record\) \? 'pending' : ''/);
+  assert.match(dashboard, /requestKind: markerClass\(record\) \|\| 'active'/);
+  assert.doesNotMatch(
+    dashboard,
+    /recordDetailsPending\(record\)\s*\|\|\s*!matchesMapScope/
+  );
+});
+
+test('boundary releases and large marker builds cannot leave stale map state', () => {
+  assert.match(
+    dashboard,
+    /state\.requestedVersion === version/
+  );
+  assert.match(
+    dashboard,
+    /state\.requestedVersion = version/
+  );
+  assert.match(
+    dashboard,
+    /version:\s*precinctBoundaryVersion/
+  );
+  assert.match(
+    dashboard,
+    /version:\s*bidBoundaryVersion/
+  );
+  assert.match(
+    dashboard,
+    /if \(markerLayerBuilding && desiredChanged\) \{\s*markerLayerDeferredRender = true;\s*return;/
+  );
+  const replacementStart = dashboard.indexOf('function replaceMapDataset(');
+  const replacementEnd = dashboard.indexOf('\n  async function fetchJson(', replacementStart);
+  assert.doesNotMatch(
+    dashboard.slice(replacementStart, replacementEnd),
+    /replaceMarkerClusterLayer\(\)/,
+    'a normal refresh must update the existing cluster rather than rebuilding every pin'
+  );
+  assert.match(dashboard, /Data complete · drawing/);
+});
+
+test('geography catalogs retain release identity and retry transient failures', () => {
+  assert.match(dashboard, /const GEOGRAPHY_CATALOG_TIMEOUT_MS = 5_000/);
+  assert.match(dashboard, /const GEOGRAPHY_CATALOG_REFRESH_MS = 5 \* 60_000/);
+  assert.match(dashboard, /function geographyCatalogRetryDelay\(attempt\)/);
+  assert.match(dashboard, /precinct_boundary_version/);
+  assert.match(dashboard, /bid_boundary_version/);
+  assert.match(dashboard, /if \(error\.status === 409\)/);
+});
+
+test('map and feed pagination reject stale, repeated, and non-progressing pages', () => {
+  assert.match(dashboard, /validatePaginatedRecords\(pageRecords, \{/);
+  assert.match(dashboard, /expectedSnapshot: snapshotAt/);
+  assert.match(dashboard, /existingNumbers: stagedNumberSet/);
+  assert.match(dashboard, /expectedTotal: expectedMapped/);
+  assert.match(dashboard, /loadedCount: stagedNumberSet\.size/);
+  assert.match(dashboard, /existingNumbers: feedByNumber/);
+  assert.match(dashboard, /const MAP_MAX_FAST_RETRIES = 3/);
+  assert.match(dashboard, /mapRetryAttempt >= MAP_MAX_FAST_RETRIES/);
+  assert.match(dashboard, /Fast retries paused; the next scheduled refresh will try again/);
+});
+
+test('long map crawls traverse stable membership and apply mutable filters client-side', () => {
+  const refreshStart = dashboard.indexOf('async function refreshMap(');
+  const refreshEnd = dashboard.indexOf('\n  async function refresh(', refreshStart);
+  const refreshSource = dashboard.slice(refreshStart, refreshEnd);
+  assert.match(refreshSource, /const displayFilters = activeDataFilters\(\)/);
+  assert.match(refreshSource, /Map filter totals/);
+  assert.match(refreshSource, /\.\.\.displayFilters/);
+  const traversalLoop = refreshSource.slice(refreshSource.indexOf('while (hasMore)'));
+  assert.doesNotMatch(
+    traversalLoop.slice(0, traversalLoop.indexOf('if (sequence !== mapRequestSequence) return;')),
+    /\.\.\.displayFilters/,
+    'the archive traversal itself must not depend on mutable text or status values'
+  );
+  assert.match(
+    dashboard,
+    /!coordinates \|\| !matchesMapScope\(record, now\) \|\| !matchesFilters\(record\)/
+  );
+  const filterStart = dashboard.indexOf('function scheduleFilterRefresh(');
+  const filterEnd = dashboard.indexOf("\n  search.addEventListener('input'", filterStart);
+  const filterSource = dashboard.slice(filterStart, filterEnd);
+  assert.match(
+    filterSource,
+    /if \(mapArchiveLoaded\)[\s\S]*preserveArchive: true[\s\S]*renderMap\(\)/
+  );
+});
+
+test('deep feed restarts when the live head cannot explain a changed total', () => {
+  assert.match(dashboard, /feedHeadMembershipDelta\(records, headRecords\)/);
+  assert.match(
+    dashboard,
+    /nextMatchingTotal - Number\(previousMatchingTotal\) !== expectedTotalDelta/
+  );
+  assert.match(dashboard, /reset:[\s\S]*deepSnapshotChanged/);
+  assert.match(
+    dashboard,
+    /!pageState\.hasMore && feedMatchingTotal !== null[\s\S]*requestFeedHeadRestart\(\)/
+  );
+  assert.match(dashboard, /feedHeadRestartRequired = true/);
+});
+
+test('geography catalogs preserve last-good data and refresh a stale boundary release', () => {
+  assert.match(dashboard, /boundaryCatalogIsUsable\(precincts, version\)/);
+  assert.match(dashboard, /boundaryCatalogIsUsable\(districts, version\)/);
+  assert.match(
+    dashboard,
+    /if \(!precinctBoundaryVersion\) \{[\s\S]*Precinct filter unavailable · retrying/
+  );
+  assert.match(
+    dashboard,
+    /if \(!bidBoundaryVersion\) \{[\s\S]*BID filter unavailable · retrying/
+  );
+  const boundaryStart = dashboard.indexOf('async function loadSelectedBoundary(');
+  const boundaryEnd = dashboard.indexOf('\n  function syncSelectedBoundaries(', boundaryStart);
+  const boundarySource = dashboard.slice(boundaryStart, boundaryEnd);
+  assert.match(boundarySource, /if \(error\.status === 409\)/);
+  assert.match(boundarySource, /void loadPolicePrecincts\(\)/);
+  assert.match(boundarySource, /void loadBusinessImprovementDistricts\(\)/);
+  assert.match(boundarySource, /else if \(state\.attempt < 3\)/);
+});
+
+test('a hidden map remembers that its failed refresh still needs to run', () => {
+  assert.match(dashboard, /let mapNeedsRefresh = true/);
+  assert.match(dashboard, /mapNeedsRefresh = true;\s*if \(!preserveArchive\)/);
+  assert.match(
+    dashboard,
+    /\(mapNeedsRefresh \|\| !mapArchiveLoaded\) && !mapRefreshInFlight[\s\S]*refreshMap\(mapStats\)/
+  );
+  assert.match(dashboard, /mapRetryAttempt = 0;\s*mapNeedsRefresh = false/);
+});
+
+test('queued markers cannot throw on selection and map-only pending state changes its icon', () => {
+  assert.match(
+    dashboard,
+    /record\.status,\s*markerClass\(record\),\s*record\.problem_details/
+  );
+  assert.match(
+    dashboard,
+    /if \(marker && marker\.__parent\) markerLayer\.zoomToShowLayer\(marker\)/
+  );
 });
 
 test('map-only records retrieve stored details instead of inventing an empty detail payload', () => {

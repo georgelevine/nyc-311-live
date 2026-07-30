@@ -191,20 +191,45 @@ function activateBoundaries(database, version, activatedAt = new Date().toISOStr
     }
     const remaining = Number(database.prepare(`
       SELECT COUNT(*) AS count FROM live_portal_requests
-      WHERE latitude IS NOT NULL AND longitude IS NOT NULL
-        AND (business_improvement_district_boundary_version IS NULL
-          OR business_improvement_district_boundary_version<>?
-          OR business_improvement_district_matched_at IS NULL)
+      WHERE live_portal_requests.latitude IS NOT NULL
+        AND live_portal_requests.longitude IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1
+          FROM live_request_bid_assignment_versions AS staged
+          WHERE staged.srnumber=live_portal_requests.srnumber
+            AND staged.boundary_version=?
+            AND staged.latitude=live_portal_requests.latitude
+            AND staged.longitude=live_portal_requests.longitude
+        )
     `).get(version).count || 0);
     if (remaining) {
       throw new Error(`Cannot activate boundary version ${version}; ${remaining} coordinate records remain`);
     }
+    database.prepare(`
+      UPDATE live_portal_requests
+      SET business_improvement_district_boundary_version=?,
+          business_improvement_district_matched_at=(
+            SELECT staged.matched_at
+            FROM live_request_bid_assignment_versions AS staged
+            WHERE staged.srnumber=live_portal_requests.srnumber
+              AND staged.boundary_version=?
+          )
+      WHERE latitude IS NOT NULL AND longitude IS NOT NULL
+    `).run(version, version);
     database.prepare(`
       UPDATE business_improvement_district_boundary_versions
       SET active=0 WHERE active=1 AND version<>?
     `).run(version);
     database.prepare(`
       UPDATE business_improvement_district_boundary_versions SET active=1 WHERE version=?
+    `).run(version);
+    // The active-version switch and old-membership cleanup commit together, so
+    // readers observe either the complete old release or the complete new one.
+    database.prepare(`
+      DELETE FROM live_request_bid_memberships WHERE boundary_version<>?
+    `).run(version);
+    database.prepare(`
+      DELETE FROM live_request_bid_assignment_versions WHERE boundary_version<>?
     `).run(version);
     database.prepare(`
       INSERT INTO live_monitor_state(key,value,updated_at)
@@ -222,25 +247,36 @@ function backfill(database, options, matcher, importedAt) {
   const selectBatch = database.prepare(`
     SELECT srnumber,latitude,longitude
     FROM live_portal_requests
-    WHERE latitude IS NOT NULL AND longitude IS NOT NULL
-      AND (business_improvement_district_boundary_version IS NULL
-        OR business_improvement_district_boundary_version<>?
-        OR business_improvement_district_matched_at IS NULL)
+    WHERE live_portal_requests.latitude IS NOT NULL
+      AND live_portal_requests.longitude IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM live_request_bid_assignment_versions AS staged
+        WHERE staged.srnumber=live_portal_requests.srnumber
+          AND staged.boundary_version=?
+          AND staged.latitude=live_portal_requests.latitude
+          AND staged.longitude=live_portal_requests.longitude
+      )
     ORDER BY suffix
     LIMIT ?
   `);
-  const update = database.prepare(`
-    UPDATE live_portal_requests
-    SET business_improvement_district_boundary_version=?,
-        business_improvement_district_matched_at=?
-    WHERE srnumber=?
-  `);
-  const clearMemberships = database.prepare(`
-    DELETE FROM live_request_bid_memberships WHERE srnumber=?
+  const clearTargetMemberships = database.prepare(`
+    DELETE FROM live_request_bid_memberships
+    WHERE srnumber=? AND boundary_version=?
   `);
   const insertMembership = database.prepare(`
     INSERT INTO live_request_bid_memberships(srnumber,boundary_version,bid_id,matched_at)
     VALUES (?,?,?,?)
+  `);
+  const stageAssignment = database.prepare(`
+    INSERT INTO live_request_bid_assignment_versions(
+      srnumber,boundary_version,matched_at,latitude,longitude
+    )
+    VALUES (?,?,?,?,?)
+    ON CONFLICT(srnumber,boundary_version) DO UPDATE SET
+      matched_at=excluded.matched_at,
+      latitude=excluded.latitude,
+      longitude=excluded.longitude
   `);
   const saveState = database.prepare(`
     INSERT INTO live_monitor_state(key,value,updated_at)
@@ -262,12 +298,21 @@ function backfill(database, options, matcher, importedAt) {
       for (const row of rows) {
         const match = matcher.match(row.latitude, row.longitude);
         const districts = match && Array.isArray(match.districts) ? match.districts : [];
-        update.run(options.version, importedAt, row.srnumber);
-        clearMemberships.run(row.srnumber);
+        // Keep memberships from the currently active release available until
+        // activation commits. This lets live BID filters continue serving one
+        // complete release while the replacement is backfilled in batches.
+        clearTargetMemberships.run(row.srnumber, options.version);
         for (const district of districts) {
           insertMembership.run(row.srnumber, options.version, district.bidId, importedAt);
           counts.memberships += 1;
         }
+        stageAssignment.run(
+          row.srnumber,
+          options.version,
+          importedAt,
+          row.latitude,
+          row.longitude
+        );
         counts.processed += 1;
         if (districts.length) counts.matched += 1;
         else counts.unmatched += 1;
@@ -284,10 +329,16 @@ function backfill(database, options, matcher, importedAt) {
   }
   const remaining = Number(database.prepare(`
     SELECT COUNT(*) AS count FROM live_portal_requests
-    WHERE latitude IS NOT NULL AND longitude IS NOT NULL
-      AND (business_improvement_district_boundary_version IS NULL
-        OR business_improvement_district_boundary_version<>?
-        OR business_improvement_district_matched_at IS NULL)
+    WHERE live_portal_requests.latitude IS NOT NULL
+      AND live_portal_requests.longitude IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1
+        FROM live_request_bid_assignment_versions AS staged
+        WHERE staged.srnumber=live_portal_requests.srnumber
+          AND staged.boundary_version=?
+          AND staged.latitude=live_portal_requests.latitude
+          AND staged.longitude=live_portal_requests.longitude
+      )
   `).get(options.version).count || 0);
   const completedAt = new Date().toISOString();
   saveState.run(JSON.stringify({

@@ -114,7 +114,7 @@ test('snapshot replacement stops the isolated database writer and checks it afte
   assert.match(installSnapshot, /http:\/\/127\.0\.0\.1:10001\/health/);
 });
 
-test('nightly backup priority and SQLite batching apply inside the container', () => {
+test('nightly backup priority, exclusive cleanup, and I/O limits apply inside the container', () => {
   const backup = compose.slice(
     compose.indexOf('  backup:'),
     compose.indexOf('  verify:')
@@ -125,8 +125,9 @@ test('nightly backup priority and SQLite batching apply inside the container', (
   );
   assert.match(
     backup,
-    /- --page-rate\s+- \$\{SQLITE_BACKUP_PAGE_RATE:-64\}/
+    /\n\s+- --exclusive\n/
   );
+  assert.doesNotMatch(backup, /--page-rate|SQLITE_BACKUP_PAGE_RATE/);
   assert.match(
     backup,
     /blkio_config:\s+device_read_bps:\s+- path: \/dev\/nvme0n1\s+rate: 1mb\s+device_write_bps:\s+- path: \/dev\/nvme0n1\s+rate: 1mb/

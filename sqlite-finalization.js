@@ -13,6 +13,7 @@ const {
 
 const APPLICATION_ID = 0x4e594333; // "NYC3"
 const BUSY_TIMEOUT_MS = DEFAULT_BUSY_TIMEOUT_MS;
+const BACKUP_COPY_STRATEGIES = Object.freeze(['online_backup', 'vacuum_into']);
 
 const MIGRATIONS = Object.freeze([
   Object.freeze({
@@ -698,6 +699,16 @@ function validateBackupDestination(sourcePath, backupPath) {
   };
 }
 
+function validateBackupCopyStrategy(value, { allowMissing = false } = {}) {
+  if (value == null && allowMissing) return null;
+  if (!BACKUP_COPY_STRATEGIES.includes(value)) {
+    throw new TypeError(
+      `copyStrategy must be one of: ${BACKUP_COPY_STRATEGIES.join(', ')}`
+    );
+  }
+  return value;
+}
+
 async function createBackup(
   database,
   sourcePath,
@@ -709,6 +720,7 @@ async function createBackup(
     healthCheckOptions = null,
     tableManifestOptions = null,
     onIoPass = null,
+    copyStrategy = 'online_backup',
     rate = 10000
   } = {}
 ) {
@@ -731,7 +743,8 @@ async function createBackup(
   if (onIoPass != null && typeof onIoPass !== 'function') {
     throw new TypeError('onIoPass must be a function');
   }
-  if (!Number.isInteger(rate) || rate < 1) {
+  validateBackupCopyStrategy(copyStrategy);
+  if (copyStrategy === 'online_backup' && (!Number.isInteger(rate) || rate < 1)) {
     throw new TypeError('Backup page rate must be a positive integer');
   }
   const observeIo = operation => {
@@ -750,10 +763,16 @@ async function createBackup(
   let validation = null;
   try {
     const backupStartedAt = Date.now();
-    // The batch size is configurable so routine production backups can yield
-    // between small I/O bursts while one-off finalization keeps its fast default.
-    observeIo('source_online_copy');
-    await sqliteBackup(database, partialBackupPath, { rate });
+    if (copyStrategy === 'vacuum_into') {
+      // VACUUM INTO reads one stable snapshot while WAL writers continue. The
+      // incremental backup API can otherwise restart repeatedly when hot
+      // source pages change and amplify I/O without making forward progress.
+      observeIo('source_vacuum_snapshot');
+      database.prepare('VACUUM INTO ?').run(partialBackupPath);
+    } else {
+      observeIo('source_online_copy');
+      await sqliteBackup(database, partialBackupPath, { rate });
+    }
     const backupDurationMs = Date.now() - backupStartedAt;
     fs.chmodSync(partialBackupPath, 0o600);
 
@@ -810,6 +829,7 @@ async function createBackup(
       created_at: createdAt,
       source_database: path.resolve(sourcePath),
       backup_database: resolvedBackup,
+      copy_strategy: copyStrategy,
       backup_duration_ms: backupDurationMs,
       bytes: stat.size,
       sha256: digest,
@@ -847,6 +867,7 @@ async function createBackup(
     const result = {
       path: resolvedBackup,
       manifest_path: manifestPath,
+      copy_strategy: copyStrategy,
       backup_duration_ms: backupDurationMs,
       manifest
     };
@@ -967,6 +988,7 @@ async function finalizeDatabase({
 
 module.exports = {
   APPLICATION_ID,
+  BACKUP_COPY_STRATEGIES,
   BUSY_TIMEOUT_MS,
   MIGRATIONS,
   applyDataChanges,
@@ -984,5 +1006,6 @@ module.exports = {
   sha256File,
   tableManifest,
   timestampedBackupPath,
+  validateBackupCopyStrategy,
   validateBackupDestination
 };

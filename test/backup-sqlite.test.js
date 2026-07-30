@@ -7,6 +7,8 @@ const path = require('node:path');
 const test = require('node:test');
 const {
   DEFAULT_BACKUP_PAGE_RATE,
+  MINIMUM_BACKUP_FREE_BYTES,
+  calculateBackupCapacity,
   createRoutineBackup,
   parseArguments,
   trustedManagedBackups,
@@ -16,7 +18,7 @@ const { createBackup, finalizeDatabase, openDatabase } = require('../sqlite-fina
 const { verifySnapshot } = require('../sqlite-snapshot');
 const { createArchiveFixture } = require('../test-support/archive-fixture');
 
-test('creates verified online backups and prunes only the managed oldest pair', async t => {
+test('creates verified VACUUM snapshots and prunes only the managed oldest pair', async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-routine-backup-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const unfinalizedSource = createArchiveFixture(directory, 'source.sqlite');
@@ -69,7 +71,7 @@ test('creates verified online backups and prunes only the managed oldest pair', 
   assert.equal(fs.readdirSync(backups).some(name => name.endsWith('.partial')), false);
 });
 
-test('routine backups use a small configurable SQLite page batch', async t => {
+test('legacy page-rate input is accepted but explicitly ignored by routine backups', async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-routine-rate-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const unfinalizedSource = createArchiveFixture(directory, 'source.sqlite');
@@ -84,12 +86,88 @@ test('routine backups use a small configurable SQLite page batch', async t => {
     now: new Date('2026-07-24T04:15:00.000Z')
   });
 
-  assert.equal(result.backup_page_rate, 7);
+  assert.equal(Object.hasOwn(result, 'backup_page_rate'), false);
+  assert.deepEqual(result.deprecated_options, [
+    'page_rate=7 ignored for vacuum_into'
+  ]);
   assert.equal((await verifySnapshot({
     databasePath: result.path,
     manifestPath: result.manifest_path
   })).ok, true);
   assert.equal(DEFAULT_BACKUP_PAGE_RATE, 64);
+});
+
+test('capacity preflight sizes the snapshot from logical pages and reserves WAL headroom', () => {
+  const result = calculateBackupCapacity({
+    sourceDatabaseBytes: 4_096,
+    sourceLogicalBytes: 304_689_152,
+    sourceWalBytes: 306_482_712,
+    availableBytes: 2_000_000_000
+  });
+
+  assert.equal(result.source_database_bytes, 4_096);
+  assert.equal(result.source_logical_bytes, 304_689_152);
+  assert.equal(result.source_wal_bytes, 306_482_712);
+  assert.equal(
+    result.required_free_bytes,
+    304_689_152 * 3 + 306_482_712
+  );
+  assert.ok(result.required_free_bytes > result.source_logical_bytes);
+  assert.equal(result.ok, true);
+
+  const insufficient = calculateBackupCapacity({
+    sourceDatabaseBytes: 4_096,
+    sourceLogicalBytes: 304_689_152,
+    sourceWalBytes: 306_482_712,
+    availableBytes: MINIMUM_BACKUP_FREE_BYTES
+  });
+  assert.equal(insufficient.ok, false);
+});
+
+test('routine VACUUM snapshots include committed WAL pages while the writer remains open', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-routine-wal-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const unfinalizedSource = createArchiveFixture(directory, 'source.sqlite');
+  const finalized = await finalizeDatabase({
+    databasePath: unfinalizedSource,
+    backupPath: path.join(directory, 'portal-archive.sqlite')
+  });
+  const source = finalized.backup.path;
+  const writer = openDatabase(source);
+  try {
+    writer.exec(`
+      PRAGMA journal_mode = WAL;
+      PRAGMA wal_autocheckpoint = 0;
+      CREATE TABLE capacity_probe(id INTEGER PRIMARY KEY, payload BLOB);
+      BEGIN;
+    `);
+    const insert = writer.prepare('INSERT INTO capacity_probe(payload) VALUES(?)');
+    const payload = Buffer.alloc(8 * 1024, 1);
+    for (let index = 0; index < 256; index += 1) insert.run(payload);
+    writer.exec('COMMIT');
+
+    const result = await createRoutineBackup({
+      databasePath: source,
+      directory: path.join(directory, 'backups'),
+      now: new Date('2026-07-24T04:45:00.000Z')
+    });
+    assert.ok(result.capacity_preflight.source_wal_bytes > 0);
+    assert.ok(
+      result.capacity_preflight.source_logical_bytes
+        > result.capacity_preflight.source_database_bytes
+    );
+    const snapshot = openDatabase(result.path, { readOnly: true });
+    try {
+      assert.equal(
+        Number(snapshot.prepare('SELECT COUNT(*) AS count FROM capacity_probe').get().count),
+        256
+      );
+    } finally {
+      snapshot.close();
+    }
+  } finally {
+    writer.close();
+  }
 });
 
 test('routine backup performs each expensive new-backup operation once', async t => {
@@ -109,7 +187,7 @@ test('routine backup performs each expensive new-backup operation once', async t
   });
 
   assert.deepEqual(observed, [
-    'source_online_copy',
+    'source_vacuum_snapshot',
     'backup_integrity_check',
     'backup_foreign_key_check',
     'backup_table_manifest',
@@ -118,12 +196,12 @@ test('routine backup performs each expensive new-backup operation once', async t
   ]);
   assert.deepEqual(result.io_operations, observed);
   assert.deepEqual(result.full_file_passes, [
-    'source_online_copy',
+    'source_vacuum_snapshot',
     'backup_integrity_check',
     'backup_sha256'
   ]);
   assert.deepEqual(result.io_operation_counts, {
-    source_online_copy: 1,
+    source_vacuum_snapshot: 1,
     backup_integrity_check: 1,
     backup_foreign_key_check: 1,
     backup_table_manifest: 1,
@@ -132,6 +210,14 @@ test('routine backup performs each expensive new-backup operation once', async t
   });
   assert.equal(result.io_operations.includes('backup_quick_check'), false);
   assert.equal(result.manifest.health.quick_check, null);
+  assert.equal(result.copy_strategy, 'vacuum_into');
+  assert.equal(result.manifest.copy_strategy, 'vacuum_into');
+  assert.equal(result.capacity_preflight.ok, true);
+  assert.ok(result.capacity_preflight.source_logical_bytes > 0);
+  assert.ok(
+    result.capacity_preflight.required_free_bytes
+      >= result.capacity_preflight.source_logical_bytes
+  );
   assert.equal(result.manifest.table_manifest_mode, 'schema');
   assert.equal(result.manifest.verification.status, 'verified');
 });
@@ -235,12 +321,48 @@ test('retention accepts a legacy backup that the prior routine fully verified', 
   })).ok, true);
   const oldManifest = JSON.parse(fs.readFileSync(legacy.manifest_path, 'utf8'));
   delete oldManifest.table_manifest_mode;
+  delete oldManifest.copy_strategy;
   fs.writeFileSync(legacy.manifest_path, `${JSON.stringify(oldManifest, null, 2)}\n`);
+  assert.equal((await verifySnapshot({
+    databasePath: legacy.path,
+    manifestPath: legacy.manifest_path
+  })).ok, true);
 
   const inspected = await trustedManagedBackups(backups, source);
   assert.equal(inspected.trusted.length, 1);
   assert.equal(inspected.invalid.length, 0);
   assert.equal(inspected.trusted[0].trust_basis, 'legacy_atomic_verified_manifest');
+});
+
+test('snapshot verification and retention reject an unknown declared copy strategy', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-routine-strategy-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const unfinalizedSource = createArchiveFixture(directory, 'source.sqlite');
+  const finalized = await finalizeDatabase({
+    databasePath: unfinalizedSource,
+    backupPath: path.join(directory, 'portal-archive.sqlite')
+  });
+  const backups = path.join(directory, 'backups');
+  const created = await createRoutineBackup({
+    databasePath: finalized.backup.path,
+    directory: backups,
+    now: new Date('2026-07-24T08:15:00.000Z')
+  });
+  const manifest = JSON.parse(fs.readFileSync(created.manifest_path, 'utf8'));
+  manifest.copy_strategy = 'untrusted_copy';
+  fs.writeFileSync(created.manifest_path, `${JSON.stringify(manifest, null, 2)}\n`);
+
+  await assert.rejects(
+    verifySnapshot({
+      databasePath: created.path,
+      manifestPath: created.manifest_path
+    }),
+    /Unsupported snapshot copy strategy/
+  );
+  const inspected = await trustedManagedBackups(backups, finalized.backup.path);
+  assert.equal(inspected.trusted.length, 0);
+  assert.equal(inspected.invalid.length, 1);
+  assert.match(inspected.invalid[0].error, /unsupported copy strategy/);
 });
 
 test('archive-contract failure removes the new partial backup safely', async t => {
@@ -274,8 +396,9 @@ test('archive-contract failure removes the new partial backup safely', async t =
   assert.deepEqual(fs.readdirSync(backups), []);
 });
 
-test('backup CLI validates its page batch size', () => {
+test('backup CLI keeps deprecated page-rate validation and parses exclusive mode', () => {
   assert.equal(parseArguments(['--page-rate', '32']).pageRate, 32);
+  assert.equal(parseArguments(['--exclusive']).exclusive, true);
   assert.throws(
     () => parseArguments(['--page-rate', '0']),
     /--page-rate must be an integer from 1 through 10000/
@@ -328,7 +451,8 @@ test('removes stale managed partials and reports recoverable orphan artifacts', 
     directory: backups,
     retain: 2,
     now: new Date('2026-07-21T04:15:00.000Z'),
-    stalePartialAgeMs: 60 * 60 * 1000
+    stalePartialAgeMs: 60 * 60 * 1000,
+    exclusiveRun: true
   });
 
   assert.deepEqual(new Set(result.removed_stale_partials), new Set([
@@ -346,4 +470,45 @@ test('removes stale managed partials and reports recoverable orphan artifacts', 
   );
   assert.equal(fs.readFileSync(orphanDatabase, 'utf8'), 'preserve for recovery');
   assert.equal(fs.readFileSync(orphanManifest, 'utf8'), '{}');
+});
+
+test('only an explicitly exclusive run removes a recent abandoned partial', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-routine-exclusive-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const unfinalizedSource = createArchiveFixture(directory, 'source.sqlite');
+  const finalized = await finalizeDatabase({
+    databasePath: unfinalizedSource,
+    backupPath: path.join(directory, 'portal-archive.sqlite')
+  });
+  const source = finalized.backup.path;
+  const backups = path.join(directory, 'backups');
+  fs.mkdirSync(backups, { recursive: true });
+  const recentPartial = path.join(
+    backups,
+    'portal-archive-20260728T041500Z.sqlite.partial'
+  );
+  fs.writeFileSync(recentPartial, 'interrupted snapshot');
+
+  const nonexclusive = await createRoutineBackup({
+    databasePath: source,
+    directory: backups,
+    now: new Date('2026-07-28T05:15:00.000Z')
+  });
+  assert.equal(fs.existsSync(recentPartial), true);
+  assert.deepEqual(nonexclusive.removed_abandoned_partials, []);
+  assert.equal(
+    nonexclusive.pending_partials.some(item => item.path === recentPartial),
+    true
+  );
+
+  const exclusive = await createRoutineBackup({
+    databasePath: source,
+    directory: backups,
+    now: new Date('2026-07-28T06:15:00.000Z'),
+    exclusiveRun: true
+  });
+  assert.equal(fs.existsSync(recentPartial), false);
+  assert.deepEqual(exclusive.removed_abandoned_partials, [recentPartial]);
+  assert.deepEqual(exclusive.removed_stale_partials, []);
+  assert.equal(exclusive.pending_partials.length, 0);
 });
