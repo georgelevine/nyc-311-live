@@ -57,6 +57,12 @@ function fixture(t, { aliases = true, events = true } = {}) {
         parsed_json TEXT
       )
     `);
+    database.exec(`
+      CREATE INDEX nyc311_email_events_request_idx
+        ON nyc311_email_events(reconciled_srnumber,received_at);
+      CREATE INDEX nyc311_email_events_outcome_idx
+        ON nyc311_email_events(parse_outcome,received_at);
+    `);
   }
   database.close();
   return databasePath;
@@ -215,6 +221,35 @@ test('limits update count and bounds displayed response fields', t => {
   assert.equal(result.updates[0].received_at, '2026-07-23T14:02:00.000Z');
   assert.equal(result.updates[0].response_text.length, MAX_RESPONSE_TEXT - 1);
   assert.equal(result.updates[0].next_update_text.length, MAX_NEXT_UPDATE_TEXT - 1);
+});
+
+test('pins request reads to the request-number index', t => {
+  const databasePath = fixture(t);
+  const database = new DatabaseSync(databasePath);
+  insertEvent(database);
+  database.close();
+  const prepared = [];
+  const result = readRequestEmailUpdates(databasePath, SRNUMBER, {
+    openDatabase(filename, options) {
+      const opened = new DatabaseSync(filename, options);
+      return {
+        prepare(sql) {
+          prepared.push(sql);
+          return opened.prepare(sql);
+        },
+        close() {
+          opened.close();
+        }
+      };
+    }
+  });
+
+  assert.equal(result.total, 1);
+  const eventReads = prepared.filter(sql => /FROM nyc311_email_events\b/.test(sql));
+  assert.equal(eventReads.length, 2);
+  assert.equal(eventReads.every(sql => (
+    /INDEXED BY nyc311_email_events_request_idx/.test(sql)
+  )), true);
 });
 
 test('returns an empty result when the database or email tables are absent', t => {

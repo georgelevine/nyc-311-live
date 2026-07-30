@@ -90,6 +90,7 @@ if [[ "${deployment_scope}" == "web" ]]; then
   if non_ui_changes="$(diff --recursive --brief \
     --exclude=public --exclude=test --exclude=.env --exclude=RELEASE_COMMIT \
     --exclude=server.js \
+    --exclude=nyc311-email-events.js \
     --exclude=sqlite-email-metrics.js --exclude=email-metrics-presentation.js \
     --exclude=email-metrics-background.js --exclude=email-metrics-worker.js \
     --exclude=operational-health.js \

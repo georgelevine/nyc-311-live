@@ -124,3 +124,7 @@ test('local deployment cannot hang indefinitely on a stale SSH connection', () =
   assert.match(localDeploy, /ServerAliveInterval=10/);
   assert.match(localDeploy, /ServerAliveCountMax=3/);
 });
+
+test('the web fast path permits the read-only request email projection', () => {
+  assert.match(deploy, /--exclude=nyc311-email-events\.js/);
+});

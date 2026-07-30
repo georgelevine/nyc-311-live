@@ -75,7 +75,7 @@ function readRequestEmailUpdates(databasePath, srnumber, {
     `;
     result.total = Number(database.prepare(`
       SELECT COUNT(*) AS count
-      FROM nyc311_email_events
+      FROM nyc311_email_events INDEXED BY nyc311_email_events_request_idx
       WHERE ${eligibleWhere}
     `).get(normalizedSrnumber).count || 0);
 
@@ -84,7 +84,7 @@ function readRequestEmailUpdates(databasePath, srnumber, {
         substr(response_text,1,${MAX_RESPONSE_TEXT}) AS response_text,
         substr(next_update_text,1,${MAX_NEXT_UPDATE_TEXT}) AS next_update_text,
         received_at,closure_wake_queued
-      FROM nyc311_email_events
+      FROM nyc311_email_events INDEXED BY nyc311_email_events_request_idx
       WHERE ${eligibleWhere}
       ORDER BY received_at DESC,id DESC
       LIMIT ?
