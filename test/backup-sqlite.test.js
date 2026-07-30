@@ -5,7 +5,12 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { createRoutineBackup, verifiedManagedBackups } = require('../backup-sqlite');
+const {
+  DEFAULT_BACKUP_PAGE_RATE,
+  createRoutineBackup,
+  parseArguments,
+  verifiedManagedBackups
+} = require('../backup-sqlite');
 const { finalizeDatabase } = require('../sqlite-finalization');
 const { verifySnapshot } = require('../sqlite-snapshot');
 const { createArchiveFixture } = require('../test-support/archive-fixture');
@@ -61,6 +66,41 @@ test('creates verified online backups and prunes only the managed oldest pair', 
     assert.equal(verified.ok, true);
   }
   assert.equal(fs.readdirSync(backups).some(name => name.endsWith('.partial')), false);
+});
+
+test('routine backups use a small configurable SQLite page batch', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-routine-rate-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const unfinalizedSource = createArchiveFixture(directory, 'source.sqlite');
+  const finalized = await finalizeDatabase({
+    databasePath: unfinalizedSource,
+    backupPath: path.join(directory, 'portal-archive.sqlite')
+  });
+  const result = await createRoutineBackup({
+    databasePath: finalized.backup.path,
+    directory: path.join(directory, 'backups'),
+    pageRate: 7,
+    now: new Date('2026-07-24T04:15:00.000Z')
+  });
+
+  assert.equal(result.backup_page_rate, 7);
+  assert.equal((await verifySnapshot({
+    databasePath: result.path,
+    manifestPath: result.manifest_path
+  })).ok, true);
+  assert.equal(DEFAULT_BACKUP_PAGE_RATE, 64);
+});
+
+test('backup CLI validates its page batch size', () => {
+  assert.equal(parseArguments(['--page-rate', '32']).pageRate, 32);
+  assert.throws(
+    () => parseArguments(['--page-rate', '0']),
+    /--page-rate must be an integer from 1 through 10000/
+  );
+  assert.throws(
+    () => parseArguments(['--page-rate', '10001']),
+    /--page-rate must be an integer from 1 through 10000/
+  );
 });
 
 test('removes stale managed partials and reports recoverable orphan artifacts', async t => {

@@ -682,10 +682,13 @@ async function createBackup(
   sourcePath,
   backupPath,
   createdAt = new Date().toISOString(),
-  { prepareDatabase = null } = {}
+  { prepareDatabase = null, rate = 10000 } = {}
 ) {
   if (prepareDatabase != null && typeof prepareDatabase !== 'function') {
     throw new TypeError('prepareDatabase must be a function');
+  }
+  if (!Number.isInteger(rate) || rate < 1) {
+    throw new TypeError('Backup page rate must be a positive integer');
   }
   const {
     resolvedBackup,
@@ -699,9 +702,9 @@ async function createBackup(
   let preparation = null;
   try {
     const backupStartedAt = Date.now();
-    // A larger page batch reduces restart/starvation risk while the collector is
-    // writing. Routine duration remains visible in every verified manifest.
-    await sqliteBackup(database, partialBackupPath, { rate: 10000 });
+    // The batch size is configurable so routine production backups can yield
+    // between small I/O bursts while one-off finalization keeps its fast default.
+    await sqliteBackup(database, partialBackupPath, { rate });
     const backupDurationMs = Date.now() - backupStartedAt;
     fs.chmodSync(partialBackupPath, 0o600);
 

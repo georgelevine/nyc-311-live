@@ -148,6 +148,12 @@ services:
     <<: [*app-image, *app-runtime]
     profiles: [tools]
     command:
+      - ionice
+      - -c
+      - "3"
+      - nice
+      - -n
+      - "19"
       - flock
       - --nonblock
       - --no-fork
@@ -160,6 +166,8 @@ services:
       - /backups
       - --retain
       - ${BACKUP_RETENTION_COUNT:-3}
+      - --page-rate
+      - ${SQLITE_BACKUP_PAGE_RATE:-64}
     restart: "no"
     volumes:
       - type: bind

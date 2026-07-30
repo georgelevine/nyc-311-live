@@ -366,7 +366,12 @@ Do not reopen the Mac collector. Preserve its original database unchanged.
 
 The timer runs nightly and keeps three verified local backups. Invalid or tampered
 backup pairs never consume retention slots, and the job refuses to start without
-safe free space.
+safe free space. On the small instance, the backup process runs at idle disk
+priority and the lowest CPU priority inside its container. SQLite copies 64 pages
+per step by default so foreground collection, email ingestion, and dashboard reads
+can run between short backup bursts. Set `SQLITE_BACKUP_PAGE_RATE` in `.env` only
+after measuring production I/O latency; a larger value completes sooner but
+creates larger disk bursts.
 
 ```bash
 sudo systemctl status nyc311-backup.timer --no-pager

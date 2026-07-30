@@ -17,7 +17,9 @@ const {
   createRequestAlias
 } = require('../nyc311-email-aliases');
 const {
+  FIND_DUPLICATE_SQL,
   createNyc311EmailHandler,
+  findDuplicate,
   hmacHex,
   persistInboundEmail,
   reconcileStoredEmailClosures,
@@ -215,6 +217,74 @@ test('email migrations create durable event, alias, and subscription job tables'
   );
   assert.equal(eventColumns.has('raw_sha256'), true);
   assert.equal(eventColumns.has('raw_mime'), false);
+});
+
+test('duplicate detection preserves earliest-match semantics and uses only indexes', t => {
+  const { database } = createDatabase(t);
+  t.after(() => database.close());
+  const insert = database.prepare(`
+    INSERT INTO nyc311_email_events (
+      raw_sha256,raw_bytes,ses_message_id,internet_message_id,
+      alias_match_status,srnumber_mismatch,parse_outcome,received_at,created_at
+    ) VALUES (?,?,?,?,?,0,'unrecognized',?,?)
+  `);
+  insert.run(
+    'a'.repeat(64),
+    1,
+    'ses-first',
+    '<first@customercare.nyc.gov>',
+    'missing_recipient',
+    NOW.toISOString(),
+    NOW.toISOString()
+  );
+  insert.run(
+    'b'.repeat(64),
+    1,
+    'ses-second',
+    '<second@customercare.nyc.gov>',
+    'missing_recipient',
+    NOW.toISOString(),
+    NOW.toISOString()
+  );
+
+  assert.equal(findDuplicate(database, {
+    rawSha256: 'b'.repeat(64),
+    sesMessageId: 'ses-first',
+    internetMessageId: null
+  }).id, 1);
+  assert.equal(findDuplicate(database, {
+    rawSha256: 'c'.repeat(64),
+    sesMessageId: null,
+    internetMessageId: '<second@customercare.nyc.gov>'
+  }).id, 2);
+  assert.equal(findDuplicate(database, {
+    rawSha256: 'c'.repeat(64),
+    sesMessageId: null,
+    internetMessageId: null
+  }), null);
+
+  const plan = database.prepare(`EXPLAIN QUERY PLAN ${FIND_DUPLICATE_SQL}`).all(
+    'c'.repeat(64),
+    'ses-third',
+    'ses-third',
+    '<third@customercare.nyc.gov>',
+    '<third@customercare.nyc.gov>'
+  );
+  const details = plan.map(row => row.detail);
+  assert.equal(
+    details.some(detail => detail === 'SCAN nyc311_email_events'),
+    false,
+    details.join('\n')
+  );
+  assert.equal(details.some(
+    detail => detail.includes('sqlite_autoindex_nyc311_email_events_1')
+  ), true);
+  assert.equal(details.some(
+    detail => detail.includes('nyc311_email_events_ses_message_id_idx')
+  ), true);
+  assert.equal(details.some(
+    detail => detail.includes('nyc311_email_events_internet_message_id_idx')
+  ), true);
 });
 
 test('creates an unguessable alias without provisioning a mailbox and reuses it per SR', t => {

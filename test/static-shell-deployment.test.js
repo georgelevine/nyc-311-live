@@ -26,6 +26,10 @@ const installSnapshot = fs.readFileSync(
   path.join(root, 'aws', 'lightsail-sqlite', 'install-snapshot.sh'),
   'utf8'
 );
+const backupService = fs.readFileSync(
+  path.join(root, 'aws', 'lightsail-sqlite', 'systemd', 'nyc311-backup.service'),
+  'utf8'
+);
 
 test('Caddy isolates inbound email before routing dashboard APIs', () => {
   assert.equal(caddy.includes('redir @root /live.html'), false);
@@ -108,6 +112,23 @@ test('snapshot replacement stops the isolated database writer and checks it afte
     /docker compose up -d web inbound-email proxy/
   );
   assert.match(installSnapshot, /http:\/\/127\.0\.0\.1:10001\/health/);
+});
+
+test('nightly backup priority and SQLite batching apply inside the container', () => {
+  const backup = compose.slice(
+    compose.indexOf('  backup:'),
+    compose.indexOf('  verify:')
+  );
+  assert.match(
+    backup,
+    /command:\s+- ionice\s+- -c\s+- "3"\s+- nice\s+- -n\s+- "19"\s+- flock/
+  );
+  assert.match(
+    backup,
+    /- --page-rate\s+- \$\{SQLITE_BACKUP_PAGE_RATE:-64\}/
+  );
+  assert.match(backupService, /Nice=19/);
+  assert.match(backupService, /IOSchedulingClass=idle/);
 });
 
 test('rollback cannot recurse or continue a failed deployment', () => {

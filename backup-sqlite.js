@@ -15,6 +15,10 @@ const {
 const { verifySnapshot } = require('./sqlite-snapshot');
 
 const STALE_PARTIAL_AGE_MS = 24 * 60 * 60 * 1000;
+// 64 ordinary 4 KiB pages is a roughly 256 KiB backup step. This keeps each
+// asynchronous SQLite backup burst short enough for the live writer and web
+// reads to run between steps on the small Lightsail disk.
+const DEFAULT_BACKUP_PAGE_RATE = 64;
 
 function usage() {
   return `Usage: node backup-sqlite.js [database.sqlite] [options]
@@ -23,23 +27,37 @@ Options:
   --db PATH          Explicit source database
   --directory PATH   Backup directory (default BACKUP_DIRECTORY or source/backups)
   --retain COUNT     Number of verified local backups to retain (default 3)
+  --page-rate COUNT  SQLite pages per backup step (default ${DEFAULT_BACKUP_PAGE_RATE})
   --help             Show this help`;
 }
 
 function parseArguments(argv) {
-  const options = { cliPath: null, directory: null, retain: 3, help: false };
+  const options = {
+    cliPath: null,
+    directory: null,
+    retain: 3,
+    pageRate: null,
+    help: false
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index];
     if (argument === '--help' || argument === '-h') options.help = true;
-    else if (argument === '--db' || argument === '--directory' || argument === '--retain') {
+    else if (argument === '--db' || argument === '--directory'
+        || argument === '--retain' || argument === '--page-rate') {
       const value = argv[++index];
       if (value == null) throw new Error(`${argument} requires a value`);
       if (argument === '--db') options.cliPath = value;
       else if (argument === '--directory') options.directory = value;
-      else {
+      else if (argument === '--retain') {
         options.retain = Number(value);
         if (!Number.isInteger(options.retain) || options.retain < 1 || options.retain > 365) {
           throw new Error('--retain must be an integer from 1 through 365');
+        }
+      } else {
+        options.pageRate = Number(value);
+        if (!Number.isInteger(options.pageRate) || options.pageRate < 1
+            || options.pageRate > 10000) {
+          throw new Error('--page-rate must be an integer from 1 through 10000');
         }
       }
     } else if (argument.startsWith('-')) throw new Error(`Unknown option: ${argument}`);
@@ -172,9 +190,13 @@ async function createRoutineBackup({
   databasePath,
   directory,
   retain = 3,
+  pageRate = DEFAULT_BACKUP_PAGE_RATE,
   now = new Date(),
   stalePartialAgeMs = STALE_PARTIAL_AGE_MS
 }) {
+  if (!Number.isInteger(pageRate) || pageRate < 1 || pageRate > 10000) {
+    throw new TypeError('Backup page rate must be an integer from 1 through 10000');
+  }
   const resolvedDatabase = path.resolve(databasePath);
   if (!fs.existsSync(resolvedDatabase)) throw new Error(`SQLite database does not exist: ${resolvedDatabase}`);
   const resolvedDirectory = path.resolve(directory || path.join(path.dirname(resolvedDatabase), 'backups'));
@@ -208,7 +230,13 @@ async function createRoutineBackup({
     if (migrations.application_id !== APPLICATION_ID || migrations.pending.length) {
       throw new Error('Source database must be finalized before routine cloud backups begin');
     }
-    created = await createBackup(database, resolvedDatabase, destination, now.toISOString());
+    created = await createBackup(
+      database,
+      resolvedDatabase,
+      destination,
+      now.toISOString(),
+      { rate: pageRate }
+    );
   } finally {
     database.close();
   }
@@ -226,6 +254,7 @@ async function createRoutineBackup({
   });
   return {
     ...created,
+    backup_page_rate: pageRate,
     retained: pruned.retained.length,
     removed: pruned.removed,
     invalid_backups: pruned.invalid,
@@ -245,7 +274,10 @@ async function main(argv = process.argv.slice(2), env = process.env) {
   const result = await createRoutineBackup({
     databasePath,
     directory: options.directory || env.BACKUP_DIRECTORY,
-    retain: options.retain
+    retain: options.retain,
+    pageRate: options.pageRate == null
+      ? DEFAULT_BACKUP_PAGE_RATE
+      : options.pageRate
   });
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
@@ -258,6 +290,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  DEFAULT_BACKUP_PAGE_RATE,
   STALE_PARTIAL_AGE_MS,
   createRoutineBackup,
   inspectManagedArtifacts,

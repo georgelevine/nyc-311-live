@@ -200,19 +200,41 @@ function jsonText(value, maximumLength = 512 * 1024) {
   }
 }
 
+const FIND_DUPLICATE_SQL = `
+  SELECT id,parse_outcome,closure_wake_queued
+  FROM (
+    SELECT id,parse_outcome,closure_wake_queued
+    FROM nyc311_email_events
+    WHERE raw_sha256=?
+
+    UNION ALL
+
+    SELECT id,parse_outcome,closure_wake_queued
+    FROM nyc311_email_events
+    WHERE ? IS NOT NULL
+      AND ses_message_id=?
+      AND ses_message_id IS NOT NULL
+      AND TRIM(ses_message_id)<>''
+
+    UNION ALL
+
+    SELECT id,parse_outcome,closure_wake_queued
+    FROM nyc311_email_events
+    WHERE ? IS NOT NULL
+      AND internet_message_id=?
+      AND internet_message_id IS NOT NULL
+      AND TRIM(internet_message_id)<>''
+  )
+  ORDER BY id
+  LIMIT 1
+`;
+
 function findDuplicate(database, {
   rawSha256,
   sesMessageId,
   internetMessageId
 }) {
-  return database.prepare(`
-    SELECT id,parse_outcome,closure_wake_queued
-    FROM nyc311_email_events
-    WHERE raw_sha256=?
-       OR (? IS NOT NULL AND ses_message_id=?)
-       OR (? IS NOT NULL AND internet_message_id=?)
-    ORDER BY id LIMIT 1
-  `).get(
+  return database.prepare(FIND_DUPLICATE_SQL).get(
     rawSha256,
     sesMessageId,
     sesMessageId,
@@ -856,11 +878,13 @@ function createNyc311EmailHandler({
 }
 
 module.exports = {
+  FIND_DUPLICATE_SQL,
   MAX_DELIVERY_AGE_SECONDS,
   MAX_RAW_EMAIL_BYTES,
   createNyc311EmailHandler,
   decodeSignedMetadata,
   extractEmailAddress,
+  findDuplicate,
   hmacHex,
   persistInboundEmail,
   reconcileStoredEmailClosures,

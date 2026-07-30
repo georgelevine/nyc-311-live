@@ -887,7 +887,11 @@
     const loadedLabel = mapArchiveLoaded && loaded >= mapped
       ? `all ${mapped.toLocaleString()} map pins loaded`
       : `${loaded.toLocaleString()} of ${mapped.toLocaleString()} map pins loaded`;
-    const label = `${mapShownCount.toLocaleString()} shown · ${loadedLabel} · ${unmapped.toLocaleString()} without coordinates`;
+    const awaitingDetails = Math.max(0, loaded - mapShownCount);
+    const awaitingDetailsLabel = awaitingDetails
+      ? ` · ${awaitingDetails.toLocaleString()} awaiting submitted details`
+      : '';
+    const label = `${mapShownCount.toLocaleString()} shown · ${loadedLabel}${awaitingDetailsLabel} · ${unmapped.toLocaleString()} without coordinates`;
     if (mapCounts.textContent !== label) mapCounts.textContent = label;
   }
 

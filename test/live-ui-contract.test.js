@@ -48,6 +48,14 @@ test('dashboard keeps requests, map, and overview as explicit responsive views',
   assert.equal($('#details-pending-items').length, 1);
 });
 
+test('map counts explain why loaded pins can be temporarily withheld', () => {
+  assert.match(
+    dashboard,
+    /awaiting submitted details/,
+    'loaded map records awaiting submitted details must not look silently missing'
+  );
+});
+
 test('request detail is labelled and status history is collapsed by default', () => {
   assert.equal($('#request-detail').attr('role'), 'dialog');
   assert.equal($('#request-detail').attr('aria-labelledby'), 'detail-problem');

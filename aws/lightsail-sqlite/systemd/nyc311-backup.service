@@ -10,6 +10,7 @@ Type=oneshot
 TimeoutStartSec=infinity
 WorkingDirectory=/opt/nyc-311-live/aws/lightsail-sqlite
 ExecStart=/usr/bin/docker compose --profile tools run --rm backup
-Nice=10
-IOSchedulingClass=best-effort
-IOSchedulingPriority=7
+# The Compose command also applies these priorities inside the short-lived
+# backup container. These host-side values are defense in depth for the client.
+Nice=19
+IOSchedulingClass=idle
