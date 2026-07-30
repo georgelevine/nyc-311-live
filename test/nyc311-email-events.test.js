@@ -15,7 +15,11 @@ const {
 
 const SRNUMBER = '311-28327449';
 
-function fixture(t, { aliases = true, events = true } = {}) {
+function fixture(t, {
+  aliases = true,
+  events = true,
+  eventIndexes = true
+} = {}) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-email-events-'));
   const databasePath = path.join(directory, 'archive.sqlite');
   const database = new DatabaseSync(databasePath);
@@ -57,12 +61,14 @@ function fixture(t, { aliases = true, events = true } = {}) {
         parsed_json TEXT
       )
     `);
-    database.exec(`
-      CREATE INDEX nyc311_email_events_request_idx
-        ON nyc311_email_events(reconciled_srnumber,received_at);
-      CREATE INDEX nyc311_email_events_outcome_idx
-        ON nyc311_email_events(parse_outcome,received_at);
-    `);
+    if (eventIndexes) {
+      database.exec(`
+        CREATE INDEX nyc311_email_events_request_idx
+          ON nyc311_email_events(reconciled_srnumber,received_at);
+        CREATE INDEX nyc311_email_events_outcome_idx
+          ON nyc311_email_events(parse_outcome,received_at);
+      `);
+    }
   }
   database.close();
   return databasePath;
@@ -250,6 +256,18 @@ test('pins request reads to the request-number index', t => {
   assert.equal(eventReads.every(sql => (
     /INDEXED BY nyc311_email_events_request_idx/.test(sql)
   )), true);
+});
+
+test('still reads a legacy email table without the request index', t => {
+  const databasePath = fixture(t, { eventIndexes: false });
+  const database = new DatabaseSync(databasePath);
+  insertEvent(database);
+  database.close();
+
+  const result = readRequestEmailUpdates(databasePath, SRNUMBER);
+
+  assert.equal(result.total, 1);
+  assert.equal(result.updates.length, 1);
 });
 
 test('returns an empty result when the database or email tables are absent', t => {

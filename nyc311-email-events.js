@@ -35,6 +35,15 @@ function tableNames(database) {
   `).all().map(row => row.name));
 }
 
+function hasIndex(database, name, table) {
+  return Boolean(database.prepare(`
+    SELECT 1
+    FROM sqlite_master
+    WHERE type='index' AND name=? AND tbl_name=?
+    LIMIT 1
+  `).get(name, table));
+}
+
 function readRequestEmailUpdates(databasePath, srnumber, {
   existsSync = fs.existsSync,
   openDatabase = (filename, options) => new DatabaseSync(filename, options),
@@ -66,6 +75,13 @@ function readRequestEmailUpdates(databasePath, srnumber, {
     }
 
     if (!tables.has('nyc311_email_events')) return result;
+    const eventSource = hasIndex(
+      database,
+      'nyc311_email_events_request_idx',
+      'nyc311_email_events'
+    )
+      ? 'nyc311_email_events INDEXED BY nyc311_email_events_request_idx'
+      : 'nyc311_email_events';
 
     const eligibleWhere = `
       reconciled_srnumber=?
@@ -75,7 +91,7 @@ function readRequestEmailUpdates(databasePath, srnumber, {
     `;
     result.total = Number(database.prepare(`
       SELECT COUNT(*) AS count
-      FROM nyc311_email_events INDEXED BY nyc311_email_events_request_idx
+      FROM ${eventSource}
       WHERE ${eligibleWhere}
     `).get(normalizedSrnumber).count || 0);
 
@@ -84,7 +100,7 @@ function readRequestEmailUpdates(databasePath, srnumber, {
         substr(response_text,1,${MAX_RESPONSE_TEXT}) AS response_text,
         substr(next_update_text,1,${MAX_NEXT_UPDATE_TEXT}) AS next_update_text,
         received_at,closure_wake_queued
-      FROM nyc311_email_events INDEXED BY nyc311_email_events_request_idx
+      FROM ${eventSource}
       WHERE ${eligibleWhere}
       ORDER BY received_at DESC,id DESC
       LIMIT ?
