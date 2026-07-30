@@ -272,6 +272,34 @@ test('compact query flag accepts only exact 0 or 1 values', async () => {
   }
 });
 
+test('dashboard can skip an expensive first-page matching total without changing records', async () => {
+  const defaultResponse = await fetch(
+    `${baseUrl}/api/live-dashboard?limit=1&compact=1&status=Closed`
+  );
+  assert.equal(defaultResponse.status, 200);
+  const defaultPayload = await defaultResponse.json();
+  assert.deepEqual(defaultPayload.records.map(record => record.srnumber), ['311-28390000']);
+  assert.equal(defaultPayload.page.matching_total, 1);
+
+  const skippedResponse = await fetch(
+    `${baseUrl}/api/live-dashboard?limit=1&compact=1&status=Closed&include_totals=0`
+  );
+  assert.equal(skippedResponse.status, 200);
+  const skippedPayload = await skippedResponse.json();
+  assert.deepEqual(skippedPayload.records, defaultPayload.records);
+  assert.equal(Object.hasOwn(skippedPayload.page, 'matching_total'), false);
+  assert.equal(skippedPayload.page.snapshot_at != null, true);
+
+  for (const value of ['', 'true', 'yes', '2', '-1']) {
+    const response = await fetch(
+      `${baseUrl}/api/live-dashboard?include_totals=${encodeURIComponent(value)}`
+    );
+    assert.equal(response.status, 400, `include_totals=${JSON.stringify(value)}`);
+    const payload = await response.json();
+    assert.match(payload.error, /include_totals must be 0 or 1/);
+  }
+});
+
 test('map fast path returns records without archive totals', async () => {
   const response = await fetch(
     `${baseUrl}/api/live-map?limit=1&include_totals=0`

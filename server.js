@@ -379,6 +379,19 @@ function liveDashboardCompactMode(req) {
   return value === '1';
 }
 
+function liveDashboardIncludeTotals(req) {
+  if (!req.query || !Object.prototype.hasOwnProperty.call(req.query, 'include_totals')) {
+    return true;
+  }
+  const value = req.query.include_totals;
+  if (value !== '0' && value !== '1') {
+    const error = new Error('include_totals must be 0 or 1');
+    error.statusCode = 400;
+    throw error;
+  }
+  return value === '1';
+}
+
 function liveMapIncludeTotals(req) {
   if (!req.query || !Object.prototype.hasOwnProperty.call(req.query, 'include_totals')) {
     return false;
@@ -1799,8 +1812,10 @@ app.get('/api/release-info', (req, res) => {
 app.get('/api/live-dashboard', (req, res) => {
   const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
   let compact;
+  let includeTotals;
   try {
     compact = liveDashboardCompactMode(req);
+    includeTotals = liveDashboardIncludeTotals(req);
   } catch (error) {
     return res.status(error.statusCode || 400).json({
       error: error.message,
@@ -2052,7 +2067,7 @@ app.get('/api/live-dashboard', (req, res) => {
           : null);
       return { ...record, ...assessRecordAvailability(record) };
     });
-    const matchingTotal = beforeSuffix == null
+    const matchingTotal = beforeSuffix == null && includeTotals
       ? Number(database.prepare(`
           SELECT COUNT(*) AS count
           FROM ${liveSource}

@@ -316,6 +316,7 @@
   let lastMapRefreshStartedAt = 0;
   let currentPollSeconds = 15;
   let lastPortalCheck = null;
+  let dashboardRefreshDelayed = false;
   let portalDetailByNumber = new Map();
   let detailLoadSequence = 0;
   let emailUpdatesByNumber = new Map();
@@ -592,6 +593,15 @@
     ]);
   }
 
+  function browsingDeepFilteredResults() {
+    const feedIsVisible = !compactLayout.matches || appShell.dataset.mobileView === 'feed';
+    return feedIsVisible
+      && Object.keys(activeDataFilters()).length > 0
+      && (feedLoadingMore || records.length > INITIAL_FEED_PAGE_SIZE)
+      && feed.scrollTop > 50
+      && Boolean(feedSnapshotAt);
+  }
+
   function updateFeedCoverage() {
     if (!feedCoverage) return;
     const loaded = records.length;
@@ -608,6 +618,11 @@
     }
     if (feedLoadingMore) {
       feedCoverage.textContent = `Loading older matching requests · ${loaded.toLocaleString()} loaded`;
+      return;
+    }
+    if (browsingDeepFilteredResults()) {
+      feedCoverage.textContent =
+        `${loaded.toLocaleString()} matching requests · browsing older results; return to top for live refresh`;
       return;
     }
     if (total !== null) {
@@ -976,7 +991,10 @@
 
   function updateMapCountText() {
     if (!mapStats.totals_available) {
-      const label = `${mapShownCount.toLocaleString()} matching · ${mapRecords.length.toLocaleString()} pins loaded`;
+      const hasMutableDisplayFilters = Object.keys(activeDataFilters()).length > 0;
+      const label = hasMutableDisplayFilters && mapArchiveLoaded
+        ? `${mapShownCount.toLocaleString()} matching map ${mapShownCount === 1 ? 'pin' : 'pins'} shown · complete ${mapScopeLabel().toLowerCase()} map loaded`
+        : `${mapShownCount.toLocaleString()} matching · ${mapRecords.length.toLocaleString()} pins loaded`;
       if (mapCounts.textContent !== label) mapCounts.textContent = label;
       return;
     }
@@ -999,7 +1017,10 @@
   }
 
   function updateMapRenderingStatus() {
-    const count = mapStats.totals_available
+    const hasMutableDisplayFilters = Object.keys(activeDataFilters()).length > 0;
+    const count = hasMutableDisplayFilters
+      ? mapShownCount
+      : mapStats.totals_available
       ? Number(mapStats.mapped_total || 0)
       : mapRecords.length;
     if (mapRenderFrame !== null || markerLayerBuilding || markerLayerDeferredRender) {
@@ -1011,7 +1032,9 @@
     }
     setMapLoadState(
       'ready',
-      `Complete · ${count.toLocaleString()} map ${count === 1 ? 'pin' : 'pins'} loaded`
+      hasMutableDisplayFilters
+        ? `Complete · ${count.toLocaleString()} matching map ${count === 1 ? 'pin' : 'pins'} shown`
+        : `Complete · ${count.toLocaleString()} map ${count === 1 ? 'pin' : 'pins'} loaded`
     );
   }
 
@@ -1886,6 +1909,16 @@
 
   function updateConnectionLabel(now = new Date()) {
     if (connection.classList.contains('offline')) return;
+    if (browsingDeepFilteredResults()) {
+      connectionLabel.textContent = 'Live collection · browsing older results';
+      return;
+    }
+    if (dashboardRefreshDelayed) {
+      connectionLabel.textContent = dashboardPayloadLoaded
+        ? 'Live · refresh delayed'
+        : 'Connecting · refresh delayed';
+      return;
+    }
     if (!lastPortalCheck || Number.isNaN(lastPortalCheck.getTime())) {
       connectionLabel.textContent = 'Live monitoring active';
       return;
@@ -2515,6 +2548,14 @@
   }
 
   function updateMapStatsFromDashboard(stats) {
+    if (Object.keys(activeDataFilters()).length > 0) {
+      mapStats = {
+        ...mapStats,
+        totals_available: false
+      };
+      updateMapCountText();
+      return;
+    }
     const totalsAvailable = Number.isFinite(Number(stats.total));
     mapStats = {
       ...mapStats,
@@ -3528,6 +3569,7 @@
         limit: FEED_PAGE_SIZE,
         compact: 1,
         paginate: 1,
+        include_totals: 0,
         before_suffix: beforeSuffix,
         ...(snapshotAt ? { snapshot_at: snapshotAt } : {}),
         ...activeDataFilters()
@@ -3578,8 +3620,10 @@
     const submittedSince = mapSubmittedSince(now);
     // Status and text can change while a long all-date crawl is in progress.
     // Traverse the stable geography/date membership without those mutable
-    // predicates, then apply them to the complete client snapshot. A separate
-    // one-row query supplies the matching total/unmapped disclosure.
+    // predicates, then apply them to the complete client snapshot. Do not run
+    // a second archive-wide effective-status count: that synchronous scan can
+    // block every dashboard request for many seconds. The UI truthfully shows
+    // the exact matching pin count from the completed client snapshot instead.
     const displayFilters = activeDataFilters();
     const hasMutableDisplayFilters = Object.keys(displayFilters).length > 0;
     let recordsLoadedForRequest = 0;
@@ -3591,7 +3635,6 @@
     const stagedNumberSet = new Set();
     const stagedChanges = new Map();
     let stagedStats = null;
-    let displayStats = null;
     let expectedMapped = null;
     setMapLoadState('loading', mapArchiveLoaded ? 'Refreshing map records…' : 'Loading map records…');
     try {
@@ -3599,46 +3642,6 @@
       let snapshotAt = null;
       let pagesLoaded = 0;
       let hasMore = true;
-      if (hasMutableDisplayFilters) {
-        const controller = new AbortController();
-        mapAbortController = controller;
-        const timeout = window.setTimeout(() => controller.abort(), MAP_REQUEST_TIMEOUT_MS);
-        let filteredPayload;
-        try {
-          filteredPayload = await fetchJson(scopedUrl('/api/live-map', {
-            limit: 1,
-            paginate: 1,
-            include_totals: 1,
-            ...displayFilters,
-            ...(submittedSince != null ? { submitted_since: submittedSince } : {})
-          }), 'Map filter totals', { signal: controller.signal });
-        } finally {
-          window.clearTimeout(timeout);
-        }
-        if (sequence !== mapRequestSequence) return;
-        const filteredRecords = Array.isArray(filteredPayload && filteredPayload.records)
-          ? filteredPayload.records
-          : [];
-        const filteredPage = filteredPayload && filteredPayload.page;
-        const filteredPageState = validatePaginatedRecords(filteredRecords, {
-          requireSnapshot: true,
-          page: filteredPage,
-          label: 'Map filter totals'
-        });
-        displayStats = filteredPayload && filteredPayload.stats || {};
-        for (const name of ['total', 'mapped_total', 'unmapped_total']) {
-          const value = Number(displayStats[name]);
-          if (!Number.isSafeInteger(value) || value < 0) {
-            throw new Error(`Map filter totals returned an invalid ${name}`);
-          }
-        }
-        if (mapArchiveLoaded) {
-          mapStats = { ...displayStats, totals_available: true };
-          renderMap();
-          updateMapCountText();
-        }
-        snapshotAt = filteredPageState.snapshotAt;
-      }
       while (hasMore) {
         const controller = new AbortController();
         mapAbortController = controller;
@@ -3718,8 +3721,16 @@
         records: stagedNumbers.map(number => (
           stagedChanges.get(number) || mapByNumber.get(number)
         )),
-        stats: displayStats || stagedStats || {}
-      }, dashboardStats);
+        stats: hasMutableDisplayFilters ? {} : stagedStats || {}
+      }, hasMutableDisplayFilters ? null : dashboardStats);
+      if (hasMutableDisplayFilters) {
+        mapStats = {
+          total: 0,
+          mapped_total: mapRecords.length,
+          unmapped_total: 0,
+          totals_available: false
+        };
+      }
       clearMapRetry();
       mapRetryAttempt = 0;
       mapNeedsRefresh = false;
@@ -3760,6 +3771,13 @@
   }
 
   async function refresh({ force = false } = {}) {
+    // Keep keyset pagination stable while the user is actively browsing older
+    // filtered rows. A filter change or a return to the top resumes the normal
+    // authoritative head poll, while collection continues on the server.
+    if (!force && browsingDeepFilteredResults()) {
+      updateFeedCoverage();
+      return;
+    }
     if (refreshInFlight && !force) return;
     if (force && dashboardAbortController) dashboardAbortController.abort();
     const controller = new AbortController();
@@ -3769,6 +3787,8 @@
     const timeout = window.setTimeout(() => controller.abort(), DASHBOARD_REQUEST_TIMEOUT_MS);
     try {
       const requestedFeedKey = currentFeedQueryKey();
+      const dataFilters = activeDataFilters();
+      const includeTotals = Object.keys(dataFilters).length === 0 ? 1 : 0;
       const queryChanged = requestedFeedKey !== feedQueryKey;
       if (queryChanged) resetFeedPagination();
       const firstDashboardPayload = !dashboardPayloadLoaded;
@@ -3776,17 +3796,31 @@
       const requestLimit = firstDashboardPayload || queryChanged || restartFeedHead
         ? INITIAL_FEED_PAGE_SIZE
         : FEED_PAGE_SIZE;
-      const preserveFeedDepth = !queryChanged && !restartFeedHead
+      // Without a matching total there is no cheap way to prove that retained
+      // older filtered rows still belong in the result set. Treat every
+      // filtered head response as authoritative; older pages remain available
+      // immediately through normal pagination.
+      const resetUncountedFilteredFeed = includeTotals === 0;
+      const preserveFeedDepth = includeTotals === 1
+        && !queryChanged && !restartFeedHead
         && records.length > requestLimit;
       const data = await fetchJson(scopedUrl('/api/live-dashboard', {
         limit: requestLimit,
         compact: 1,
         paginate: 1,
-        ...activeDataFilters()
+        include_totals: includeTotals,
+        ...dataFilters
       }), 'Data service', {
         signal: controller.signal
       });
       if (sequence !== dashboardRequestSequence) return;
+      // The user can begin loading older rows while this head request is in
+      // flight. Do not let the now-stale response cancel that pagination or
+      // replace the rows they are actively browsing.
+      if (!force && browsingDeepFilteredResults()) {
+        updateFeedCoverage();
+        return;
+      }
       feedPaginationSequence += 1;
       if (feedLoadMoreAbortController) feedLoadMoreAbortController.abort();
       feedLoadMoreAbortController = null;
@@ -3807,6 +3841,7 @@
         && nextMatchingTotal - Number(previousMatchingTotal) !== expectedTotalDelta;
       updateFeedRecords(headRecords, {
         reset: firstDashboardPayload || queryChanged || restartFeedHead
+          || resetUncountedFilteredFeed
           || deepSnapshotChanged,
         replaceHead: !firstDashboardPayload && !queryChanged && !restartFeedHead
           && !deepSnapshotChanged
@@ -3853,6 +3888,7 @@
         ? `Portal ${lastPortalCheck.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}`
         : 'Waiting for data';
       connection.classList.remove('offline');
+      dashboardRefreshDelayed = false;
       updateConnectionLabel();
       if (selectedNumber) {
         const selectedRecord = findRecord(selectedNumber);
@@ -3866,7 +3902,17 @@
         void loadPolicePrecincts();
         void loadBusinessImprovementDistricts();
         connectionLabel.textContent = 'Refreshing geography…';
+      } else if (error.name === 'AbortError') {
+        // A slow data refresh does not mean the browser disconnected. Keep the
+        // last successful data visible and let the normal scheduler retry.
+        dashboardRefreshDelayed = true;
+        if (connection.classList.contains('offline')) {
+          connectionLabel.textContent = 'Reconnecting…';
+        } else {
+          updateConnectionLabel();
+        }
       } else {
+        dashboardRefreshDelayed = false;
         connection.classList.add('offline');
         connectionLabel.textContent = 'Reconnecting…';
       }
@@ -3929,6 +3975,7 @@
   feed.addEventListener('scroll', () => {
     const remaining = feed.scrollHeight - feed.scrollTop - feed.clientHeight;
     if (remaining < 500) loadMoreFeed();
+    updateFeedCoverage();
   }, { passive: true });
   mobileViewTabs.addEventListener('click', event => {
     const button = event.target.closest('button[data-mobile-view]');
@@ -3947,6 +3994,12 @@
           preserveArchive: true
         });
         renderMap();
+        mapStats = {
+          ...mapStats,
+          totals_available: Object.keys(activeDataFilters()).length === 0
+            && mapStats.totals_available
+        };
+        updateMapCountText();
       } else {
         resetMapDataset();
       }
@@ -4077,7 +4130,10 @@
       timeZone: 'America/New_York', hour: 'numeric', minute: '2-digit', second: '2-digit'
     }).format(now);
     updateConnectionLabel(now);
-    if (lastPortalCheck) {
+    if (browsingDeepFilteredResults()) {
+      document.getElementById('next-check').textContent =
+        'NYC · Live view paused while browsing';
+    } else if (lastPortalCheck) {
       const next = new Date(lastPortalCheck.getTime() + currentPollSeconds * 1000);
       const remaining = Math.max(0, Math.ceil((next.getTime() - now.getTime()) / 1000));
       document.getElementById('next-check').textContent = remaining > 0

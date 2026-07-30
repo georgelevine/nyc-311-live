@@ -270,7 +270,54 @@ test('map startup is self-hosted, exhaustively paginated, and automatically reco
     dashboard,
     /const requestLimit = firstDashboardPayload \|\| queryChanged \|\| restartFeedHead\s*\? INITIAL_FEED_PAGE_SIZE\s*: FEED_PAGE_SIZE/
   );
-  assert.match(dashboard, /live-dashboard', \{\s*limit: requestLimit,\s*compact: 1,\s*paginate: 1/);
+  assert.match(
+    dashboard,
+    /live-dashboard', \{\s*limit: requestLimit,\s*compact: 1,\s*paginate: 1,\s*include_totals: includeTotals/
+  );
+  assert.match(
+    dashboard,
+    /const includeTotals = Object\.keys\(dataFilters\)\.length === 0 \? 1 : 0/
+  );
+  assert.match(
+    dashboard,
+    /const resetUncountedFilteredFeed = includeTotals === 0/
+  );
+  assert.match(
+    dashboard,
+    /function browsingDeepFilteredResults\(\)[\s\S]*feedLoadingMore \|\| records\.length > INITIAL_FEED_PAGE_SIZE[\s\S]*feed\.scrollTop > 50/
+  );
+  assert.match(
+    dashboard,
+    /if \(!force && browsingDeepFilteredResults\(\)\) \{\s*updateFeedCoverage\(\);\s*return;/g
+  );
+  assert.match(
+    dashboard,
+    /browsing older results; return to top for live refresh/
+  );
+  assert.match(
+    dashboard,
+    /Live collection · browsing older results/
+  );
+  assert.match(
+    dashboard,
+    /NYC · Live view paused while browsing/
+  );
+  assert.match(
+    dashboard,
+    /const preserveFeedDepth = includeTotals === 1\s*&& !queryChanged && !restartFeedHead/
+  );
+  assert.match(
+    dashboard,
+    /reset: firstDashboardPayload \|\| queryChanged \|\| restartFeedHead\s*\|\| resetUncountedFilteredFeed/
+  );
+  assert.match(
+    dashboard,
+    /dashboardPayloadLoaded\s*\? 'Live · refresh delayed'\s*: 'Connecting · refresh delayed'/
+  );
+  assert.match(
+    dashboard,
+    /if \(connection\.classList\.contains\('offline'\)\) \{\s*connectionLabel\.textContent = 'Reconnecting…'/
+  );
   assert.match(dashboard, /async function loadMoreFeed/);
   assert.match(dashboard, /before_suffix: beforeSuffix/);
   assert.match(dashboard, /pagesLoaded === 0 \? MAP_INITIAL_PAGE_SIZE : MAP_PAGE_SIZE/);
@@ -441,8 +488,12 @@ test('long map crawls traverse stable membership and apply mutable filters clien
   const refreshEnd = dashboard.indexOf('\n  async function refresh(', refreshStart);
   const refreshSource = dashboard.slice(refreshStart, refreshEnd);
   assert.match(refreshSource, /const displayFilters = activeDataFilters\(\)/);
-  assert.match(refreshSource, /Map filter totals/);
-  assert.match(refreshSource, /\.\.\.displayFilters/);
+  assert.doesNotMatch(refreshSource, /Map filter totals/);
+  assert.doesNotMatch(refreshSource, /\.\.\.displayFilters/);
+  assert.match(
+    refreshSource,
+    /stats: hasMutableDisplayFilters \? \{\} : stagedStats \|\| \{\}/
+  );
   const traversalLoop = refreshSource.slice(refreshSource.indexOf('while (hasMore)'));
   assert.doesNotMatch(
     traversalLoop.slice(0, traversalLoop.indexOf('if (sequence !== mapRequestSequence) return;')),
