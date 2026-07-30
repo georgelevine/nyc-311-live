@@ -12,12 +12,14 @@ const {
   MIGRATIONS,
   applyMigrations
 } = require('../sqlite-finalization');
+const { createClosureTracker } = require('../closure-tracking');
 const {
   buildAlias,
   createRequestAlias
 } = require('../nyc311-email-aliases');
 const {
   FIND_DUPLICATE_SQL,
+  STORED_EMAIL_CLOSURE_CANDIDATES_SQL,
   createNyc311EmailHandler,
   findDuplicate,
   hmacHex,
@@ -217,6 +219,32 @@ test('email migrations create durable event, alias, and subscription job tables'
   );
   assert.equal(eventColumns.has('raw_sha256'), true);
   assert.equal(eventColumns.has('raw_mime'), false);
+});
+
+test('stored closure repair starts from open requests and probes email events by request', t => {
+  const { database } = createDatabase(t);
+  t.after(() => database.close());
+  createClosureTracker(database);
+  const plan = database.prepare(
+    `EXPLAIN QUERY PLAN ${STORED_EMAIL_CLOSURE_CANDIDATES_SQL}`
+  ).all();
+  const details = plan.map(row => row.detail);
+  assert.equal(
+    details.some(detail => (
+      detail === 'SCAN event'
+      || detail === 'SCAN candidate'
+      || detail === 'SCAN nyc311_email_events'
+    )),
+    false,
+    details.join('\n')
+  );
+  assert.equal(details.some(detail => (
+    detail.includes('nyc311_email_events_request_idx')
+    && detail.includes('(reconciled_srnumber=?)')
+  )), true, details.join('\n'));
+  assert.equal(details.some(detail => (
+    detail.includes('SEARCH event USING INTEGER PRIMARY KEY')
+  )), true, details.join('\n'));
 });
 
 test('duplicate detection preserves earliest-match semantics and uses only indexes', t => {

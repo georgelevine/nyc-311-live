@@ -54,6 +54,7 @@ const {
   scheduledOpenFollowupsEnabled
 } = require('./monitoring-mode');
 const { reconcileStoredEmailClosures } = require('./nyc311-email-inbound');
+const { seedClosureTracking } = require('./closure-tracking-seed');
 
 const PORTAL_URL = 'https://portal.311.nyc.gov/entity-pin-fetch-service-requests/';
 const POLL_INTERVAL_SECONDS = Math.max(5, Number(process.env.POLL_INTERVAL_SECONDS || 15));
@@ -710,133 +711,6 @@ function parseLiveDetail(html, expectedNumber, portalId) {
   };
 }
 
-function safelyParseFields(value) {
-  try {
-    const parsed = JSON.parse(value || '{}');
-    return parsed && typeof parsed === 'object' ? parsed : {};
-  } catch (_) {
-    return {};
-  }
-}
-
-function seedClosureTracking() {
-  const now = new Date().toISOString();
-  const liveRows = db.prepare(`
-    SELECT srnumber, portal_id, status, first_seen_at
-    FROM live_portal_requests
-    WHERE status IS NOT NULL AND TRIM(status) <> ''
-  `).all();
-  const detailRowsWithoutFollowUp = db.prepare(`
-    SELECT live.srnumber, live.portal_id, live.status AS live_status,
-           details.status AS detail_status, details.problem, details.problem_details,
-           details.additional_details, details.address, details.next_update,
-           details.date_reported, details.updated_on, details.date_closed,
-           details.fields_json, details.archived_at
-    FROM live_portal_requests AS live
-    JOIN portal_requests AS details ON details.srnumber = live.srnumber
-    LEFT JOIN request_followup_queue AS followup ON followup.srnumber = live.srnumber
-    WHERE followup.srnumber IS NULL
-  `).all();
-
-  db.exec('BEGIN');
-  try {
-    for (const row of liveRows) {
-      closureTracker.observeStatus({
-        srnumber: row.srnumber,
-        previousStatus: null,
-        status: row.status,
-        source: 'migration',
-        observedAt: row.first_seen_at || now
-      });
-    }
-    for (const row of detailRowsWithoutFollowUp) {
-      const detail = {
-        srnumber: row.srnumber,
-        portalId: row.portal_id,
-        status: row.date_closed && !isClosedStatus(row.detail_status)
-          ? 'Closed'
-          : row.detail_status,
-        problem: row.problem,
-        problemDetails: row.problem_details,
-        additionalDetails: row.additional_details,
-        address: row.address,
-        nextUpdate: row.next_update,
-        dateReported: row.date_reported,
-        updatedOn: row.updated_on,
-        dateClosed: row.date_closed,
-        fields: safelyParseFields(row.fields_json)
-      };
-      let effectiveStatus = row.live_status || detail.status;
-      if (isClosedStatus(detail.status) && !isClosedStatus(row.live_status)) {
-        closureTracker.observeStatus({
-          srnumber: row.srnumber,
-          previousStatus: row.live_status,
-          status: detail.status,
-          source: 'stored_detail',
-          effectiveAt: row.date_closed || row.updated_on,
-          observedAt: row.archived_at || now,
-          snapshot: detail
-        });
-        updateLiveStatus.run(detail.status, row.srnumber);
-        effectiveStatus = detail.status;
-      }
-      if (isClosedStatus(effectiveStatus) && !isClosedStatus(detail.status)) {
-        closureTracker.queueMapStatusChange({
-          srnumber: row.srnumber,
-          portalId: row.portal_id,
-          previousStatus: 'Open',
-          status: effectiveStatus,
-          observedAt: now
-        });
-      } else {
-        closureTracker.scheduleAfterDetail({
-          srnumber: row.srnumber,
-          portalId: row.portal_id,
-          effectiveStatus,
-          detail,
-          source: 'migration',
-          checkedAt: row.archived_at || now
-        });
-      }
-    }
-    db.exec('COMMIT');
-  } catch (error) {
-    db.exec('ROLLBACK');
-    throw error;
-  }
-  let provisionalFollowUpsSeeded = 0;
-  const liveRowsWithoutFollowUp = db.prepare(`
-    SELECT live.srnumber, live.portal_id, live.status,
-           COALESCE(live.last_seen_at, live.first_seen_at, ?) AS observed_at
-    FROM live_portal_requests AS live
-    LEFT JOIN request_followup_queue AS followup ON followup.srnumber = live.srnumber
-    WHERE followup.srnumber IS NULL
-      AND live.status IS NOT NULL AND TRIM(live.status) <> ''
-    ORDER BY live.suffix
-  `).all(now);
-  db.exec('BEGIN');
-  try {
-    for (const row of liveRowsWithoutFollowUp) {
-      if (closureTracker.queueMapStatusChange({
-        srnumber: row.srnumber,
-        portalId: row.portal_id,
-        previousStatus: null,
-        status: row.status,
-        observedAt: row.observed_at
-      })) provisionalFollowUpsSeeded += 1;
-    }
-    db.exec('COMMIT');
-  } catch (error) {
-    db.exec('ROLLBACK');
-    throw error;
-  }
-  return {
-    statusRows: liveRows.length,
-    followUpsSeeded: detailRowsWithoutFollowUp.length,
-    provisionalFollowUpsSeeded
-  };
-}
-
 async function fetchLiveDetail(row) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 12000);
@@ -1351,7 +1225,12 @@ async function main() {
   const detailQueueReconciled = reconcileStoredDetails(db, {
     updatedAt: detailQueueSeededAt
   });
-  const seeded = seedClosureTracking();
+  const seeded = seedClosureTracking({
+    db,
+    closureTracker,
+    updateLiveStatus,
+    now: new Date()
+  });
   const emailClosuresReconciled = reconcileStoredEmailClosures(db, {
     now: new Date()
   });

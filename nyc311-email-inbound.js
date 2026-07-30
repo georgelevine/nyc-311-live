@@ -419,6 +419,38 @@ function observeAuthoritativeEmailClosure(
   return historyAdded || Number(statusUpdated.changes || 0) > 0;
 }
 
+const STORED_EMAIL_CLOSURE_CANDIDATES_SQL = `
+  SELECT event.id,event.reconciled_srnumber,event.event_kind,event.subject,
+         event.agency_name,event.agency_acronym,event.response_text,
+         event.next_update_text,event.received_at,live.status AS live_status
+  FROM live_portal_requests AS live
+  LEFT JOIN request_followup_queue AS followup
+    ON followup.srnumber=live.srnumber
+  CROSS JOIN nyc311_email_events AS event
+  WHERE (followup.state='open' OR followup.srnumber IS NULL)
+    AND event.id=(
+      SELECT candidate.id
+      FROM nyc311_email_events AS candidate
+        INDEXED BY nyc311_email_events_request_idx
+      WHERE candidate.reconciled_srnumber=live.srnumber
+        AND candidate.parse_outcome='parsed'
+        AND candidate.srnumber_mismatch=0
+        AND candidate.alias_match_status IN ('matched','attached')
+        AND candidate.event_kind='Closed'
+        AND json_extract(candidate.parsed_json,'$.deliveryMode')='direct'
+        AND UPPER(TRIM(COALESCE(candidate.spam_verdict,'')))='PASS'
+        AND UPPER(TRIM(COALESCE(candidate.virus_verdict,'')))='PASS'
+        AND UPPER(TRIM(COALESCE(candidate.dmarc_verdict,'')))='PASS'
+        AND (
+          UPPER(TRIM(COALESCE(candidate.spf_verdict,'')))='PASS'
+          OR UPPER(TRIM(COALESCE(candidate.dkim_verdict,'')))='PASS'
+        )
+      ORDER BY candidate.received_at DESC,candidate.id DESC
+      LIMIT 1
+    )
+  ORDER BY event.received_at DESC,event.id DESC
+`;
+
 function reconcileStoredEmailClosures(database, {
   now = new Date(),
   manageTransaction = true
@@ -429,27 +461,7 @@ function reconcileStoredEmailClosures(database, {
   const reconciledAt = now instanceof Date ? now.toISOString() : new Date(now).toISOString();
   applyMigrations(database, reconciledAt);
   createClosureTracker(database);
-  const candidates = database.prepare(`
-    SELECT event.id,event.reconciled_srnumber,event.event_kind,event.subject,
-           event.agency_name,event.agency_acronym,event.response_text,
-           event.next_update_text,event.received_at,live.status AS live_status
-    FROM nyc311_email_events AS event
-    JOIN live_portal_requests AS live
-      ON live.srnumber=event.reconciled_srnumber
-    WHERE event.parse_outcome='parsed'
-      AND event.srnumber_mismatch=0
-      AND event.alias_match_status IN ('matched','attached')
-      AND event.event_kind='Closed'
-      AND json_extract(event.parsed_json,'$.deliveryMode')='direct'
-      AND UPPER(TRIM(COALESCE(event.spam_verdict,'')))='PASS'
-      AND UPPER(TRIM(COALESCE(event.virus_verdict,'')))='PASS'
-      AND UPPER(TRIM(COALESCE(event.dmarc_verdict,'')))='PASS'
-      AND (
-        UPPER(TRIM(COALESCE(event.spf_verdict,'')))='PASS'
-        OR UPPER(TRIM(COALESCE(event.dkim_verdict,'')))='PASS'
-      )
-    ORDER BY event.received_at DESC,event.id DESC
-  `).all();
+  const candidates = database.prepare(STORED_EMAIL_CLOSURE_CANDIDATES_SQL).all();
   const latestCandidateByRequest = new Map();
   for (const row of candidates) {
     if (isClosedStatus(row.live_status)
@@ -881,6 +893,7 @@ module.exports = {
   FIND_DUPLICATE_SQL,
   MAX_DELIVERY_AGE_SECONDS,
   MAX_RAW_EMAIL_BYTES,
+  STORED_EMAIL_CLOSURE_CANDIDATES_SQL,
   createNyc311EmailHandler,
   decodeSignedMetadata,
   extractEmailAddress,
