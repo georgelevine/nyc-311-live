@@ -7,6 +7,7 @@ const {
   collectorFreshness,
   detailSql,
   loadSqliteLiveSummary,
+  scopedLiveRequestSource,
   summaryRows,
   summaryRowsQuery
 } = require('../sqlite-live-summary');
@@ -37,6 +38,8 @@ function harness(t, { withDetails = true, withState = true } = {}) {
       matched_at TEXT NOT NULL,
       PRIMARY KEY(srnumber,boundary_version,bid_id)
     );
+    CREATE INDEX live_request_bid_memberships_district_idx
+      ON live_request_bid_memberships(boundary_version,bid_id,srnumber);
   `);
   if (withDetails) {
     database.exec(`
@@ -174,6 +177,21 @@ test('scopes summaries to all BID memberships and intersects with a precinct', t
   });
   assert.equal(intersection.current.requests, 1);
   assert.equal(intersection.data_quality.archive_requests, 1);
+});
+
+test('counts a request once when a BID ID exists in retained boundary releases', t => {
+  const database = harness(t, { withState: false });
+  const request = insertLive(database, 14, '2026-07-21T12:20:00.000Z');
+  insertBidMembership(database, request, 8, '2025-01-01');
+  insertBidMembership(database, request, 8, '2026-04-28');
+
+  const allReleases = loadSqliteLiveSummary(database, {
+    asOf: '2026-07-21T12:30:00.000Z',
+    businessImprovementDistrictId: 8
+  });
+
+  assert.equal(allReleases.current.requests, 1);
+  assert.equal(allReleases.data_quality.archive_requests, 1);
 });
 
 function insertDetail(database, srnumber, overrides = {}) {
@@ -381,4 +399,33 @@ test('recent-row query uses the timestamp index before joining detail fallbacks'
 
   assert.ok(plan.some(detail => detail.includes('live_portal_requests_submitted_at_idx')), plan.join('\n'));
   assert.ok(plan.some(detail => detail.includes('portal_requests_date_reported_idx')), plan.join('\n'));
+});
+
+test('BID summary queries start from the indexed membership set', t => {
+  const database = harness(t);
+  const query = `EXPLAIN QUERY PLAN ${summaryRowsQuery(
+    detailSql(true),
+    false,
+    false,
+    true,
+    true
+  )}`;
+  const plan = database.prepare(query).all({
+    start: '2026-07-21T12:15:00.000Z',
+    end: '2026-07-21T12:30:00.000Z',
+    business_improvement_district_id: 8,
+    business_improvement_district_boundary_version: '2026-04-28'
+  }).map(row => String(row.detail));
+
+  assert.ok(
+    plan.some(detail => detail.includes('live_request_bid_memberships_district_idx')),
+    plan.join('\n')
+  );
+  assert.equal(
+    plan.some(detail => /^SCAN live(?:\s|$)/.test(detail)),
+    false,
+    plan.join('\n')
+  );
+  assert.match(scopedLiveRequestSource(true, true), /SELECT DISTINCT srnumber/);
+  assert.doesNotMatch(summaryRowsQuery(detailSql(true), false, false, true, true), /EXISTS\s*\(/);
 });

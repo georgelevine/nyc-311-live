@@ -50,6 +50,7 @@
   map.addLayer(markerLayer);
 
   const feed = document.getElementById('request-feed');
+  const feedCoverage = document.getElementById('feed-coverage');
   const appShell = document.querySelector('.app-shell');
   const mobileViewTabs = document.querySelector('.mobile-view-tabs');
   const search = document.getElementById('request-search');
@@ -87,7 +88,6 @@
     exactSrnumberQuery: normalizeExactSrnumberQuery,
     feedCardModel,
     isClosed,
-    mapScopeAfterFilterChange,
     recordCoordinates,
     recordDetailsPending,
     recordHasMapPin
@@ -221,8 +221,8 @@
     note: document.getElementById('detail-evidence-note')
   };
   const hasDetailEvidenceElements = Object.values(detailEvidenceElements).every(Boolean);
-  const MAX_VISIBLE_RECORDS = 300;
-  const INITIAL_VISIBLE_RECORDS = 100;
+  const FEED_PAGE_SIZE = 300;
+  const INITIAL_FEED_PAGE_SIZE = 100;
   const MAP_INITIAL_PAGE_SIZE = 250;
   const MAP_PAGE_SIZE = 1_000;
   const MAP_REFRESH_MS = 5 * 60_000;
@@ -294,6 +294,13 @@
   let emailMetricsRefreshPending = false;
   let dashboardPayloadLoaded = false;
   let dashboardRefreshTimer = null;
+  let feedHasMore = false;
+  let feedNextBeforeSuffix = null;
+  let feedSnapshotAt = null;
+  let feedMatchingTotal = null;
+  let feedLoadingMore = false;
+  let feedQueryKey = '';
+  let filterRefreshTimer = null;
   const expandedResponseTables = new Set();
   let archiveSearchRecord = null;
   let archiveSearchState = 'idle';
@@ -303,11 +310,11 @@
   const boundaryStates = {
     precinct: {
       requestedValue: '', layer: null, label: '', loading: false,
-      sequence: 0, controller: null
+      error: '', attempt: 0, retryTimer: null, sequence: 0, controller: null
     },
     bid: {
       requestedValue: '', layer: null, label: '', loading: false,
-      sequence: 0, controller: null
+      error: '', attempt: 0, retryTimer: null, sequence: 0, controller: null
     }
   };
   const boundaryStyles = {
@@ -398,7 +405,6 @@
       setPressedView(normalizedView);
       syncOverviewRefreshes(normalizedView === 'overview');
       scheduleMapLayout({ attemptBoundaryFit: normalizedView === 'map' });
-      if (normalizedView === 'map' && !mapArchiveLoaded) refreshMap(mapStats, true);
     }
     return usesViewTabs && normalizedView === 'map';
   }
@@ -484,6 +490,88 @@
   function exactSrnumberQuery() {
     return normalizeExactSrnumberQuery(search.value);
   }
+
+  function activeDataFilters() {
+    const filters = {};
+    const query = search.value.trim();
+    if (query) filters.q = query;
+    if (statusFilter.value) filters.status = statusFilter.value;
+    return filters;
+  }
+
+  function currentFeedQueryKey() {
+    return JSON.stringify([
+      search.value.trim(),
+      statusFilter.value,
+      precinctFilter.value,
+      bidFilter.value
+    ]);
+  }
+
+  function updateFeedCoverage() {
+    if (!feedCoverage) return;
+    const loaded = records.length;
+    const total = feedMatchingTotal != null && Number.isFinite(Number(feedMatchingTotal))
+      ? Number(feedMatchingTotal)
+      : null;
+    if (!dashboardPayloadLoaded && loaded === 0) {
+      feedCoverage.textContent = 'Loading request archive…';
+      return;
+    }
+    if (total === null && loaded === 0) {
+      feedCoverage.textContent = 'Loading matching requests…';
+      return;
+    }
+    if (feedLoadingMore) {
+      feedCoverage.textContent = `Loading older matching requests · ${loaded.toLocaleString()} loaded`;
+      return;
+    }
+    if (total !== null) {
+      feedCoverage.textContent = feedHasMore
+        ? `${loaded.toLocaleString()} of ${total.toLocaleString()} matching requests loaded`
+        : `All ${total.toLocaleString()} matching requests loaded`;
+      return;
+    }
+    feedCoverage.textContent = feedHasMore
+      ? `${loaded.toLocaleString()} requests loaded · scroll for older`
+      : `${loaded.toLocaleString()} ${loaded === 1 ? 'request' : 'requests'} loaded`;
+  }
+
+  function resetFeedPagination({ clearRecords = true } = {}) {
+    feedHasMore = false;
+    feedNextBeforeSuffix = null;
+    feedSnapshotAt = null;
+    feedMatchingTotal = null;
+    feedLoadingMore = false;
+    feedQueryKey = currentFeedQueryKey();
+    if (!clearRecords) {
+      updateFeedCoverage();
+      return;
+    }
+    records = [];
+    feedByNumber = new Map();
+    feedCardByNumber.clear();
+    feedCardSignatureByNumber.clear();
+    feed.replaceChildren();
+    updateFeedCoverage();
+  }
+
+  function renderFeedPagination() {
+    const existing = feed.querySelector(':scope > .feed-load-more');
+    if (!feedHasMore) {
+      if (existing) existing.remove();
+      updateFeedCoverage();
+      return;
+    }
+    const button = existing || document.createElement('button');
+    button.type = 'button';
+    button.className = 'feed-load-more';
+    button.disabled = feedLoadingMore;
+    button.textContent = feedLoadingMore ? 'Loading older requests…' : 'Load older requests';
+    if (!existing) feed.append(button);
+    else if (feed.lastElementChild !== button) feed.append(button);
+    updateFeedCoverage();
+  }
   const recordSignature = record => JSON.stringify([
     record.srnumber, record.status, record.problem, record.address,
     record.police_precinct, record.police_precinct_boundary_version,
@@ -536,6 +624,11 @@
     return match ? match[1] : null;
   }
 
+  function recordHasEmbeddedPortalDetail(record) {
+    return Boolean(record && record.details_fetched_at
+      && Object.prototype.hasOwnProperty.call(record, 'problem_details'));
+  }
+
   function mapRecordTime(record) {
     return submittedMillis(record);
   }
@@ -562,13 +655,7 @@
     }
     if (!query) return true;
     if (exact && record.srnumber === exact) return true;
-    const bidNames = (Array.isArray(record.business_improvement_district_ids)
-      ? record.business_improvement_district_ids
-      : []).map(id => bidById.get(String(id)) && bidById.get(String(id)).name);
-    return [record.srnumber, record.problem, record.problem_details,
-      record.additional_details, record.address, record.status,
-      ...bidNames,
-      ...missingFieldLabels(record.missing_public_fields)]
+    return [record.srnumber, record.problem, record.address, record.status]
       .some(value => String(value || '').toLowerCase().includes(query));
   }
 
@@ -702,6 +789,7 @@
       feedCardSignatureByNumber.clear();
       feed.innerHTML = `<div class="empty-state"><p>${esc(message)}</p></div>`;
       feed.scrollTop = 0;
+      renderFeedPagination();
       return;
     }
     if (feed.querySelector(':scope > .empty-state')) feed.replaceChildren();
@@ -747,6 +835,7 @@
     }
     arrivingNumbers.clear();
     restoreFeedScroll(scrollSnapshot);
+    renderFeedPagination();
   }
 
   function markerClass(record) {
@@ -788,10 +877,17 @@
       return;
     }
     const captured = Number.isFinite(Number(mapStats.total)) ? Number(mapStats.total) : 0;
+    const mapped = Number.isFinite(Number(mapStats.mapped_total))
+      ? Number(mapStats.mapped_total)
+      : mapRecords.length;
     const unmapped = Number.isFinite(Number(mapStats.unmapped_total))
       ? Number(mapStats.unmapped_total)
-      : Math.max(0, captured - mapRecords.length);
-    const label = `${mapShownCount.toLocaleString()} shown · ${unmapped.toLocaleString()} without stored Portal coordinates · ${captured.toLocaleString()} captured`;
+      : Math.max(0, captured - mapped);
+    const loaded = Math.min(mapRecords.length, mapped);
+    const loadedLabel = mapArchiveLoaded && loaded >= mapped
+      ? `all ${mapped.toLocaleString()} map pins loaded`
+      : `${loaded.toLocaleString()} of ${mapped.toLocaleString()} map pins loaded`;
+    const label = `${mapShownCount.toLocaleString()} shown · ${loadedLabel} · ${unmapped.toLocaleString()} without coordinates`;
     if (mapCounts.textContent !== label) mapCounts.textContent = label;
   }
 
@@ -840,18 +936,6 @@
     });
   }
 
-  function showAllDatesForActiveFilters() {
-    const nextScope = mapScopeAfterFilterChange(mapScope, [
-      search.value,
-      statusFilter.value,
-      precinctFilter.value,
-      bidFilter.value
-    ]);
-    if (nextScope === mapScope) return false;
-    setMapScope(nextScope);
-    return true;
-  }
-
   function renderMapNow() {
     mapRenderFrame = null;
     const desired = new Map();
@@ -867,7 +951,7 @@
           : mapRecord);
       const coordinates = recordCoordinates(record);
       if (!coordinates || recordDetailsPending(record)
-          || !matchesFilters(record) || !matchesMapScope(record, now)) continue;
+          || !matchesMapScope(record, now)) continue;
       desired.set(record.srnumber, {
         record,
         coordinates,
@@ -951,7 +1035,7 @@
     const cachedDetail = portalDetailByNumber.get(record.srnumber);
     if (cachedDetail) {
       renderSubmittedDetails(cachedDetail, 'success');
-    } else if (record.details_fetched_at) {
+    } else if (recordHasEmbeddedPortalDetail(record)) {
       const savedDetail = {
         problemDetails: record.problem_details,
         additionalDetails: record.additional_details,
@@ -967,6 +1051,8 @@
       renderSubmittedDetails(savedDetail, 'stored');
     } else if (record.public_details_state === 'pending') {
       renderSubmittedDetails(null, 'pending');
+    } else {
+      renderSubmittedDetails(null, 'loading');
     }
     // Email and Portal details load independently. Always redraw the response
     // card so a newly stored email narrative appears immediately, even while
@@ -1524,7 +1610,7 @@
 
   async function loadPortalDetails(record) {
     const sequence = ++detailLoadSequence;
-    if (record.details_fetched_at) {
+    if (recordHasEmbeddedPortalDetail(record)) {
       const saved = {
         problemDetails: record.problem_details,
         additionalDetails: record.additional_details,
@@ -1602,10 +1688,12 @@
 
   function syncStatuses() {
     const current = statusFilter.value;
-    const statuses = [...new Set(
+    const availableStatuses = new Set(
       [...records, ...mapRecords, ...(archiveSearchRecord ? [archiveSearchRecord] : [])]
         .map(record => record.status).filter(Boolean)
-    )].sort();
+    );
+    if (current) availableStatuses.add(current);
+    const statuses = [...availableStatuses].sort();
     statusFilter.innerHTML = '<option value="">All statuses</option>' + statuses.map(status => `<option value="${esc(status)}">${esc(status)}</option>`).join('');
     if (statuses.includes(current)) statusFilter.value = current;
     updateActiveFilterState();
@@ -1641,10 +1729,22 @@
     ));
   }
 
-  function updateFeedRecords(incoming) {
-    const nextRecords = incoming
+  function updateFeedRecords(incoming, { reset = false, replaceHead = false } = {}) {
+    const incomingRecords = incoming
       .filter(record => record && record.srnumber)
-      .slice(0, MAX_VISIBLE_RECORDS)
+      .sort((a, b) => suffixOf(b) - suffixOf(a));
+    const nextByNumber = reset ? new Map() : new Map(feedByNumber);
+    if (replaceHead && incomingRecords.length) {
+      const incomingNumbers = new Set(incomingRecords.map(record => record.srnumber));
+      const oldestHeadSuffix = suffixOf(incomingRecords[incomingRecords.length - 1]);
+      for (const [number, existing] of nextByNumber) {
+        if (suffixOf(existing) >= oldestHeadSuffix && !incomingNumbers.has(number)) {
+          nextByNumber.delete(number);
+        }
+      }
+    }
+    for (const record of incomingRecords) nextByNumber.set(record.srnumber, record);
+    const nextRecords = [...nextByNumber.values()]
       .sort((a, b) => suffixOf(b) - suffixOf(a));
     const newestSuffix = nextRecords.reduce((maximum, record) => Math.max(maximum, suffixOf(record)), 0);
     if (highestObservedSuffix === null) {
@@ -1655,7 +1755,7 @@
         .map(record => record.srnumber));
       highestObservedSuffix = newestSuffix;
     }
-    for (const record of nextRecords) {
+    for (const record of incomingRecords) {
       const previous = feedByNumber.get(record.srnumber);
       if (previous && previous.details_fetched_at !== record.details_fetched_at) {
         portalDetailByNumber.delete(record.srnumber);
@@ -1667,9 +1767,13 @@
 
     const changed = !recordsMatch(nextRecords, records);
     records = nextRecords;
-    feedByNumber = new Map(records.map(record => [record.srnumber, record]));
-    const mapChanged = mergeMapRecords(records);
-    if (!changed && !mapChanged) return;
+    feedByNumber = nextByNumber;
+    const { changed: mapChanged } = mergeMapRecords(records);
+    if (!changed && !mapChanged) {
+      updateFeedCoverage();
+      renderFeedPagination();
+      return;
+    }
     syncStatuses();
     if (changed) renderFeed();
     renderMap();
@@ -1725,8 +1829,8 @@
     if (!pendingBoundaryFit || revision !== boundaryFitRevision
         || !selectedBoundariesSettled() || !mapHasLayout()) return;
     const bounds = selectedBoundaryBounds();
-    pendingBoundaryFit = false;
     if (!bounds.isValid()) return;
+    pendingBoundaryFit = false;
     const mapHeight = map.getContainer().getBoundingClientRect().height;
     const topPadding = Math.min(170, Math.max(32, Math.floor(mapHeight * 0.45)));
     map.fitBounds(bounds, {
@@ -1745,7 +1849,7 @@
         if (!mapHasLayout()) return;
         map.invalidateSize({ pan: false, debounceMoveend: true });
         renderMap();
-        if (!mapArchiveLoaded) refreshMap(mapStats, true);
+        if (!mapArchiveLoaded && !mapRefreshInFlight) refreshMap(mapStats);
         if (attemptBoundaryFit) fitSelectedBoundaryUnion(fitRevision);
       });
     });
@@ -1772,7 +1876,7 @@
     const entries = [
       { kind: 'precinct', state: boundaryStates.precinct },
       { kind: 'bid', state: boundaryStates.bid }
-    ].filter(entry => entry.state.layer && entry.state.label);
+    ].filter(entry => entry.state.requestedValue && entry.state.label);
     const fragment = document.createDocumentFragment();
     for (const entry of entries) {
       const item = document.createElement('span');
@@ -1782,7 +1886,14 @@
       swatch.setAttribute('aria-hidden', 'true');
       const label = document.createElement('span');
       label.className = 'map-boundary-label';
-      label.textContent = entry.state.label;
+      label.textContent = entry.state.error
+        ? `${entry.state.label} boundary unavailable${entry.state.retryTimer !== null ? ' · retrying' : ''}`
+        : entry.state.loading
+          ? `${entry.state.label} boundary loading…`
+          : entry.state.label;
+      item.dataset.state = entry.state.error
+        ? 'error'
+        : entry.state.loading ? 'loading' : 'ready';
       item.append(swatch, label);
       fragment.append(item);
     }
@@ -1820,19 +1931,26 @@
       && Array.isArray(feature.geometry.coordinates));
   }
 
-  async function loadSelectedBoundary(kind) {
+  async function loadSelectedBoundary(kind, { force = false } = {}) {
     const state = boundaryStates[kind];
     const config = boundaryConfiguration(kind);
     const value = String(config.value || '');
-    if (state.requestedValue === value && (state.layer || state.loading || !value)) return;
+    if (!force && state.requestedValue === value && (state.layer || state.loading || !value)) return;
 
     state.sequence += 1;
     const sequence = state.sequence;
     if (state.controller) state.controller.abort();
+    if (state.retryTimer !== null) {
+      window.clearTimeout(state.retryTimer);
+      state.retryTimer = null;
+    }
     state.controller = null;
     state.loading = false;
+    state.error = '';
+    if (!force) state.attempt = 0;
     state.requestedValue = value;
     removeBoundaryLayer(state);
+    state.label = value ? config.featureLabel(null) : '';
     updateBoundaryKey();
     if (!value) {
       scheduleSelectedBoundaryFit();
@@ -1842,6 +1960,9 @@
     const controller = new AbortController();
     state.controller = controller;
     state.loading = true;
+    state.attempt += 1;
+    updateBoundaryKey();
+    const timeout = window.setTimeout(() => controller.abort(), 5_000);
     try {
       const feature = await fetchJson(config.url(value), config.serviceLabel, {
         signal: controller.signal
@@ -1856,10 +1977,23 @@
         style: boundaryStyles[kind]
       }).addTo(map);
       state.label = config.featureLabel(feature);
+      state.error = '';
       updateBoundaryKey();
     } catch (error) {
-      if (error.name !== 'AbortError' && sequence === state.sequence) console.warn(error);
+      if (sequence === state.sequence && state.requestedValue === value) {
+        state.error = error.name === 'AbortError'
+          ? 'Boundary request timed out'
+          : error.message;
+        console.warn(error);
+        if (state.attempt < 3) {
+          state.retryTimer = window.setTimeout(() => {
+            state.retryTimer = null;
+            loadSelectedBoundary(kind, { force: true });
+          }, 2_000 * state.attempt);
+        }
+      }
     } finally {
+      window.clearTimeout(timeout);
       if (sequence === state.sequence) {
         state.loading = false;
         state.controller = null;
@@ -1994,36 +2128,72 @@
 
   function mergeMapRecords(incoming) {
     let changed = false;
+    let feedChanged = false;
     for (const incomingRecord of incoming) {
       if (!incomingRecord || !incomingRecord.srnumber || !recordCoordinates(incomingRecord)) continue;
-      const record = feedByNumber.get(incomingRecord.srnumber) || incomingRecord;
-      const previous = mapByNumber.get(record.srnumber);
-      if (previous && recordSignature(previous) === recordSignature(record)) continue;
+      const feedRecord = feedByNumber.get(incomingRecord.srnumber);
+      const feedSignature = feedRecord ? recordSignature(feedRecord) : null;
+      const previous = mapByNumber.get(incomingRecord.srnumber);
+      const previousSignature = previous ? recordSignature(previous) : null;
+      const record = feedRecord
+        ? Object.assign(feedRecord, incomingRecord)
+        : incomingRecord;
+      const nextSignature = recordSignature(record);
+      if (feedRecord && feedSignature !== nextSignature) feedChanged = true;
+      if (previous && previousSignature === nextSignature) continue;
       mapByNumber.set(record.srnumber, record);
       changed = true;
     }
     if (changed) mapRecords = [...mapByNumber.values()];
-    return changed;
+    return { changed, feedChanged };
   }
 
-  function updateMapRecords(payload, dashboardStats) {
+  function resetMapDataset() {
+    mapByNumber = new Map();
+    mapRecords = [];
+    mapStats = {
+      total: 0,
+      mapped_total: 0,
+      unmapped_total: 0,
+      totals_available: false
+    };
+    mapArchiveLoaded = false;
+    renderMap();
+    updateMapCountText();
+  }
+
+  function updateMapRecords(payload, dashboardStats, { replace = false } = {}) {
     const incoming = Array.isArray(payload) ? payload : payload.records || [];
     const stats = Array.isArray(payload) ? {} : payload.stats || {};
-    mergeMapRecords(incoming);
-    const totalsAvailable = Number.isFinite(Number(stats.total))
-      || Number.isFinite(Number(dashboardStats && dashboardStats.total));
-    const total = finiteStat(stats.total, finiteStat(dashboardStats.total, mapRecords.length));
-    const mapped = finiteStat(stats.mapped_total, mapRecords.length);
-    mapStats = {
-      total,
-      mapped_total: mapped,
-      unmapped_total: finiteStat(
-        stats.unmapped_total,
-        finiteStat(dashboardStats.unmapped_total, Math.max(0, total - mapped))
-      ),
-      totals_available: totalsAvailable
-    };
+    if (replace) {
+      mapByNumber = new Map();
+      mapRecords = [];
+    }
+    const mergeResult = mergeMapRecords(incoming);
+    const payloadHasTotals = Number.isFinite(Number(stats.total))
+      || Number.isFinite(Number(stats.mapped_total));
+    const dashboardHasTotals = Number.isFinite(Number(dashboardStats && dashboardStats.total));
+    if (payloadHasTotals || (!mapStats.totals_available && dashboardHasTotals)) {
+      const total = finiteStat(
+        stats.total,
+        finiteStat(dashboardStats && dashboardStats.total, mapRecords.length)
+      );
+      const mapped = finiteStat(stats.mapped_total, mapRecords.length);
+      mapStats = {
+        total,
+        mapped_total: mapped,
+        unmapped_total: finiteStat(
+          stats.unmapped_total,
+          finiteStat(
+            dashboardStats && dashboardStats.unmapped_total,
+            Math.max(0, total - mapped)
+          )
+        ),
+        totals_available: true
+      };
+    }
     syncStatuses();
+    if (mergeResult.feedChanged) renderFeed();
     renderMap();
     if (selectedNumber && !feedByNumber.has(selectedNumber)) renderDetail(findRecord(selectedNumber));
   }
@@ -2987,24 +3157,98 @@
     }
   }
 
+  function payloadPage(payload) {
+    return payload && payload.page && typeof payload.page === 'object'
+      ? payload.page
+      : {};
+  }
+
+  function pageTotal(page) {
+    const value = page.matching_total ?? page.total;
+    return Number.isFinite(Number(value)) && Number(value) >= 0
+      ? Number(value)
+      : null;
+  }
+
+  function oldestLoadedSuffix() {
+    let oldest = null;
+    for (const record of records) {
+      const suffix = suffixOf(record);
+      if (suffix > 0 && (oldest === null || suffix < oldest)) oldest = suffix;
+    }
+    return oldest;
+  }
+
+  function applyFeedPageState(payload, { preserveDepth = false } = {}) {
+    const page = payloadPage(payload);
+    const pageHasMore = Boolean(page.has_more);
+    const pageNext = Number(page.next_before_suffix);
+    const pageSnapshot = typeof page.snapshot_at === 'string'
+      ? page.snapshot_at
+      : typeof payload.snapshot_at === 'string'
+        ? payload.snapshot_at
+        : null;
+    const total = pageTotal(page);
+    if (total !== null) feedMatchingTotal = total;
+    if (pageSnapshot) feedSnapshotAt = pageSnapshot;
+    if (preserveDepth) {
+      feedNextBeforeSuffix = oldestLoadedSuffix();
+      return;
+    }
+    feedHasMore = pageHasMore;
+    feedNextBeforeSuffix = pageHasMore && Number.isSafeInteger(pageNext) && pageNext > 0
+      ? pageNext
+      : null;
+  }
+
+  async function loadMoreFeed() {
+    if (feedLoadingMore || !feedHasMore || !feedNextBeforeSuffix) return;
+    const queryKey = currentFeedQueryKey();
+    const beforeSuffix = feedNextBeforeSuffix;
+    feedLoadingMore = true;
+    renderFeedPagination();
+    try {
+      const payload = await fetchJson(scopedUrl('/api/live-dashboard', {
+        limit: FEED_PAGE_SIZE,
+        compact: 1,
+        paginate: 1,
+        before_suffix: beforeSuffix,
+        ...(feedSnapshotAt ? { snapshot_at: feedSnapshotAt } : {}),
+        ...activeDataFilters()
+      }), 'Request archive');
+      if (queryKey !== currentFeedQueryKey()) return;
+      updateFeedRecords(Array.isArray(payload.records) ? payload.records : []);
+      applyFeedPageState(payload);
+    } catch (error) {
+      console.warn(error);
+    } finally {
+      feedLoadingMore = false;
+      renderFeed();
+    }
+  }
+
   async function refreshMap(dashboardStats, force = false) {
     if (!mapHasLayout()) return;
     const now = Date.now();
     if (force) {
       if (mapAbortController) mapAbortController.abort();
+      clearMapRetry();
       mapRequestSequence += 1;
       mapRefreshInFlight = false;
       lastMapRefreshStartedAt = 0;
+      mapArchiveLoaded = false;
     }
     if (mapRefreshInFlight || now - lastMapRefreshStartedAt < MAP_REFRESH_MS) return;
     mapRefreshInFlight = true;
     lastMapRefreshStartedAt = now;
     const sequence = ++mapRequestSequence;
     const submittedSince = mapSubmittedSince(now);
+    const dataFilters = activeDataFilters();
     let recordsLoadedForRequest = 0;
     setMapLoadState('loading', mapArchiveLoaded ? 'Refreshing map records…' : 'Loading map records…');
     try {
       let beforeSuffix = null;
+      let snapshotAt = null;
       let pagesLoaded = 0;
       let hasMore = true;
       while (hasMore && pagesLoaded < 500) {
@@ -3016,9 +3260,12 @@
         try {
           payload = await fetchJson(scopedUrl('/api/live-map', {
             limit: pageLimit,
-            include_totals: 0,
+            paginate: 1,
+            include_totals: pagesLoaded === 0 ? 1 : 0,
+            ...dataFilters,
             ...(submittedSince != null ? { submitted_since: submittedSince } : {}),
-            ...(beforeSuffix != null ? { before_suffix: beforeSuffix } : {})
+            ...(beforeSuffix != null ? { before_suffix: beforeSuffix } : {}),
+            ...(snapshotAt != null ? { snapshot_at: snapshotAt } : {})
           }), 'Map service', {
             signal: controller.signal
           });
@@ -3026,7 +3273,7 @@
           window.clearTimeout(timeout);
         }
         if (sequence !== mapRequestSequence) return;
-        updateMapRecords(payload, dashboardStats);
+        updateMapRecords(payload, dashboardStats, { replace: pagesLoaded === 0 });
         recordsLoadedForRequest += Array.isArray(payload && payload.records)
           ? payload.records.length
           : 0;
@@ -3040,6 +3287,10 @@
 
         const page = payload && payload.page;
         const nextSuffix = Number(page && page.next_before_suffix);
+        const returnedSnapshot = page && page.snapshot_at;
+        if (pagesLoaded === 1 && typeof returnedSnapshot === 'string') {
+          snapshotAt = returnedSnapshot;
+        }
         hasMore = Boolean(page && page.has_more);
         if (hasMore && (!Number.isSafeInteger(nextSuffix) || nextSuffix < 1
             || (beforeSuffix != null && nextSuffix >= beforeSuffix))) {
@@ -3056,7 +3307,15 @@
       if (hasMore) throw new Error('Map service returned too many pages');
       mapArchiveLoaded = true;
       clearMapRetry();
-      setMapLoadState('ready');
+      renderMap();
+      updateMapCountText();
+      const completeCount = mapStats.totals_available
+        ? Number(mapStats.mapped_total || 0)
+        : recordsLoadedForRequest;
+      setMapLoadState(
+        'ready',
+        `Complete · ${completeCount.toLocaleString()} map ${completeCount === 1 ? 'pin' : 'pins'} loaded`
+      );
     } catch (error) {
       if (sequence === mapRequestSequence) {
         const message = error.name === 'AbortError'
@@ -3083,20 +3342,31 @@
     refreshInFlight = true;
     const timeout = window.setTimeout(() => controller.abort(), DASHBOARD_REQUEST_TIMEOUT_MS);
     try {
-      const requestLimit = dashboardPayloadLoaded
-        ? MAX_VISIBLE_RECORDS
-        : INITIAL_VISIBLE_RECORDS;
+      const requestedFeedKey = currentFeedQueryKey();
+      const queryChanged = requestedFeedKey !== feedQueryKey;
+      if (queryChanged) resetFeedPagination();
+      const firstDashboardPayload = !dashboardPayloadLoaded;
+      const requestLimit = firstDashboardPayload || queryChanged
+        ? INITIAL_FEED_PAGE_SIZE
+        : FEED_PAGE_SIZE;
+      const preserveFeedDepth = !queryChanged && records.length > requestLimit;
       const data = await fetchJson(scopedUrl('/api/live-dashboard', {
         limit: requestLimit,
-        compact: 1
+        compact: 1,
+        paginate: 1,
+        ...activeDataFilters()
       }), 'Data service', {
         signal: controller.signal
       });
       if (sequence !== dashboardRequestSequence) return;
       const stats = data.stats || {};
-      const firstDashboardPayload = !dashboardPayloadLoaded;
       dashboardPayloadLoaded = true;
-      updateFeedRecords(data.records || []);
+      updateFeedRecords(data.records || [], {
+        reset: firstDashboardPayload || queryChanged,
+        replaceHead: !firstDashboardPayload && !queryChanged
+      });
+      applyFeedPageState(data, { preserveDepth: preserveFeedDepth });
+      renderFeedPagination();
       if (firstDashboardPayload && records.length === 0) renderFeed();
       const exact = exactSrnumberQuery();
       if (exact) {
@@ -3183,29 +3453,48 @@
   }
 
   feed.addEventListener('click', event => {
+    const loadMore = event.target.closest('.feed-load-more');
+    if (loadMore) {
+      loadMoreFeed();
+      return;
+    }
     const card = event.target.closest('.request-card');
     if (!card) return;
     openRequestFromFeed(card.dataset.number);
   });
+  feed.addEventListener('scroll', () => {
+    const remaining = feed.scrollHeight - feed.scrollTop - feed.clientHeight;
+    if (remaining < 500) loadMoreFeed();
+  }, { passive: true });
   mobileViewTabs.addEventListener('click', event => {
     const button = event.target.closest('button[data-mobile-view]');
     if (button) setMobileView(button.dataset.mobileView);
   });
+  function scheduleFilterRefresh(delayMs = 250) {
+    if (filterRefreshTimer !== null) window.clearTimeout(filterRefreshTimer);
+    filterRefreshTimer = window.setTimeout(() => {
+      filterRefreshTimer = null;
+      resetFeedPagination();
+      resetMapDataset();
+      renderFeed({ resetScroll: true });
+      refreshNowAndReschedule({ force: true });
+    }, delayMs);
+  }
   search.addEventListener('input', () => {
-    const scopeChanged = showAllDatesForActiveFilters();
     scheduleArchiveSearch();
-    if (scopeChanged) refreshMap(mapStats, true);
+    scheduleFilterRefresh();
   });
   statusFilter.addEventListener('change', () => {
-    const scopeChanged = showAllDatesForActiveFilters();
     updateActiveFilterState();
-    renderFeed({ resetScroll: true });
-    renderMap();
-    if (scopeChanged) refreshMap(mapStats, true);
+    scheduleFilterRefresh(0);
   });
   function handleGeographyFilterChange() {
-    showAllDatesForActiveFilters();
-    mapArchiveLoaded = false;
+    if (filterRefreshTimer !== null) {
+      window.clearTimeout(filterRefreshTimer);
+      filterRefreshTimer = null;
+    }
+    resetMapDataset();
+    resetFeedPagination();
     lastGoodSummary = null;
     highestObservedSuffix = null;
     detailLoadSequence += 1;

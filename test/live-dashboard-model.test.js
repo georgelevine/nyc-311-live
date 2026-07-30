@@ -6,7 +6,6 @@ const {
   activeFilterLabel,
   exactSrnumberQuery,
   feedCardModel,
-  mapScopeAfterFilterChange,
   recordCoordinates,
   recordDetailsPending,
   recordHasMapPin
@@ -53,14 +52,6 @@ test('respects explicit Portal map-pin state before derived coordinates', () => 
 test('summarizes active geography and status filters', () => {
   assert.equal(activeFilterLabel(['', null, '']), 'None selected');
   assert.equal(activeFilterLabel(['Closed', '', '12']), '2 active');
-});
-
-test('shows all captured dates when a request filter changes', () => {
-  assert.equal(mapScopeAfterFilterChange('24h', ['', 'Closed', '', '']), 'all');
-  assert.equal(mapScopeAfterFilterChange('7d', ['Hudson Square']), 'all');
-  assert.equal(mapScopeAfterFilterChange('24h', ['', null, '']), '24h');
-  assert.equal(mapScopeAfterFilterChange('all', []), '24h');
-  assert.equal(mapScopeAfterFilterChange('unknown', []), '24h');
 });
 
 test('distinguishes a captured request whose submitted details are still pending', () => {

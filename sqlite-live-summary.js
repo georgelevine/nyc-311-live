@@ -91,6 +91,24 @@ function detailSql(hasDetails) {
       };
 }
 
+function scopedLiveRequestSource(
+  scopedToBusinessImprovementDistrict = false,
+  scopedToBusinessImprovementDistrictBoundaryVersion = false
+) {
+  if (!scopedToBusinessImprovementDistrict) return 'live_portal_requests AS live';
+  const boundaryVersionWhere = scopedToBusinessImprovementDistrictBoundaryVersion
+    ? ' AND boundary_version=@business_improvement_district_boundary_version'
+    : '';
+  // Materialize the small, indexed membership set before joining the request
+  // archive. DISTINCT preserves the former EXISTS semantics if a caller asks
+  // for a BID across more than one retained boundary release.
+  return `(SELECT DISTINCT srnumber
+    FROM live_request_bid_memberships
+    WHERE bid_id=@business_improvement_district_id${boundaryVersionWhere}
+  ) AS bid_scope
+  JOIN live_portal_requests AS live ON live.srnumber=bid_scope.srnumber`;
+}
+
 function archiveTimeQuality(
   database,
   sql,
@@ -133,18 +151,11 @@ function archiveTimeQuality(
         : ' AND live.police_precinct_boundary_version=@police_precinct_boundary_version'
     }`);
   }
-  if (businessImprovementDistrictId != null) {
-    predicates.push(`EXISTS (
-      SELECT 1 FROM live_request_bid_memberships AS bid_membership
-      WHERE bid_membership.srnumber=live.srnumber
-        AND bid_membership.bid_id=@business_improvement_district_id${
-          businessImprovementDistrictBoundaryVersion == null
-            ? ''
-            : ' AND bid_membership.boundary_version=@business_improvement_district_boundary_version'
-        }
-    )`);
-  }
   const scopeWhere = predicates.length ? `WHERE ${predicates.join(' AND ')}` : '';
+  const liveSource = scopedLiveRequestSource(
+    businessImprovementDistrictId != null,
+    businessImprovementDistrictBoundaryVersion != null
+  );
   const canonical = `LENGTH(submitted_at)=24 AND submitted_at GLOB
     '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'`;
   const statement = database.prepare(`
@@ -155,7 +166,7 @@ function archiveTimeQuality(
       MIN(CASE WHEN ${canonical} THEN submitted_at END) AS oldest_submitted_at
     FROM (
       SELECT ${sql.submitted} AS submitted_at
-      FROM live_portal_requests AS live
+      FROM ${liveSource}
       ${sql.join}
       ${scopeWhere}
     )
@@ -195,17 +206,10 @@ function summaryRowsQuery(
   const boundaryVersionAnd = scopedToBoundaryVersion
     ? ' AND live.police_precinct_boundary_version=@police_precinct_boundary_version'
     : '';
-  const businessImprovementDistrictAnd = scopedToBusinessImprovementDistrict
-    ? ` AND EXISTS (
-      SELECT 1 FROM live_request_bid_memberships AS bid_membership
-      WHERE bid_membership.srnumber=live.srnumber
-        AND bid_membership.bid_id=@business_improvement_district_id${
-          scopedToBusinessImprovementDistrictBoundaryVersion
-            ? ' AND bid_membership.boundary_version=@business_improvement_district_boundary_version'
-            : ''
-        }
-    )`
-    : '';
+  const liveSource = scopedLiveRequestSource(
+    scopedToBusinessImprovementDistrict,
+    scopedToBusinessImprovementDistrictBoundaryVersion
+  );
   const select = `SELECT live.srnumber,live.suffix,
       ${sql.submitted} AS submitted_at,
       ${sql.problem} AS problem,
@@ -216,21 +220,21 @@ function summaryRowsQuery(
         CASE WHEN json_extract(live.raw_json,'$.source')='number_audit'
           THEN 'number_audit' ELSE 'map' END
       ELSE 'map' END AS source
-    FROM live_portal_requests AS live
+    FROM ${liveSource}
     ${sql.join}`;
   return sql.hasDetails
     ? `SELECT * FROM (
         ${select}
-        WHERE live.submitted_at>=@start AND live.submitted_at<@end${precinctAnd}${boundaryVersionAnd}${businessImprovementDistrictAnd}
+        WHERE live.submitted_at>=@start AND live.submitted_at<@end${precinctAnd}${boundaryVersionAnd}
         UNION ALL
         ${select}
         WHERE (live.submitted_at IS NULL OR TRIM(live.submitted_at)='')
           AND details.date_reported>=@start AND details.date_reported<@end
-          ${precinctAnd}${boundaryVersionAnd}${businessImprovementDistrictAnd}
+          ${precinctAnd}${boundaryVersionAnd}
       ) ORDER BY suffix`
     : `${select}
        WHERE live.submitted_at>=@start AND live.submitted_at<@end
-       ${precinctAnd}${boundaryVersionAnd}${businessImprovementDistrictAnd}
+       ${precinctAnd}${boundaryVersionAnd}
        ORDER BY live.suffix`;
 }
 
@@ -454,6 +458,7 @@ module.exports = {
   collectorFreshness,
   detailSql,
   loadSqliteLiveSummary,
+  scopedLiveRequestSource,
   summaryRows,
   summaryRowsQuery,
   tableExists

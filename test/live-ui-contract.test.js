@@ -246,32 +246,39 @@ test('map startup is self-hosted, bounded, and automatically recoverable', () =>
   assert.match(dashboard, /const MAP_REFRESH_MS = 5 \* 60_000/);
   assert.match(dashboard, /const MAP_REQUEST_TIMEOUT_MS = 15_000/);
   assert.match(dashboard, /const MAP_RETRY_MS = 3_000/);
-  assert.match(dashboard, /const MAX_VISIBLE_RECORDS = 300/);
-  assert.match(dashboard, /const INITIAL_VISIBLE_RECORDS = 100/);
+  assert.match(dashboard, /const FEED_PAGE_SIZE = 300/);
+  assert.match(dashboard, /const INITIAL_FEED_PAGE_SIZE = 100/);
   assert.match(
     dashboard,
-    /const requestLimit = dashboardPayloadLoaded\s*\? MAX_VISIBLE_RECORDS\s*: INITIAL_VISIBLE_RECORDS/
+    /const requestLimit = firstDashboardPayload \|\| queryChanged\s*\? INITIAL_FEED_PAGE_SIZE\s*: FEED_PAGE_SIZE/
   );
-  assert.match(dashboard, /live-dashboard', \{\s*limit: requestLimit,\s*compact: 1\s*\}/);
+  assert.match(dashboard, /live-dashboard', \{\s*limit: requestLimit,\s*compact: 1,\s*paginate: 1/);
+  assert.match(dashboard, /async function loadMoreFeed/);
+  assert.match(dashboard, /before_suffix: beforeSuffix/);
   assert.match(dashboard, /pagesLoaded === 0 \? MAP_INITIAL_PAGE_SIZE : MAP_PAGE_SIZE/);
-  assert.match(dashboard, /include_totals:\s*0/);
+  assert.match(dashboard, /include_totals: pagesLoaded === 0 \? 1 : 0/);
+  assert.match(dashboard, /paginate:\s*1/);
   assert.match(dashboard, /while \(hasMore && pagesLoaded < 500\)/);
   assert.match(dashboard, /await new Promise\(resolve => window\.requestAnimationFrame\(resolve\)\)/);
   assert.match(dashboard, /before_suffix:\s*beforeSuffix/);
   assert.match(dashboard, /submitted_since:\s*submittedSince/);
   assert.match(dashboard, /mergeMapRecords\(records\)/);
+  assert.match(
+    dashboard,
+    /if \(!mapArchiveLoaded && !mapRefreshInFlight\) refreshMap\(mapStats\)/
+  );
   assert.match(dashboard, /Map data took too long\. Retrying/);
   assert.match(dashboard, /tile\.openstreetmap\.org/);
 });
 
-test('map starts recent, expands filters to all captured dates, and discloses the range', () => {
+test('map starts recent, keeps the chosen date scope during filters, and discloses the range', () => {
   assert.equal($('#map-scope button[data-map-scope="all"]').text().trim(), 'All dates');
   assert.equal($('#map-scope button[data-map-scope="all"]').attr('aria-pressed'), 'false');
   assert.equal($('#map-scope button[data-map-scope="24h"]').attr('aria-pressed'), 'true');
   assert.equal($('#map-date-range[aria-live="polite"]').length, 1);
   assert.match($('#map-date-range').text(), /Last 24 hours/);
   assert.match(dashboard, /let mapScope = '24h'/);
-  assert.match(dashboard, /showAllDatesForActiveFilters/);
+  assert.doesNotMatch(dashboard, /showAllDatesForActiveFilters/);
   assert.match(dashboard, /All captured dates/);
   assert.match(dashboard, /mapRangeDateFormatter/);
 });
@@ -280,4 +287,14 @@ test('pending details stay separate from complete request cards and map pins', (
   assert.match(dashboard, /recordDetailsPending/);
   assert.match(dashboard, /renderPendingDetails/);
   assert.match(dashboard, /Complete requests will appear here/);
+});
+
+test('map-only records retrieve stored details instead of inventing an empty detail payload', () => {
+  assert.match(dashboard, /function recordHasEmbeddedPortalDetail/);
+  assert.match(
+    dashboard,
+    /Object\.prototype\.hasOwnProperty\.call\(record, 'problem_details'\)/
+  );
+  assert.match(dashboard, /if \(recordHasEmbeddedPortalDetail\(record\)\)/);
+  assert.match(dashboard, /preferArchive=1/);
 });

@@ -183,6 +183,13 @@ button, input, select { font: inherit; }
 .request-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; color: #84919c; font-size: 10px; }
 .request-meta .unmapped-label { color: var(--amber); font-weight: 800; }
 .request-meta .missing-label { color: #9b6411; font-weight: 800; }
+.feed-load-more {
+  display: block; width: calc(100% - 36px); margin: 14px 18px 0; padding: 11px 14px;
+  color: #315c80; border: 1px solid #cfdae3; border-radius: 10px; background: #fff;
+  cursor: pointer; font-size: 10px; font-weight: 800;
+}
+.feed-load-more:hover { border-color: #8fb7e8; background: #f5f9fd; }
+.feed-load-more:disabled { color: #7a8995; cursor: wait; background: #f3f6f8; }
 .empty-state { display: grid; place-items: center; gap: 18px; padding: 90px 30px; color: var(--muted); text-align: center; }
 .radar { width: 50px; height: 50px; border: 1px solid #a8c5e9; border-radius: 50%; box-shadow: inset 0 0 0 12px var(--paper), inset 0 0 0 13px #d8e6f6; }
 
@@ -202,6 +209,8 @@ button, input, select { font: inherit; }
 }
 .map-boundary-key[hidden] { display: none; }
 .map-boundary-item { display: inline-flex; min-width: 0; max-width: 100%; align-items: center; gap: 6px; }
+.map-boundary-item[data-state="loading"] { color: #687887; }
+.map-boundary-item[data-state="error"] { color: #9b6411; }
 .map-boundary-label { min-width: 0; overflow-wrap: anywhere; }
 .map-boundary-swatch { display: inline-block; flex: 0 0 23px; width: 23px; height: 0; border-top: 3px solid; }
 .map-boundary-swatch.precinct { border-color: #5846c7; }
@@ -231,7 +240,11 @@ button, input, select { font: inherit; }
   animation: continuous-live-spin 1.2s linear infinite;
 }
 .map-load-status[data-state="error"] { color: #9b6411; }
-.map-load-status[data-state="ready"] { display: none; }
+.map-load-status[data-state="ready"] { color: #0d8058; }
+.map-load-status[data-state="ready"]::before {
+  border-color: #22a57a; background: #22a57a; box-shadow: 0 0 0 3px rgba(34,165,122,.12);
+  animation: none;
+}
 .bottom-right { right: 18px; bottom: 20px; }
 .legend { display: flex; gap: 14px; color: #52626f; font-size: 10px; font-weight: 650; }
 .legend span { display: flex; align-items: center; gap: 5px; }

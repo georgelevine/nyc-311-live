@@ -436,6 +436,16 @@ a:focus-visible {
   font-size: 18px;
 }
 
+.feed-coverage {
+  display: block;
+  margin-top: 5px;
+  color: #718291;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
 .requests-view-heading time {
   max-width: 180px;
   font-variant-numeric: tabular-nums;

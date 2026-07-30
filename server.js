@@ -133,7 +133,7 @@ function scopeParameters(scope) {
   };
 }
 
-function scopePredicates(alias, scope) {
+function scopePredicates(alias, scope, bidAlias = null) {
   const predicates = [];
   if (scope && scope.precinct) {
     predicates.push(
@@ -142,14 +142,31 @@ function scopePredicates(alias, scope) {
     );
   }
   if (scope && scope.bid) {
-    predicates.push(`EXISTS (
-      SELECT 1 FROM live_request_bid_memberships AS bid_membership
-      WHERE bid_membership.srnumber=${alias}.srnumber
-        AND bid_membership.boundary_version=@bid_boundary_version
-        AND bid_membership.bid_id=@bid_id
-    )`);
+    if (bidAlias) {
+      predicates.push(
+        `${bidAlias}.boundary_version=@bid_boundary_version`,
+        `${bidAlias}.bid_id=@bid_id`
+      );
+    } else {
+      predicates.push(`EXISTS (
+        SELECT 1 FROM live_request_bid_memberships AS bid_membership
+        WHERE bid_membership.srnumber=${alias}.srnumber
+          AND bid_membership.boundary_version=@bid_boundary_version
+          AND bid_membership.bid_id=@bid_id
+      )`);
+    }
   }
   return predicates;
+}
+
+function scopedLiveRequestSource(alias, scope, bidAlias = `${alias}_scope_bid`) {
+  if (!scope || !scope.bid) return `live_portal_requests AS ${alias}`;
+  // Start BID-scoped reads at the small, indexed membership set. The former
+  // correlated EXISTS predicate scanned the large request table in suffix
+  // order and performed a membership lookup for every row it encountered.
+  return `live_request_bid_memberships AS ${bidAlias}
+    JOIN live_portal_requests AS ${alias}
+      ON ${alias}.srnumber=${bidAlias}.srnumber`;
 }
 
 function businessImprovementDistrictIdsSql(alias = 'live') {
@@ -327,6 +344,120 @@ function liveMapIncludeTotals(req) {
   return value === '1';
 }
 
+function liveMapPaginationMode(req) {
+  if (!req.query || !Object.prototype.hasOwnProperty.call(req.query, 'paginate')) {
+    return false;
+  }
+  if (req.query.paginate !== '1') {
+    const error = new Error('paginate must be 1 when pagination is requested');
+    error.statusCode = 400;
+    throw error;
+  }
+  return true;
+}
+
+function positiveSuffixQuery(req, name) {
+  const raw = req.query && req.query[name];
+  if (raw == null || String(raw).trim() === '') return null;
+  if (Array.isArray(raw) || typeof raw === 'object'
+      || !/^\d{1,12}$/.test(String(raw).trim())) {
+    const error = new Error(`${name} must be a positive request suffix`);
+    error.statusCode = 400;
+    throw error;
+  }
+  const suffix = Number(raw);
+  if (!Number.isSafeInteger(suffix) || suffix < 1) {
+    const error = new Error(`${name} must be a positive request suffix`);
+    error.statusCode = 400;
+    throw error;
+  }
+  return suffix;
+}
+
+function isoTimestampQuery(req, name) {
+  const raw = req.query && req.query[name];
+  if (raw == null || String(raw).trim() === '') return null;
+  try {
+    return mapSubmittedSince(raw);
+  } catch (_) {
+    const error = new Error(`${name} must be an ISO UTC timestamp`);
+    error.statusCode = 400;
+    throw error;
+  }
+}
+
+function archiveSnapshotAt() {
+  // The collector and web process share the same host clock. A wall-clock
+  // boundary avoids an archive-wide MAX() scan on every first page while
+  // excluding records first observed after pagination began.
+  return new Date().toISOString();
+}
+
+function optionalRecordFilters(req) {
+  function read(name, maximumLength) {
+    const raw = req.query && req.query[name];
+    if (raw == null || String(raw).trim() === '') return null;
+    if (Array.isArray(raw) || typeof raw === 'object') {
+      const error = new Error(`${name} must be a single text value`);
+      error.statusCode = 400;
+      throw error;
+    }
+    const value = String(raw).trim();
+    if (value.length > maximumLength) {
+      const error = new Error(`${name} must be ${maximumLength} characters or fewer`);
+      error.statusCode = 400;
+      throw error;
+    }
+    return value;
+  }
+  return {
+    status: read('status', 100),
+    query: read('q', 200)
+  };
+}
+
+function recordFilterPredicates(alias, filters) {
+  const predicates = [];
+  if (filters.status) {
+    predicates.push(
+      `NULLIF(TRIM(${alias}.status),'')=@filter_status COLLATE NOCASE`
+    );
+  }
+  if (filters.query) {
+    const exactSrnumber = /^311-\d{8}$/i.test(filters.query);
+    if (exactSrnumber) {
+      predicates.push(`${alias}.srnumber=@filter_srnumber COLLATE NOCASE`);
+    } else {
+      const expressions = [
+        `${alias}.srnumber`,
+        `${alias}.problem`,
+        `${alias}.address`,
+        `${alias}.status`
+      ];
+      predicates.push(`(${expressions
+        .map(expression => `INSTR(LOWER(COALESCE(${expression},'')),@filter_query)>0`)
+        .join(' OR ')})`);
+    }
+  }
+  return predicates;
+}
+
+function recordFilterParameters(filters) {
+  return {
+    ...(filters.status ? { filter_status: filters.status } : {}),
+    ...(filters.query && /^311-\d{8}$/i.test(filters.query)
+      ? { filter_srnumber: filters.query.toUpperCase() }
+      : {}),
+    ...(filters.query && !/^311-\d{8}$/i.test(filters.query)
+      ? { filter_query: filters.query.toLowerCase() }
+      : {})
+  };
+}
+
+function sqlWhere(predicates) {
+  return predicates.length ? `WHERE ${predicates.join(' AND ')}` : '';
+}
+
 function quoteSqliteIdentifier(value) {
   return `"${String(value).replace(/"/g, '""')}"`;
 }
@@ -348,12 +479,12 @@ function liveRequestIndexWithColumns(database, expectedColumns) {
   return null;
 }
 
-function liveMapRequestIndexClause(database, scope) {
-  // A BID-only query retains SQLite's freedom to plan the correlated
-  // membership predicate. Precinct queries have their own suffix-ordered
-  // index; unscoped requests use the UNIQUE suffix index and scan it backward.
-  // Both choices satisfy ORDER BY suffix DESC without a temporary sort.
-  if (scope && scope.bid && !scope.precinct) return '';
+function liveMapRequestIndexClause(database, scope, { exactSrnumber = false } = {}) {
+  // BID scopes begin at the indexed membership set, and exact request-number
+  // searches must remain free to use the request primary key. Precinct queries
+  // have their own suffix-ordered index; unscoped pages use the UNIQUE suffix
+  // index and scan it backward without a temporary sort.
+  if (exactSrnumber || (scope && scope.bid && !scope.precinct)) return '';
   const preferredColumns = scope && scope.precinct
     ? ['police_precinct', 'suffix']
     : ['suffix'];
@@ -1181,9 +1312,19 @@ app.get('/api/live-map', (req, res) => {
   res.setHeader('Cache-Control', 'no-store');
   try {
     const includeTotals = liveMapIncludeTotals(req);
+    const paginate = liveMapPaginationMode(req);
+    const filters = optionalRecordFilters(req);
     const emptyPayload = () => {
       const payload = buildLiveMapPayload([]);
       if (!includeTotals) delete payload.stats;
+      payload.page = {
+        limit: 250,
+        returned: 0,
+        has_more: false,
+        more_available: false,
+        next_before_suffix: null,
+        snapshot_at: null
+      };
       return payload;
     };
     if (!require('fs').existsSync(databasePath)) return res.json(emptyPayload());
@@ -1195,17 +1336,14 @@ app.get('/api/live-map', (req, res) => {
     if (!tables.has('live_portal_requests')) return res.json(emptyPayload());
     const scope = requestGeographyScope(req, database);
     const rawPageLimit = req.query && req.query.limit;
-    const rawBeforeSuffix = req.query && req.query.before_suffix;
-    const rawSubmittedSince = req.query && req.query.submitted_since;
     // Always bound the work, including requests from older cached clients
     // that predate map pagination. An omitted limit previously selected the
     // entire archive and could hold a long SQLite read lock, starving the
     // collector and every other HTTP request.
     let pageLimit = 250;
-    let beforeSuffix = null;
-    let submittedSince = null;
     if (rawPageLimit != null && String(rawPageLimit).trim() !== '') {
-      if (!/^\d{1,5}$/.test(String(rawPageLimit).trim())) {
+      if (Array.isArray(rawPageLimit) || typeof rawPageLimit === 'object'
+          || !/^\d{1,5}$/.test(String(rawPageLimit).trim())) {
         const error = new Error('limit must be an integer from 1 through 1000');
         error.statusCode = 400;
         throw error;
@@ -1217,25 +1355,20 @@ app.get('/api/live-map', (req, res) => {
         throw error;
       }
     }
-    if (rawBeforeSuffix != null && String(rawBeforeSuffix).trim() !== '') {
-      if (!/^\d{1,12}$/.test(String(rawBeforeSuffix).trim())) {
-        const error = new Error('before_suffix must be a positive request suffix');
-        error.statusCode = 400;
-        throw error;
-      }
-      beforeSuffix = Number(rawBeforeSuffix);
-      if (!Number.isSafeInteger(beforeSuffix) || beforeSuffix < 1) {
-        const error = new Error('before_suffix must be a positive request suffix');
-        error.statusCode = 400;
-        throw error;
-      }
-    }
-    try {
-      submittedSince = mapSubmittedSince(rawSubmittedSince);
-    } catch (error) {
+    const beforeSuffix = positiveSuffixQuery(req, 'before_suffix');
+    const submittedSince = isoTimestampQuery(req, 'submitted_since');
+    let snapshotAt = isoTimestampQuery(req, 'snapshot_at');
+    if (!paginate && (beforeSuffix != null || snapshotAt != null)) {
+      const error = new Error('before_suffix and snapshot_at require paginate=1');
       error.statusCode = 400;
       throw error;
     }
+    if (paginate && beforeSuffix != null && snapshotAt == null) {
+      const error = new Error('snapshot_at is required after the first page');
+      error.statusCode = 400;
+      throw error;
+    }
+    if (paginate && snapshotAt == null) snapshotAt = archiveSnapshotAt();
 
     const hasDetails = tables.has('portal_requests');
     const hasFollowUps = tables.has('request_followup_queue');
@@ -1281,22 +1414,39 @@ app.get('/api/live-map', (req, res) => {
           AND current_final.closure_cycle=followup.closure_cycle
           AND current_final.is_final=1`
       : '';
-    const livePredicates = scopePredicates('live', scope);
-    const scopeWhere = livePredicates.length ? `WHERE ${livePredicates.join(' AND ')}` : '';
+    const bidScopeAlias = 'map_scope_bid';
+    const liveSource = scopedLiveRequestSource('live', scope, bidScopeAlias);
+    const livePredicates = [
+      ...scopePredicates('live', scope, bidScopeAlias),
+      ...recordFilterPredicates('live', filters)
+    ];
+    if (submittedSince != null) {
+      livePredicates.push(
+        "live.submitted_at GLOB '????-??-??T??:??:??.???Z'",
+        'live.submitted_at >= @submitted_since'
+      );
+    }
+    if (snapshotAt != null) livePredicates.push('live.first_seen_at <= @snapshot_at');
+    const totalsWhere = sqlWhere(livePredicates);
     const mappedPredicates = [
       ...livePredicates,
       'live.latitude BETWEEN -90 AND 90',
       'live.longitude BETWEEN -180 AND 180'
     ];
     if (beforeSuffix != null) mappedPredicates.push('live.suffix < @before_suffix');
-    if (submittedSince != null) {
-      mappedPredicates.push(
-        "live.submitted_at GLOB '????-??-??T??:??:??.???Z'",
-        'live.submitted_at >= @submitted_since'
-      );
-    }
-    const mappedWhere = `WHERE ${mappedPredicates.join(' AND ')}`;
-    const liveIndexClause = liveMapRequestIndexClause(database, scope);
+    const mappedWhere = sqlWhere(mappedPredicates);
+    const liveIndexClause = liveMapRequestIndexClause(database, scope, {
+      exactSrnumber: Boolean(filters.query && /^311-\d{8}$/i.test(filters.query))
+    });
+    const liveRecordSource = scope && scope.bid
+      ? liveSource
+      : `${liveSource} ${liveIndexClause}`;
+    const commonParameters = {
+      ...scopeParameters(scope),
+      ...recordFilterParameters(filters),
+      ...(submittedSince != null ? { submitted_since: submittedSince } : {}),
+      ...(snapshotAt != null ? { snapshot_at: snapshotAt } : {})
+    };
     const totals = includeTotals
       ? database.prepare(`
           SELECT
@@ -1305,17 +1455,15 @@ app.get('/api/live-map', (req, res) => {
               live.latitude BETWEEN -90 AND 90
               AND live.longitude BETWEEN -180 AND 180
             ), 0) AS mapped_total
-          FROM live_portal_requests AS live
-          ${scopeWhere}
-        `).get(scopeParameters(scope))
+          FROM ${liveSource}
+          ${totalsWhere}
+        `).get(commonParameters)
       : null;
     const queryParameters = {
-      ...scopeParameters(scope),
+      ...commonParameters,
       ...(beforeSuffix != null ? { before_suffix: beforeSuffix } : {}),
-      ...(submittedSince != null ? { submitted_since: submittedSince } : {}),
-      ...(pageLimit != null ? { map_limit: pageLimit } : {})
+      map_limit: pageLimit + 1
     };
-    const pageClause = pageLimit != null ? 'LIMIT @map_limit' : '';
     const statement = database.prepare(`
       SELECT live.srnumber,live.suffix,live.portal_id,live.problem,live.address,
              live.borough,live.incident_zip,
@@ -1326,16 +1474,17 @@ app.get('/api/live-map', (req, res) => {
              live.latitude,live.longitude,live.submitted_at,live.status,
              live.portal_url,live.first_seen_at,live.last_seen_at,
              ${detailColumns},${followUpColumns},${currentClosureColumns}
-      FROM live_portal_requests AS live
-      ${liveIndexClause}
+      FROM ${liveRecordSource}
       ${detailJoin}
       ${followUpJoin}
       ${currentClosureJoin}
       ${mappedWhere}
       ORDER BY live.suffix DESC
-      ${pageClause}
+      LIMIT @map_limit
     `);
-    const rows = statement.all(queryParameters);
+    const pageRows = statement.all(queryParameters);
+    const hasMore = pageRows.length > pageLimit;
+    const rows = hasMore ? pageRows.slice(0, pageLimit) : pageRows;
     const total = totals ? Number(totals.total || 0) : null;
     const mappedTotal = totals ? Number(totals.mapped_total || 0) : null;
     const payload = buildLiveMapPayload(rows, totals ? {
@@ -1344,20 +1493,17 @@ app.get('/api/live-map', (req, res) => {
       unmapped_total: Math.max(0, total - mappedTotal)
     } : null);
     if (!includeTotals) delete payload.stats;
-    if (pageLimit != null) {
-      const lastRecord = payload.records[payload.records.length - 1];
-      const moreAvailable = payload.records.length === pageLimit;
-      payload.page = {
-        limit: pageLimit,
-        returned: payload.records.length,
-        // Older and current dashboard clients automatically follow has_more.
-        // Keep the cursor available to deliberate API callers without allowing
-        // a browser tab to drain the full archive and monopolize SQLite.
-        has_more: false,
-        more_available: moreAvailable,
-        next_before_suffix: lastRecord ? lastRecord.suffix : null
-      };
-    }
+    const lastRecord = payload.records[payload.records.length - 1];
+    payload.page = {
+      limit: pageLimit,
+      returned: payload.records.length,
+      // Deliberate paginate=1 callers get a truthful continuation bit. Cached
+      // and legacy clients remain bounded to one page.
+      has_more: paginate && hasMore,
+      more_available: hasMore,
+      next_before_suffix: lastRecord ? lastRecord.suffix : null,
+      snapshot_at: snapshotAt
+    };
     return res.json(payload);
   } catch (error) {
     if (!error.statusCode || error.statusCode >= 500) {
@@ -1479,7 +1625,6 @@ app.get('/api/release-info', (req, res) => {
 // Node runtimes that do not include node:sqlite.
 app.get('/api/live-dashboard', (req, res) => {
   const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
-  const limit = Math.max(1, Math.min(1000, Number(req.query.limit || 500)));
   let compact;
   try {
     compact = liveDashboardCompactMode(req);
@@ -1490,12 +1635,72 @@ app.get('/api/live-dashboard', (req, res) => {
       stats: {}
     });
   }
-  const requestedSrnumber = req.query.srnumber == null || String(req.query.srnumber).trim() === ''
+  const rawSrnumber = req.query && req.query.srnumber;
+  if (Array.isArray(rawSrnumber) || (rawSrnumber != null && typeof rawSrnumber === 'object')) {
+    return res.status(400).json({
+      error: 'srnumber must use the format 311-12345678',
+      records: [],
+      stats: {}
+    });
+  }
+  const requestedSrnumber = rawSrnumber == null || String(rawSrnumber).trim() === ''
     ? null
-    : String(req.query.srnumber).trim().toUpperCase();
+    : String(rawSrnumber).trim().toUpperCase();
   if (requestedSrnumber && !/^311-\d{8}$/.test(requestedSrnumber)) {
     return res.status(400).json({
       error: 'srnumber must use the format 311-12345678',
+      records: [],
+      stats: {}
+    });
+  }
+  let limit = requestedSrnumber ? 1 : 300;
+  const rawLimit = req.query && req.query.limit;
+  if (rawLimit != null && String(rawLimit).trim() !== '') {
+    if (Array.isArray(rawLimit) || typeof rawLimit === 'object'
+        || !/^\d{1,4}$/.test(String(rawLimit).trim())) {
+      return res.status(400).json({
+        error: 'limit must be an integer from 1 through 300',
+        records: [],
+        stats: {}
+      });
+    }
+    limit = Number(rawLimit);
+  }
+  if (requestedSrnumber) {
+    limit = 1;
+  } else if (!Number.isSafeInteger(limit) || limit < 1 || limit > 300) {
+    return res.status(400).json({
+      error: 'limit must be an integer from 1 through 300',
+      records: [],
+      stats: {}
+    });
+  }
+  let beforeSuffix;
+  let submittedSince;
+  let requestedSnapshotAt;
+  let filters;
+  try {
+    beforeSuffix = positiveSuffixQuery(req, 'before_suffix');
+    submittedSince = isoTimestampQuery(req, 'submitted_since');
+    requestedSnapshotAt = isoTimestampQuery(req, 'snapshot_at');
+    filters = optionalRecordFilters(req);
+  } catch (error) {
+    return res.status(error.statusCode || 400).json({
+      error: error.message,
+      records: [],
+      stats: {}
+    });
+  }
+  if (requestedSrnumber && beforeSuffix != null) {
+    return res.status(400).json({
+      error: 'before_suffix cannot be combined with an exact srnumber lookup',
+      records: [],
+      stats: {}
+    });
+  }
+  if (beforeSuffix != null && requestedSnapshotAt == null) {
+    return res.status(400).json({
+      error: 'snapshot_at is required after the first page',
       records: [],
       stats: {}
     });
@@ -1512,6 +1717,7 @@ app.get('/api/live-dashboard', (req, res) => {
     }
     const { DatabaseSync } = require('node:sqlite');
     database = new DatabaseSync(databasePath, { readOnly: true });
+    const snapshotAt = requestedSnapshotAt || archiveSnapshotAt();
     const scope = requestGeographyScope(req, database);
     const hasDetails = database.prepare(`
       SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'portal_requests'
@@ -1575,14 +1781,36 @@ app.get('/api/live-dashboard', (req, res) => {
                AND snapshot.is_final = 1
            )`
       : '';
-    const livePredicates = scopePredicates('live', scope);
+    const bidScopeAlias = 'dashboard_scope_bid';
+    const liveSource = scopedLiveRequestSource('live', scope, bidScopeAlias);
+    const livePredicates = [
+      ...scopePredicates('live', scope, bidScopeAlias),
+      ...recordFilterPredicates('live', filters),
+      'live.first_seen_at <= @snapshot_at'
+    ];
+    if (submittedSince != null) {
+      livePredicates.push(
+        "live.submitted_at GLOB '????-??-??T??:??:??.???Z'",
+        'live.submitted_at >= @submitted_since'
+      );
+    }
     const scopedParameters = scopeParameters(scope);
-    const recordParameters = { limit, ...scopedParameters };
+    const recordParameters = {
+      limit: limit + 1,
+      snapshot_at: snapshotAt,
+      ...scopedParameters,
+      ...recordFilterParameters(filters),
+      ...(submittedSince != null ? { submitted_since: submittedSince } : {})
+    };
     if (requestedSrnumber) {
       livePredicates.push('live.srnumber=@srnumber');
       recordParameters.srnumber = requestedSrnumber;
     }
-    const liveWhere = livePredicates.length ? `WHERE ${livePredicates.join(' AND ')}` : '';
+    if (beforeSuffix != null) {
+      livePredicates.push('live.suffix < @before_suffix');
+      recordParameters.before_suffix = beforeSuffix;
+    }
+    const liveWhere = sqlWhere(livePredicates);
     const storedStatement = database.prepare(`
       SELECT live.srnumber, live.suffix, live.portal_id, live.problem, live.address,
              live.borough,live.incident_zip,
@@ -1593,7 +1821,7 @@ app.get('/api/live-dashboard', (req, res) => {
              live.latitude, live.longitude, live.submitted_at, live.status,
              live.portal_url, live.first_seen_at, live.last_seen_at,
              ${detailColumns}, ${followUpColumns}, ${currentClosureColumns}
-      FROM live_portal_requests AS live
+      FROM ${liveSource}
       ${detailJoin}
       ${followUpJoin}
       ${currentClosureJoin}
@@ -1601,7 +1829,9 @@ app.get('/api/live-dashboard', (req, res) => {
       ORDER BY live.suffix DESC
       LIMIT @limit
     `);
-    const storedRecords = storedStatement.all(recordParameters);
+    const pageRows = storedStatement.all(recordParameters);
+    const hasMore = !requestedSrnumber && pageRows.length > limit;
+    const storedRecords = hasMore ? pageRows.slice(0, limit) : pageRows;
     const records = storedRecords.map(stored => {
       const {
         detail_portal_id: detailPortalId,
@@ -1633,50 +1863,108 @@ app.get('/api/live-dashboard', (req, res) => {
           : null);
       return { ...record, ...assessRecordAvailability(record) };
     });
+    const matchingTotal = beforeSuffix == null
+      ? Number(database.prepare(`
+          SELECT COUNT(*) AS count
+          FROM ${liveSource}
+          ${sqlWhere(livePredicates)}
+        `).get({
+          snapshot_at: snapshotAt,
+          ...scopedParameters,
+          ...recordFilterParameters(filters),
+          ...(submittedSince != null ? { submitted_since: submittedSince } : {}),
+          ...(requestedSrnumber ? { srnumber: requestedSrnumber } : {})
+        }).count || 0)
+      : null;
+    const lastRecord = records[records.length - 1];
+    const page = {
+      limit,
+      returned: records.length,
+      has_more: hasMore,
+      next_before_suffix: lastRecord ? lastRecord.suffix : null,
+      snapshot_at: snapshotAt,
+      ...(matchingTotal == null ? {} : { matching_total: matchingTotal })
+    };
     if (compact) {
       return res.json({
         records,
+        page,
         stats: compactLiveDashboardStats(database)
       });
     }
-    const capturedPredicates = scopePredicates('captured', scope);
-    const capturedScopeSql = capturedPredicates.join(' AND ');
-    const capturedScopeWhere = capturedScopeSql ? `WHERE ${capturedScopeSql}` : '';
-    const capturedScopeAnd = capturedScopeSql ? `AND ${capturedScopeSql}` : '';
+    const capturedBidAlias = 'captured_scope_bid';
+    const capturedSource = scopedLiveRequestSource(
+      'captured',
+      scope,
+      capturedBidAlias
+    );
+    const capturedDetailsAlias = hasDetails ? 'captured_details' : null;
+    const capturedDetailsJoin = hasDetails
+      ? `LEFT JOIN portal_requests AS ${capturedDetailsAlias}
+           ON ${capturedDetailsAlias}.srnumber=captured.srnumber`
+      : '';
+    const capturedPredicates = [
+      ...scopePredicates('captured', scope, capturedBidAlias),
+      ...recordFilterPredicates('captured', filters),
+      'captured.first_seen_at <= @snapshot_at'
+    ];
+    if (submittedSince != null) {
+      capturedPredicates.push(
+        "captured.submitted_at GLOB '????-??-??T??:??:??.???Z'",
+        'captured.submitted_at >= @submitted_since'
+      );
+    }
+    if (requestedSrnumber) capturedPredicates.push('captured.srnumber=@srnumber');
+    const capturedWhere = sqlWhere(capturedPredicates);
+    const totalsParameters = {
+      ...scopedParameters,
+      ...recordFilterParameters(filters),
+      snapshot_at: snapshotAt,
+      ...(submittedSince != null ? { submitted_since: submittedSince } : {}),
+      ...(requestedSrnumber ? { srnumber: requestedSrnumber } : {})
+    };
     const detailStats = hasDetails
-      ? `(SELECT COUNT(*) FROM portal_requests AS stored
-          JOIN live_portal_requests AS captured ON captured.srnumber = stored.srnumber
-          ${capturedScopeWhere}) AS details_loaded,
-         (SELECT COUNT(*) FROM live_portal_requests AS captured
+      ? `(SELECT COUNT(*) FROM ${capturedSource}
+          ${capturedDetailsJoin}
+          JOIN portal_requests AS stored ON stored.srnumber=captured.srnumber
+          ${capturedWhere}) AS details_loaded,
+         (SELECT COUNT(*) FROM ${capturedSource}
+          ${capturedDetailsJoin}
           LEFT JOIN portal_requests AS stored ON stored.srnumber = captured.srnumber
-          WHERE stored.srnumber IS NULL
-            ${capturedScopeAnd}) AS details_pending`
+          ${sqlWhere([...capturedPredicates, 'stored.srnumber IS NULL'])}) AS details_pending`
       : `0 AS details_loaded,
-         (SELECT COUNT(*) FROM live_portal_requests AS captured
-          ${capturedScopeWhere}) AS details_pending`;
+         (SELECT COUNT(*) FROM ${capturedSource}
+          ${capturedWhere}) AS details_pending`;
     const closureStats = hasFollowUps
-      ? `(SELECT COUNT(*) FROM request_followup_queue AS followup
-          JOIN live_portal_requests AS captured USING(srnumber)
-          WHERE followup.state='closing'
-            ${capturedScopeAnd}) AS closure_refreshes_pending,
-         (SELECT COUNT(*) FROM request_followup_queue AS followup
-          JOIN live_portal_requests AS captured USING(srnumber)
-          WHERE followup.state='open'
-            ${capturedScopeAnd}) AS open_followups_scheduled,
-         (SELECT COUNT(*) FROM request_followup_queue AS followup
-          JOIN live_portal_requests AS captured USING(srnumber)
-          WHERE followup.state='closed'
-            ${capturedScopeAnd}) AS closures_finalized`
+      ? `(SELECT COUNT(*) FROM ${capturedSource}
+          ${capturedDetailsJoin}
+          JOIN request_followup_queue AS followup ON followup.srnumber=captured.srnumber
+          ${sqlWhere([...capturedPredicates, "followup.state='closing'"])})
+            AS closure_refreshes_pending,
+         (SELECT COUNT(*) FROM ${capturedSource}
+          ${capturedDetailsJoin}
+          JOIN request_followup_queue AS followup ON followup.srnumber=captured.srnumber
+          ${sqlWhere([...capturedPredicates, "followup.state='open'"])})
+            AS open_followups_scheduled,
+         (SELECT COUNT(*) FROM ${capturedSource}
+          ${capturedDetailsJoin}
+          JOIN request_followup_queue AS followup ON followup.srnumber=captured.srnumber
+          ${sqlWhere([...capturedPredicates, "followup.state='closed'"])})
+            AS closures_finalized`
       : `0 AS closure_refreshes_pending,
          0 AS open_followups_scheduled,
          0 AS closures_finalized`;
     const totalsStatement = database.prepare(`
       SELECT
-        (SELECT COUNT(*) FROM live_portal_requests AS captured
-          ${capturedScopeWhere}) AS total,
-        (SELECT COUNT(*) FROM live_portal_requests AS captured
-          WHERE (captured.latitude IS NULL OR captured.longitude IS NULL)
-            ${capturedScopeAnd}) AS unmapped_total,
+        (SELECT COUNT(*) FROM ${capturedSource}
+          ${capturedDetailsJoin}
+          ${capturedWhere}) AS total,
+        (SELECT COUNT(*) FROM ${capturedSource}
+          ${capturedDetailsJoin}
+          ${sqlWhere([
+            ...capturedPredicates,
+            '(captured.latitude IS NULL OR captured.longitude IS NULL)'
+          ])}) AS unmapped_total,
         (SELECT COUNT(*) FROM live_number_queue WHERE audit_outcome = 'pending') AS pending,
         (SELECT MAX(suffix) FROM live_number_queue) AS frontier,
         (SELECT MAX(last_seen_at) FROM live_portal_requests) AS last_seen_at,
@@ -1687,9 +1975,7 @@ app.get('/api/live-dashboard', (req, res) => {
         ${detailStats},
         ${closureStats}
     `);
-    const totals = scopeIsEmpty(scope)
-      ? totalsStatement.get()
-      : totalsStatement.get(scopedParameters);
+    const totals = totalsStatement.get(totalsParameters);
     try {
       totals.summary = cachedLiveSummary(database, databasePath, scope);
       totals.scope = {
@@ -1751,7 +2037,7 @@ app.get('/api/live-dashboard', (req, res) => {
     } else {
       totals.catchup = null;
     }
-    res.json({ records, stats: totals });
+    res.json({ records, page, stats: totals });
   } catch (error) {
     res.status(error.statusCode || 503).json({ error: error.message, records: [], stats: {} });
   } finally {
