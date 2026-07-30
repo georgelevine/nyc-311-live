@@ -1,5 +1,13 @@
 (() => {
-  const map = L.map('map', { zoomControl: false, preferCanvas: true }).setView([40.7128, -74.0060], 11);
+  // MarkerCluster reads the map's maximum zoom as soon as its layer is
+  // attached. Mobile intentionally defers the tile layer, so the map itself
+  // must own this limit or first-load initialization stops before any data is
+  // requested.
+  const map = L.map('map', {
+    zoomControl: false,
+    preferCanvas: true,
+    maxZoom: 19
+  }).setView([40.7128, -74.0060], 11);
   L.control.zoom({ position: 'bottomleft' }).addTo(map);
   const primaryTiles = L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
     maxZoom: 19,

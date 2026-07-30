@@ -248,6 +248,11 @@ test('map startup is self-hosted, exhaustively paginated, and automatically reco
     1
   );
   assert.equal($('#map-load-status[role="status"]').length, 1);
+  assert.match(
+    dashboard,
+    /L\.map\('map',\s*\{[\s\S]*?maxZoom:\s*19[\s\S]*?\}\)\.setView/,
+    'the map needs an explicit maxZoom before MarkerCluster is attached'
+  );
   assert.match(dashboard, /chunkedLoading:\s*true/);
   assert.match(dashboard, /const MAP_INITIAL_PAGE_SIZE = 250/);
   assert.match(dashboard, /const MAP_PAGE_SIZE = 1_000/);
