@@ -62,6 +62,9 @@ helper_sha256="$(shasum -a 256 "${release_helper}" | cut -d' ' -f1)"
 ssh_options=(
   -o IdentitiesOnly=yes
   -o BatchMode=yes
+  -o ConnectTimeout=10
+  -o ServerAliveInterval=10
+  -o ServerAliveCountMax=3
   -i "${deploy_key}"
 )
 

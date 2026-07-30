@@ -18,6 +18,10 @@ const deploy = fs.readFileSync(
   path.join(root, 'aws', 'lightsail-sqlite', 'deploy-ui-release.sh'),
   'utf8'
 );
+const localDeploy = fs.readFileSync(
+  path.join(root, 'scripts', 'deploy-ui.sh'),
+  'utf8'
+);
 
 test('Caddy serves the dashboard shell directly and proxies only API requests', () => {
   assert.equal(caddy.includes('redir @root /live.html'), false);
@@ -60,4 +64,10 @@ test('rollback cannot recurse or continue a failed deployment', () => {
   );
   assert.match(rollback, /trap - ERR/);
   assert.match(rollback, /exit 1/);
+});
+
+test('local deployment cannot hang indefinitely on a stale SSH connection', () => {
+  assert.match(localDeploy, /ConnectTimeout=10/);
+  assert.match(localDeploy, /ServerAliveInterval=10/);
+  assert.match(localDeploy, /ServerAliveCountMax=3/);
 });
