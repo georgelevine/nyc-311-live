@@ -7,6 +7,7 @@ const {
   buildStatusUpdateModel,
   currentClosureSnapshot,
   formatMetricDuration,
+  latestAgencyResponse,
   portalEvent,
   requestArchiveLabel
 } = require('../public/js/status-update-model');
@@ -214,6 +215,45 @@ test('email narrative is shown without changing the official lifecycle status', 
   assert.equal(model.events[0].source, 'email');
   assert.equal(model.events[0].response_text, 'The agency responded to the complaint.');
   assert.equal(model.events[0].verification_state, 'checking');
+});
+
+test('uses the newest email narrative when the Portal has no agency response', () => {
+  const response = latestAgencyResponse({
+    agencyResponse: null,
+    updatedOn: '2026-07-29T20:22:29.000Z'
+  }, {
+    updates: [{
+      id: 10,
+      agency_name: 'New York City Police Department',
+      agency_acronym: 'NYPD',
+      response_text: 'Officers responded and investigated the complaint.',
+      received_at: '2026-07-29T20:24:34.000Z'
+    }]
+  });
+
+  assert.deepEqual(response, {
+    text: 'Officers responded and investigated the complaint.',
+    source: 'NYC311 email',
+    source_kind: 'email',
+    published_at: '2026-07-29T20:24:34.000Z',
+    agency_name: 'New York City Police Department',
+    agency_acronym: 'NYPD',
+    id: 10
+  });
+});
+
+test('does not create an agency-response card from empty placeholder values', () => {
+  const response = latestAgencyResponse({
+    agencyResponse: 'N/A'
+  }, {
+    updates: [{
+      id: 10,
+      response_text: 'Not provided',
+      received_at: '2026-07-29T20:24:34.000Z'
+    }]
+  });
+
+  assert.equal(response, null);
 });
 
 test('does not render email-sourced status history as a second Portal event', () => {

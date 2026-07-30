@@ -301,7 +301,7 @@ restore_host_state() {
 }
 trap restore_host_state EXIT
 
-docker compose stop collector web proxy
+docker compose stop collector inbound-email web proxy
 if [[ -L "${collector_lock}" || ! -f "${collector_lock}" || "$(stat -c '%h' "${collector_lock}")" != "1" ]]; then
   echo "The protected collector lock file is missing or unsafe." >&2
   exit 1
@@ -346,9 +346,9 @@ data_directory_locked=0
 
 baseline_poll="$(sqlite3 "${target}" "SELECT value FROM live_monitor_state WHERE key='last_successful_poll_at';")"
 if [[ -n "${SITE_ADDRESS:-}" ]]; then
-  docker compose up -d web proxy
+  docker compose up -d web inbound-email proxy
 else
-  docker compose up -d web
+  docker compose up -d web inbound-email
 fi
 
 web_ready=0
@@ -360,8 +360,23 @@ for _ in $(seq 1 30); do
   sleep 2
 done
 if [[ ${web_ready} -ne 1 ]]; then
-  docker compose logs --tail=100 web proxy || true
+  docker compose logs --tail=100 web inbound-email proxy || true
   echo "The web service did not become healthy; the collector remains stopped." >&2
+  exit 1
+fi
+
+inbound_email_ready=0
+for _ in $(seq 1 30); do
+  if curl --fail --silent --show-error --max-time 5 \
+      http://127.0.0.1:10001/health >/dev/null; then
+    inbound_email_ready=1
+    break
+  fi
+  sleep 2
+done
+if [[ ${inbound_email_ready} -ne 1 ]]; then
+  docker compose logs --tail=100 inbound-email || true
+  echo "The inbound-email service did not become healthy; the collector remains stopped." >&2
   exit 1
 fi
 

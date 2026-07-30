@@ -9,8 +9,10 @@ const cheerio = require('cheerio');
 const root = path.join(__dirname, '..');
 const htmlPath = path.join(root, 'public', 'live.html');
 const dashboardPath = path.join(root, 'public', 'js', 'live-dashboard.js');
+const uiCssPath = path.join(root, 'public', 'css', 'live-ui.css');
 const html = fs.readFileSync(htmlPath, 'utf8');
 const dashboard = fs.readFileSync(dashboardPath, 'utf8');
+const uiCss = fs.readFileSync(uiCssPath, 'utf8');
 const $ = cheerio.load(html);
 
 test('dashboard IDs are unique and every JavaScript ID lookup has matching markup', () => {
@@ -149,8 +151,15 @@ test('request detail exposes status evidence separately from the status history 
   assert.equal($('#detail-agency-response').length, 1);
   assert.equal($('#detail-agency-response-text').length, 1);
   assert.equal($('#detail-agency-response-time').length, 1);
+  assert.equal($('#detail-agency-response-source').length, 1);
   assert.match($('#detail-agency-response').text(), /Latest agency response/i);
   assert.match(dashboard, /agencyResponse:\s*record\.agency_response/);
+  assert.match(dashboard, /latestAgencyResponse\(/);
+  assert.match(
+    dashboard,
+    /renderAgencyResponse\(portalDetailByNumber\.get\(record\.srnumber\) \|\| null\)/
+  );
+  assert.match(uiCss, /\.detail-agency-response\.hidden\s*\{\s*display:\s*none/);
   assert.match(dashboard, /Portal updated/);
   assert.equal($('#detail-email-updates > summary').text().includes('Update history'), true);
   assert.match(dashboard, /NYC311 confirms this request is closed/);

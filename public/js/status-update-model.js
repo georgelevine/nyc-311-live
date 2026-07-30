@@ -29,6 +29,51 @@
     return Number.isFinite(timestamp) ? timestamp : 0;
   }
 
+  function latestAgencyResponse(detailData, emailPayload) {
+    const candidates = [];
+    const portalText = narrativeOrNull(detailData && detailData.agencyResponse);
+    if (portalText) {
+      const source = textOrNull(detailData && detailData.agencyResponseSource);
+      candidates.push({
+        text: portalText,
+        source: source || 'NYC311 Portal',
+        source_kind: /email/i.test(source || '') ? 'email' : 'portal',
+        published_at: textOrNull(detailData && (
+          detailData.agencyResponseUpdatedAt
+          || detailData.updatedOn
+          || detailData.dateClosed
+        )),
+        agency_name: null,
+        agency_acronym: null,
+        id: 0
+      });
+    }
+
+    const updates = Array.isArray(emailPayload && emailPayload.updates)
+      ? emailPayload.updates
+      : [];
+    for (const update of updates) {
+      const text = narrativeOrNull(update && update.response_text);
+      if (!text) continue;
+      candidates.push({
+        text,
+        source: 'NYC311 email',
+        source_kind: 'email',
+        published_at: textOrNull(update && update.received_at),
+        agency_name: textOrNull(update && update.agency_name),
+        agency_acronym: textOrNull(update && update.agency_acronym),
+        id: Number(update && update.id) || 0
+      });
+    }
+
+    candidates.sort((left, right) => (
+      timestampValue(right.published_at) - timestampValue(left.published_at)
+      || right.id - left.id
+      || Number(right.source_kind === 'portal') - Number(left.source_kind === 'portal')
+    ));
+    return candidates[0] || null;
+  }
+
   function finiteMetric(value) {
     if (value == null || value === '') return null;
     const numeric = Number(value);
@@ -493,6 +538,7 @@
     currentClosureSnapshot,
     formatMetricDuration,
     isClosedStatus,
+    latestAgencyResponse,
     meaningfulTransitions,
     portalEvent,
     requestArchiveLabel

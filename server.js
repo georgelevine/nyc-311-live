@@ -31,11 +31,6 @@ const { loadOperationalHealth } = require('./operational-health');
 const { readStoredPortalDetail } = require('./stored-portal-detail');
 const { readRequestEmailUpdates } = require('./nyc311-email-events');
 const {
-  MAX_RAW_EMAIL_BYTES,
-  createNyc311EmailHandler
-} = require('./nyc311-email-inbound');
-const { parseNyc311Notification } = require('./nyc311-notification-email');
-const {
   BoundaryLookupError,
   loadActiveBusinessImprovementDistrictFeature,
   loadActivePolicePrecinctFeature,
@@ -440,19 +435,6 @@ function readReleaseInfo(databasePath) {
     ...parsed
   };
 }
-
-// This machine-to-machine webhook is authenticated with signatures over the
-// exact MIME bytes. It must run before JSON parsing and dashboard Basic Auth.
-app.post(
-  '/api/inbound/nyc311-email',
-  express.raw({
-    type: ['message/rfc822', 'application/octet-stream'],
-    limit: MAX_RAW_EMAIL_BYTES
-  }),
-  createNyc311EmailHandler({
-    parseNotification: parseNyc311Notification
-  })
-);
 
 app.use(express.json({ limit: '16kb' }));
 

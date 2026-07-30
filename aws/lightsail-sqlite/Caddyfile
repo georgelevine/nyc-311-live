@@ -6,6 +6,11 @@
 {$SITE_ADDRESS} {
 	encode zstd gzip
 
+	@inbound_email path /api/inbound/nyc311-email /api/inbound/nyc311-email/
+	handle @inbound_email {
+		reverse_proxy inbound-email:10001
+	}
+
 	@api path /api /api/*
 	handle @api {
 		reverse_proxy web:10000

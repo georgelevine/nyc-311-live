@@ -79,6 +79,7 @@
     buildStatusUpdateModel,
     currentClosureSnapshot,
     formatMetricDuration,
+    latestAgencyResponse,
     requestArchiveLabel
   } = window.NYC311StatusUpdateModel;
   const {
@@ -967,6 +968,10 @@
     } else if (record.public_details_state === 'pending') {
       renderSubmittedDetails(null, 'pending');
     }
+    // Email and Portal details load independently. Always redraw the response
+    // card so a newly stored email narrative appears immediately, even while
+    // the Portal-detail request is still pending.
+    renderAgencyResponse(portalDetailByNumber.get(record.srnumber) || null);
   }
 
   function clearStatusUpdatesPanel({ resetDisclosure = false } = {}) {
@@ -1491,22 +1496,30 @@
 
   function renderAgencyResponse(detailData) {
     const root = document.getElementById('detail-agency-response');
-    const response = String(detailData && detailData.agencyResponse || '').replace(/\s+/g, ' ').trim();
-    const meaningfulResponse = /^(?:N\/?A|NONE|NOT PROVIDED)$/i.test(response) ? '' : response;
-    document.getElementById('detail-agency-response-text').textContent = meaningfulResponse;
-    const source = String(detailData && detailData.agencyResponseSource || '').trim();
-    const fromOneTimeApi = /public api/i.test(source);
-    const publishedAt = detailData && (
-      detailData.agencyResponseUpdatedAt || detailData.updatedOn || detailData.dateClosed
+    const response = latestAgencyResponse(
+      detailData,
+      emailUpdatesByNumber.get(selectedNumber) || null
     );
+    document.getElementById('detail-agency-response-text').textContent = response && response.text || '';
+    const source = String(response && response.source || '').trim();
+    const fromOneTimeApi = /public api/i.test(source);
+    const agency = emailAgencyLabel(response);
+    document.getElementById('detail-agency-response-source').textContent = response
+      ? response.source_kind === 'email' && agency !== 'NYC311'
+        ? `${source} · ${agency}`
+        : source
+      : '';
+    const publishedAt = response && response.published_at;
     const time = document.getElementById('detail-agency-response-time');
-    time.textContent = meaningfulResponse && publishedAt
-      ? `${fromOneTimeApi ? 'Official API updated' : 'Portal updated'} ${fullTimeLabel(publishedAt)}`
-      : meaningfulResponse && fromOneTimeApi
+    time.textContent = response && publishedAt
+      ? `${response.source_kind === 'email'
+        ? 'Email received'
+        : fromOneTimeApi ? 'Official API updated' : 'Portal updated'} ${fullTimeLabel(publishedAt)}`
+      : response && fromOneTimeApi
         ? 'Recovered in a one-time official API check'
       : '';
-    time.dateTime = meaningfulResponse && publishedAt ? publishedAt : '';
-    root.classList.toggle('hidden', !meaningfulResponse);
+    time.dateTime = response && publishedAt ? publishedAt : '';
+    root.classList.toggle('hidden', !response);
   }
 
   async function loadPortalDetails(record) {

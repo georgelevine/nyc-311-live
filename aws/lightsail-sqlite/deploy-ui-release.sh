@@ -152,6 +152,16 @@ rollback() {
   # the restored release or let the failed deployment continue.
   trap - ERR
   set +e
+  # Stop the failed release's writer before changing the release directory.
+  # The previous release may predate the dedicated inbound-email service, so
+  # its Compose file cannot necessarily address this container afterward.
+  if [[ "${deployment_scope}" == "service"
+      && -f "${current_directory}/aws/lightsail-sqlite/compose.yml" ]]; then
+    (
+      cd "${current_directory}/aws/lightsail-sqlite"
+      docker compose stop inbound-email
+    )
+  fi
   if [[ -d "${current_directory}" ]]; then
     mv -- "${current_directory}" "${failed_directory}"
   fi
@@ -159,9 +169,14 @@ rollback() {
     mv -- "${previous_directory}" "${current_directory}"
     cd "${current_directory}/aws/lightsail-sqlite"
     if [[ "${deployment_scope}" == "service" ]]; then
-      docker compose up -d --no-build --force-recreate web collector proxy
+      rollback_services=(web collector proxy)
+      if docker compose config --services | grep --fixed-strings --line-regexp --quiet inbound-email; then
+        rollback_services=(web inbound-email collector proxy)
+      fi
+      docker compose up -d --no-build --force-recreate "${rollback_services[@]}"
     else
-      docker compose up -d --no-build --force-recreate web proxy
+      # A web-only release must not roll the isolated writer forward or back.
+      docker compose up -d --no-build --no-deps --force-recreate web proxy
     fi
   fi
   echo "${deployment_scope} deployment failed and the previous release was restored." >&2
@@ -171,9 +186,29 @@ trap rollback ERR
 
 cd "${current_directory}/aws/lightsail-sqlite"
 if [[ "${deployment_scope}" == "service" ]]; then
-  docker compose up -d --no-build --force-recreate web collector proxy
+  # On the first isolated-ingress release the old proxy still routes inbound
+  # mail to web. Bring the new writer up first, wait for it, then switch the
+  # proxy before replacing web so no webhook can land on a 404 route.
+  docker compose up -d --no-build --force-recreate inbound-email
+  pre_proxy_inbound_ready=0
+  for _attempt in $(seq 1 30); do
+    if curl --fail --silent --show-error \
+        http://127.0.0.1:10001/health >/dev/null; then
+      pre_proxy_inbound_ready=1
+      break
+    fi
+    sleep 2
+  done
+  if [[ ${pre_proxy_inbound_ready} -ne 1 ]]; then
+    echo "The isolated inbound-email service was not ready for proxy cutover." >&2
+    false
+  fi
+  docker compose up -d --no-build --no-deps --force-recreate proxy
+  docker compose up -d --no-build --no-deps --force-recreate web collector
 else
-  docker compose up -d --no-build --force-recreate web proxy
+  # Do not let proxy depends_on implicitly recreate inbound-email from a
+  # UI-only image. Ingress changes require the service deployment scope.
+  docker compose up -d --no-build --no-deps --force-recreate web proxy
 fi
 
 healthy=0
@@ -220,6 +255,27 @@ if [[ "${deployment_scope}" == "web"
   false
 fi
 if [[ "${deployment_scope}" == "service" ]]; then
+  inbound_email_ready=0
+  for _attempt in $(seq 1 30); do
+    if curl --fail --silent --show-error \
+        http://127.0.0.1:10001/health >/dev/null; then
+      inbound_email_ready=1
+      break
+    fi
+    sleep 2
+  done
+  if [[ ${inbound_email_ready} -ne 1 ]]; then
+    echo "The isolated inbound-email service did not become healthy." >&2
+    false
+  fi
+  inbound_email_container="$(docker compose ps -q inbound-email)"
+  inbound_email_image_version="$(docker inspect \
+    --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' \
+    "${inbound_email_container}")"
+  if [[ "${inbound_email_image_version}" != "${release_sha}" ]]; then
+    echo "The running inbound-email container is not the requested release." >&2
+    false
+  fi
   collector_image_version="$(docker inspect \
     --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' \
     "${collector_after}")"
@@ -254,7 +310,7 @@ fi
 trap - ERR
 rm -f -- "${archive}"
 if [[ "${deployment_scope}" == "service" ]]; then
-  echo "Service release ${release_sha} is healthy. Web and collector are current; the database was preserved."
+  echo "Service release ${release_sha} is healthy. Web, inbound email, and collector are current; the database was preserved."
 else
-  echo "Web release ${release_sha} is healthy. Collector and database were untouched."
+  echo "Web release ${release_sha} is healthy. Inbound email, collector, and database were untouched."
 fi

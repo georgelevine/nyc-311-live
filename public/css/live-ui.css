@@ -1863,6 +1863,10 @@ a:focus-visible {
   background: #f0faf6;
 }
 
+.detail-agency-response.hidden {
+  display: none;
+}
+
 .detail-agency-response-heading {
   display: flex;
   align-items: baseline;

@@ -113,6 +113,37 @@ services:
     stop_grace_period: 30s
     logging: *default-logging
 
+  inbound-email:
+    <<: [*app-image, *app-runtime]
+    command: ["node", "inbound-email-server.js"]
+    restart: unless-stopped
+    environment:
+      <<: *app-environment
+      HOST: 0.0.0.0
+      PORT: "10001"
+      INBOUND_EMAIL_DOMAIN: ${INBOUND_EMAIL_DOMAIN:-track.opendata.support}
+      INBOUND_EMAIL_WEBHOOK_SECRET: ${INBOUND_EMAIL_WEBHOOK_SECRET:-}
+    volumes:
+      - *data-volume
+    expose:
+      - "10001"
+    ports:
+      - "127.0.0.1:10001:10001"
+    networks:
+      - app
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:10001/health',{signal:AbortSignal.timeout(5000)}).then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    stop_grace_period: 45s
+    logging: *default-logging
+
   backup:
     <<: [*app-image, *app-runtime]
     profiles: [tools]
@@ -184,6 +215,8 @@ services:
       - app
     depends_on:
       web:
+        condition: service_healthy
+      inbound-email:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "caddy", "validate", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
