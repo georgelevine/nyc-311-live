@@ -200,8 +200,6 @@
     coverageNote: document.getElementById('email-coverage-note'),
     coverageLimitation: document.getElementById('email-coverage-limitation'),
     status: document.getElementById('email-metrics-status'),
-    archiveSubscriptions: document.getElementById('subscription-count'),
-    archiveSubscriptionNote: document.getElementById('subscription-note'),
     responseRoot: document.getElementById('response-time-metrics'),
     responseUpdated: document.getElementById('response-times-updated'),
     overallUpdateMedian: document.getElementById('overall-update-median'),
@@ -215,35 +213,6 @@
     complaintTypes: document.getElementById('complaint-response-times')
   };
   const hasEmailMetricElements = Object.values(emailMetricElements).every(Boolean);
-  const statusClarityElements = {
-    root: document.getElementById('status-clarity'),
-    mode: document.getElementById('status-clarity-mode'),
-    tracked: document.getElementById('status-tracked-count'),
-    trackedNote: document.getElementById('status-tracked-note'),
-    emailCount: document.getElementById('status-email-count'),
-    emailNote: document.getElementById('status-email-note'),
-    closedEmailCount: document.getElementById('status-closed-email-count'),
-    closedEmailNote: document.getElementById('status-closed-email-note'),
-    portalClosedCount: document.getElementById('status-portal-closed-count'),
-    portalClosedNote: document.getElementById('status-portal-closed-note'),
-    note: document.getElementById('status-clarity-note')
-  };
-  const hasStatusClarityElements = Object.values(statusClarityElements).every(Boolean);
-  const legacyReconciliationElements = {
-    root: document.getElementById('legacy-reconciliation'),
-    status: document.getElementById('legacy-reconciliation-status'),
-    percent: document.getElementById('legacy-reconciliation-percent'),
-    count: document.getElementById('legacy-reconciliation-count'),
-    updated: document.getElementById('legacy-reconciliation-updated'),
-    progress: document.getElementById('legacy-reconciliation-progress'),
-    returned: document.getElementById('legacy-reconciliation-returned'),
-    closed: document.getElementById('legacy-reconciliation-closed'),
-    open: document.getElementById('legacy-reconciliation-open'),
-    omitted: document.getElementById('legacy-reconciliation-omitted'),
-    detail: document.getElementById('legacy-reconciliation-detail')
-  };
-  const hasLegacyReconciliationElements =
-    Object.values(legacyReconciliationElements).every(Boolean);
   const releaseSpeedElements = {
     root: document.getElementById('release-speed'),
     updated: document.getElementById('release-speed-updated'),
@@ -280,6 +249,7 @@
   const EMAIL_UPDATES_REFRESH_MS = 15_000;
   const EMAIL_METRICS_REFRESH_MS = 60_000;
   const EMAIL_METRICS_REFRESHING_RETRY_MS = 2_500;
+  const LIVE_SUMMARY_REFRESH_MS = 60_000;
   const RELEASE_INFO_REFRESH_MS = 5 * 60_000;
   const OPERATIONAL_HEALTH_REFRESH_MS = 15_000;
   const DASHBOARD_MIN_REFRESH_MS = 5_000;
@@ -333,14 +303,17 @@
   let arrivingNumbers = new Set();
   let lastGoodSummary = null;
   let lastGoodEmailMetrics = null;
-  let lastDashboardStats = null;
+  let summaryRequestSequence = 0;
+  let summaryAbortController = null;
   let emailMetricsInFlight = false;
   let releaseInfoInFlight = false;
   let overviewDataStarted = false;
+  let overviewSummaryTimer = null;
   let overviewEmailMetricsTimer = null;
   let overviewReleaseInfoTimer = null;
   let overviewHealthTimer = null;
   let operationalHealthInFlight = false;
+  let lastSummaryAttemptAt = 0;
   let lastEmailMetricsAttemptAt = 0;
   let lastReleaseInfoAttemptAt = 0;
   let emailMetricsRefreshPending = false;
@@ -499,6 +472,10 @@
   }
 
   function clearOverviewRefreshTimers() {
+    if (overviewSummaryTimer !== null) {
+      window.clearTimeout(overviewSummaryTimer);
+      overviewSummaryTimer = null;
+    }
     if (overviewEmailMetricsTimer !== null) {
       window.clearTimeout(overviewEmailMetricsTimer);
       overviewEmailMetricsTimer = null;
@@ -511,6 +488,15 @@
       window.clearTimeout(overviewHealthTimer);
       overviewHealthTimer = null;
     }
+  }
+
+  function scheduleOverviewSummary(delayMs = LIVE_SUMMARY_REFRESH_MS) {
+    if (!overviewIsActive() || overviewSummaryTimer !== null) return;
+    overviewSummaryTimer = window.setTimeout(async () => {
+      overviewSummaryTimer = null;
+      await refreshLiveSummary();
+      scheduleOverviewSummary();
+    }, Math.max(0, delayMs));
   }
 
   function scheduleOverviewEmailMetrics(delayMs = EMAIL_METRICS_REFRESH_MS) {
@@ -542,18 +528,27 @@
 
   function syncOverviewRefreshes(active = overviewIsActive()) {
     clearOverviewRefreshTimers();
-    if (!active) return;
+    if (!active) {
+      if (summaryAbortController) summaryAbortController.abort();
+      summaryAbortController = null;
+      summaryRequestSequence += 1;
+      return;
+    }
 
     const now = Date.now();
     if (!overviewDataStarted) {
       overviewDataStarted = true;
       showEmailMetricsCalculating();
+      void refreshLiveSummary().finally(() => scheduleOverviewSummary());
       void refreshEmailMetrics().finally(() => scheduleOverviewEmailMetrics());
       void refreshReleaseInfo().finally(() => scheduleOverviewReleaseInfo());
       void refreshOperationalHealth().finally(() => scheduleOverviewHealth());
       return;
     }
 
+    scheduleOverviewSummary(lastGoodSummary
+      ? Math.max(0, LIVE_SUMMARY_REFRESH_MS - (now - lastSummaryAttemptAt))
+      : 0);
     scheduleOverviewEmailMetrics(emailMetricsRefreshPending
       ? EMAIL_METRICS_REFRESHING_RETRY_MS
       : Math.max(0, EMAIL_METRICS_REFRESH_MS - (now - lastEmailMetricsAttemptAt)));
@@ -2571,219 +2566,32 @@
     return `${Math.round(Math.max(0, Math.min(1, part / total)) * 100)}%`;
   }
 
-  function renderOverviewStats(stats) {
-    if (stats && stats.compact && stats.total == null) {
-      document.getElementById('total-count').textContent = '—';
-      document.getElementById('details-coverage-rate').textContent = '—';
-      document.getElementById('details-coverage-note').textContent =
-        'Archive scan skipped on the live path';
-      document.getElementById('map-coverage-rate').textContent = '—';
-      document.getElementById('map-coverage-note').textContent =
-        'Pins load directly on the map';
-      document.getElementById('pending-count').textContent = '—';
-      document.getElementById('closures-count').textContent = '—';
-      document.getElementById('closures-note').textContent =
-        'See live pipeline health above';
-      return;
-    }
-    const total = finiteStat(stats.total);
-    const detailsPending = finiteStat(stats.details_pending);
-    const detailsLoaded = finiteStat(stats.details_loaded, Math.max(0, total - detailsPending));
-    const unmapped = finiteStat(stats.unmapped_total);
-    const mapped = Math.max(0, total - unmapped);
-    const closing = finiteStat(stats.closure_refreshes_pending);
+  function renderSummaryCoverage(summary) {
+    const current = summary.current || {};
+    const coverage = summary.coverage || {};
+    const details = coverage.details || {};
+    const mapCoverage = coverage.map || {};
+    const history = summary.history || {};
+    const archiveRequests = summaryCount(summary.data_quality && summary.data_quality.archive_requests);
+    const currentRequests = summaryCount(current.requests);
+    const detailsLoaded = summaryCount(details.loaded);
+    const mapped = summaryCount(mapCoverage.mapped);
+    const historyDays = summaryCount(history.span_days);
+    const targetDays = summaryCount(history.target_days);
 
-    document.getElementById('total-count').textContent = total.toLocaleString();
-    document.getElementById('details-coverage-rate').textContent = percentage(detailsLoaded, total);
-    document.getElementById('details-coverage-note').textContent = detailsPending
-      ? `${detailsPending.toLocaleString()} pending`
-      : 'Complete';
-    document.getElementById('map-coverage-rate').textContent = percentage(mapped, total);
-    document.getElementById('map-coverage-note').textContent = unmapped
-      ? `${unmapped.toLocaleString()} without a pin`
-      : 'All requests mapped';
-    document.getElementById('pending-count').textContent = finiteStat(stats.pending).toLocaleString();
-    document.getElementById('closures-count').textContent = finiteStat(stats.closures_finalized).toLocaleString();
-    document.getElementById('closures-note').textContent = `${closing.toLocaleString()} ${closing === 1 ? 'check' : 'checks'} in progress`;
-  }
-
-  const legacyReconciliationStatusLabels = {
-    pending: 'Queued',
-    running: 'Checking official records',
-    paused_rate_limit: 'Respecting NYC311 rate limit',
-    applying: 'Saving verified results',
-    subscribing: 'Subscribing open requests',
-    complete: 'Complete',
-    failed: 'Needs attention'
-  };
-
-  function legacyReconciliationCount(value, maximum = Number.MAX_SAFE_INTEGER) {
-    return Number.isSafeInteger(value) && value >= 0
-      ? Math.min(value, maximum)
-      : 0;
-  }
-
-  function normalizeLegacyReconciliation(value) {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-    if (value.version !== 1 || !legacyReconciliationStatusLabels[value.status]) return null;
-    const total = legacyReconciliationCount(value.total_candidates);
-    const checked = legacyReconciliationCount(
-      value.checked,
-      total || Number.MAX_SAFE_INTEGER
-    );
-    const apiReturned = legacyReconciliationCount(value.api_returned, checked);
-    const apiClosed = legacyReconciliationCount(value.api_closed, apiReturned);
-    const apiOpen = legacyReconciliationCount(value.api_open, apiReturned);
-    const percent = total > 0
-      ? Math.min(100, Number(((checked / total) * 100).toFixed(1)))
-      : value.status === 'complete' ? 100 : 0;
-    return {
-      status: value.status,
-      total,
-      checked,
-      percent,
-      apiReturned,
-      apiOpen,
-      apiOmitted: legacyReconciliationCount(value.api_omitted, checked),
-      closuresCorrected: legacyReconciliationCount(value.closures_corrected, apiClosed),
-      subscriptionsQueued: legacyReconciliationCount(
-        value.open_subscriptions_queued,
-        apiOpen + legacyReconciliationCount(value.api_omitted, checked)
-      ),
-      errors: legacyReconciliationCount(value.errors),
-      retryAfterSeconds: value.retry_after_seconds == null
-        ? null
-        : legacyReconciliationCount(value.retry_after_seconds, 86_400),
-      estimatedSecondsRemaining: value.estimated_seconds_remaining == null
-        ? null
-        : legacyReconciliationCount(value.estimated_seconds_remaining, 31_536_000),
-      updatedAt: value.updated_at,
-      finishedAt: value.finished_at,
-      message: typeof value.message === 'string' ? value.message.slice(0, 300).trim() : ''
-    };
-  }
-
-  function renderLegacyReconciliation(value) {
-    if (!hasLegacyReconciliationElements) return;
-    const model = normalizeLegacyReconciliation(value);
-    if (!model) {
-      legacyReconciliationElements.root.hidden = true;
-      legacyReconciliationElements.root.removeAttribute('data-state');
-      return;
-    }
-
-    const {
-      root, status, percent, count, updated, progress,
-      returned, closed, open, omitted, detail
-    } = legacyReconciliationElements;
-    root.hidden = false;
-    root.dataset.state = model.status;
-    status.textContent = legacyReconciliationStatusLabels[model.status];
-    percent.textContent = `${model.percent.toLocaleString()}%`;
-    count.textContent =
-      `${model.checked.toLocaleString()} of ${model.total.toLocaleString()} checked`;
-    progress.value = model.percent;
-    progress.textContent = `${model.percent}%`;
-    returned.textContent = model.apiReturned.toLocaleString();
-    closed.textContent = model.closuresCorrected.toLocaleString();
-    open.textContent = model.apiOpen.toLocaleString();
-    omitted.textContent = model.apiOmitted.toLocaleString();
-
-    const timestamp = model.status === 'complete'
-      ? model.finishedAt || model.updatedAt
-      : model.updatedAt;
-    const timestampLabel = timestamp && fullTimeLabel(timestamp) !== 'Unknown'
-      ? `${model.status === 'complete' ? 'Completed' : 'Updated'} ${fullTimeLabel(timestamp)}`
-      : model.status === 'pending' ? 'Waiting to start' : 'Update time unavailable';
-    const eta = model.estimatedSecondsRemaining == null
-      ? ''
-      : ` · about ${formatMetricDuration(model.estimatedSecondsRemaining)} remaining`;
-    const retry = model.status === 'paused_rate_limit' && model.retryAfterSeconds != null
-      ? ` · retrying in ${formatMetricDuration(model.retryAfterSeconds)}`
-      : '';
-    updated.textContent = `${timestampLabel}${retry || eta}`;
-
-    const defaultDetails = {
-      pending: 'The historical record list is ready for its one-time official check.',
-      running: 'Checking legacy records in rate-limited batches and saving a checkpoint after each batch.',
-      paused_rate_limit: 'NYC311 asked the repair to slow down. Progress is saved and will resume automatically.',
-      applying: 'The official results are being applied to the archive in one protected database update.',
-      subscribing: model.subscriptionsQueued
-        ? `${model.subscriptionsQueued.toLocaleString()} still-open requests have been queued for email subscription.`
-        : 'Still-open legacy requests are being queued for future email updates.',
-      complete: `${model.closuresCorrected.toLocaleString()} historical ${
-        model.closuresCorrected === 1 ? 'closure was' : 'closures were'
-      } corrected. Live monitoring continues through the existing subscription pipeline.`,
-      failed: 'The one-time repair stopped with its checkpoint saved. Existing live monitoring is unaffected.'
-    };
-    const errorNote = model.errors
-      ? ` · ${model.errors.toLocaleString()} ${model.errors === 1 ? 'error' : 'errors'} recorded`
-      : '';
-    detail.textContent = `${model.message || defaultDetails[model.status]}${errorNote}`;
-  }
-
-  function renderStatusClarity(stats = {}, emailModel = lastGoodEmailMetrics) {
-    if (!hasStatusClarityElements) return;
-    const model = emailModel || {};
-    const deliveries = model.deliveries || {};
-    const subscriptions = model.subscriptions || {};
-    const verification = model.verification || {};
-    const subscribed = finiteStat(subscriptions.subscribed);
-    const pending = finiteStat(subscriptions.pending);
-    const processing = finiteStat(subscriptions.processing);
-    const retry = finiteStat(subscriptions.retry);
-    const closing = finiteStat(stats.closure_refreshes_pending);
-    const finalized = finiteStat(stats.closures_finalized);
-    const detailsPending = finiteStat(stats.details_pending);
-    const usableEmails = finiteStat(deliveries.usable);
-    const totalEmails = finiteStat(deliveries.total);
-    const closedEmails = finiteStat(deliveries.closed);
-    const mode = model.monitoring_mode || { label: 'Checking monitoring mode', key: 'unknown' };
-    const queue = [
-      pending ? `${pending.toLocaleString()} pending` : '',
-      processing ? `${processing.toLocaleString()} processing` : '',
-      retry ? `${retry.toLocaleString()} retrying` : ''
-    ].filter(Boolean);
-
-    statusClarityElements.mode.textContent = mode.label;
-    statusClarityElements.mode.dataset.mode = mode.key || 'unknown';
-    statusClarityElements.tracked.textContent = subscribed.toLocaleString();
-    statusClarityElements.trackedNote.textContent = queue.length
-      ? queue.join(' · ')
-      : 'New matching requests are subscribed';
-    statusClarityElements.emailCount.textContent = usableEmails.toLocaleString();
-    statusClarityElements.emailNote.textContent = totalEmails && usableEmails !== totalEmails
-      ? `${totalEmails.toLocaleString()} total accepted`
-      : 'Direct, matched, authenticated emails';
-    statusClarityElements.closedEmailCount.textContent = closedEmails.toLocaleString();
-    statusClarityElements.closedEmailNote.textContent = verification.awaiting_within_grace
-      ? `${verification.awaiting_within_grace.toLocaleString()} known closures still inside grace`
-      : 'Fast closure signal from NYC311 email';
-    const compactArchiveStats = stats.compact && stats.closures_finalized == null;
-    statusClarityElements.portalClosedCount.textContent = compactArchiveStats
-      ? '—'
-      : finalized.toLocaleString();
-    statusClarityElements.portalClosedNote.textContent = compactArchiveStats
-      ? 'Archive-wide count skipped on live load'
-      : closing
-        ? `${closing.toLocaleString()} ${closing === 1 ? 'closure is' : 'closures are'} being verified`
-        : 'No final verifications waiting';
-    const subscriptionBacklog = pending + processing + retry;
-    const catchup = [
-      subscriptionBacklog
-        ? `${subscriptionBacklog.toLocaleString()} email ${subscriptionBacklog === 1 ? 'subscription' : 'subscriptions'}`
-        : '',
-      detailsPending
-        ? `${detailsPending.toLocaleString()} submitted-detail ${detailsPending === 1 ? 'page' : 'pages'}`
-        : ''
-    ].filter(Boolean);
-    statusClarityElements.root.dataset.health = catchup.length ? 'catching-up' : 'current';
-    statusClarityElements.note.textContent = catchup.length
-      ? `Catching up: ${catchup.join(' and ')} queued. New requests are prioritized while older records drain in the background.`
-      : mode.key === 'email_primary'
-        ? 'Email is the primary realtime signal. Closed emails are fast; Portal verification saves the final proof.'
-        : 'Email notices are the fast signal. Portal verification is the saved final proof.';
-    statusClarityElements.root.setAttribute('aria-busy', 'false');
+    document.getElementById('total-count').textContent = archiveRequests.toLocaleString();
+    document.getElementById('archive-history-count').textContent = `${historyDays.toLocaleString()} days`;
+    document.getElementById('archive-history-note').textContent = history.target_reached
+      ? 'History target reached'
+      : `${targetDays.toLocaleString()}-day initial target`;
+    document.getElementById('details-coverage-rate').textContent =
+      percentage(detailsLoaded, currentRequests);
+    document.getElementById('details-coverage-note').textContent =
+      `${detailsLoaded.toLocaleString()} of ${currentRequests.toLocaleString()} in the last 15 minutes`;
+    document.getElementById('map-coverage-rate').textContent =
+      percentage(mapped, currentRequests);
+    document.getElementById('map-coverage-note').textContent =
+      `${mapped.toLocaleString()} of ${currentRequests.toLocaleString()} in the last 15 minutes`;
   }
 
   function releasePhaseLabel(value) {
@@ -3170,7 +2978,7 @@
     emailMetricElements.mode.dataset.mode = model.monitoring_mode.key;
     emailMetricElements.total.textContent = deliveries.total.toLocaleString();
     emailMetricElements.usable.textContent =
-      `${deliveries.usable.toLocaleString()} usable · ${emailMetricPercent(deliveries.usable_percent)}`;
+      `${deliveries.usable.toLocaleString()} matched · ${emailMetricPercent(deliveries.usable_percent)}`;
     emailMetricElements.lastReceived.textContent = deliveries.last_received_at
       ? `Latest email ${fullTimeLabel(deliveries.last_received_at)}`
       : 'No status email received yet';
@@ -3180,9 +2988,6 @@
     emailMetricElements.issues.textContent = deliveries.issues.toLocaleString();
     emailMetricElements.subscriptions.textContent = subscriptions.subscribed.toLocaleString();
     emailMetricElements.subscriptionNote.textContent = subscriptionNote;
-    emailMetricElements.archiveSubscriptions.textContent =
-      subscriptions.subscribed.toLocaleString();
-    emailMetricElements.archiveSubscriptionNote.textContent = subscriptionNote;
     emailMetricElements.coverage.textContent =
       emailMetricPercent(verification.coverage_percent);
     const graceLabel = formatMetricDuration(verification.grace_seconds);
@@ -3199,7 +3004,7 @@
         ? `${verification.awaiting_within_grace.toLocaleString()} known ${verification.awaiting_within_grace === 1 ? 'closure is' : 'closures are'} still within ${graceText}`
         : 'No known Portal closures are beyond the grace period yet';
     emailMetricElements.coverageLimitation.textContent =
-      'Coverage only includes closures independently found in stored Portal detail; it cannot measure closures absent from that data.';
+      'Coverage compares closure emails with requests independently confirmed closed by NYC311.';
     const deliveryNotes = [];
     if (!deliveries.issues) {
       deliveryNotes.push('No direct-delivery issues need review.');
@@ -3279,7 +3084,6 @@
     emailMetricElements.responseRoot.setAttribute('aria-busy', 'false');
     emailMetricsRefreshPending = false;
     lastGoodEmailMetrics = model;
-    renderStatusClarity(lastDashboardStats || {}, model);
     if (selectedNumber) {
       const selectedRecord = findRecord(selectedNumber);
       if (selectedRecord) renderDetail(selectedRecord);
@@ -3505,6 +3309,7 @@
       summaryElements.coverage.textContent = coverageSummary(summary);
       summaryElements.history.textContent = historySummary(summary);
       summaryElements.status.textContent = summaryWarnings(summary);
+      renderSummaryCoverage(summary);
       summaryElements.loading.hidden = true;
       summaryElements.content.hidden = false;
       summaryElements.root.setAttribute('aria-busy', 'false');
@@ -3514,6 +3319,34 @@
       console.warn('Could not render live summary:', error);
       showSummaryUnavailable();
       return false;
+    }
+  }
+
+  async function refreshLiveSummary() {
+    if (!overviewIsActive() || !hasSummaryElements) return;
+    if (summaryAbortController) summaryAbortController.abort();
+    const controller = new AbortController();
+    const sequence = ++summaryRequestSequence;
+    summaryAbortController = controller;
+    lastSummaryAttemptAt = Date.now();
+    const timeout = window.setTimeout(() => controller.abort(), 8_000);
+    try {
+      const payload = await fetchJson(
+        scopedUrl('/api/live-summary'),
+        'Live summary service',
+        { signal: controller.signal }
+      );
+      if (sequence !== summaryRequestSequence) return;
+      renderCitySummary(payload);
+    } catch (error) {
+      if (sequence !== summaryRequestSequence) return;
+      showSummaryUnavailable();
+      console.warn(error);
+    } finally {
+      window.clearTimeout(timeout);
+      if (sequence === summaryRequestSequence) {
+        summaryAbortController = null;
+      }
     }
   }
 
@@ -3881,17 +3714,7 @@
       currentPollSeconds = Number(stats.poll_interval_seconds || 15);
       pollInterval.value = String(currentPollSeconds);
       lastPortalCheck = stats.last_seen_at ? new Date(stats.last_seen_at) : null;
-      lastDashboardStats = stats;
-      renderOverviewStats(stats);
-      renderStatusClarity(stats);
-      renderLegacyReconciliation(stats.legacy_reconciliation);
-      if (stats.compact && !stats.summary) {
-        showSummaryUnavailable(
-          'Citywide archive statistics are paused on the live path so requests and the map load immediately.'
-        );
-      } else {
-        renderCitySummary(stats.summary);
-      }
+      if (stats.summary) renderCitySummary(stats.summary);
       document.getElementById('frontier-number').textContent = stats.frontier ? `311-${String(stats.frontier).padStart(8, '0')}` : '—';
       document.getElementById('last-updated').textContent = lastPortalCheck
         ? `Portal ${lastPortalCheck.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}`
@@ -4032,6 +3855,12 @@
     resetMapDataset();
     resetFeedPagination();
     lastGoodSummary = null;
+    if (hasSummaryElements) {
+      summaryElements.root.setAttribute('aria-busy', 'true');
+      summaryElements.loading.hidden = false;
+      summaryElements.content.hidden = true;
+      summaryElements.updated.textContent = 'Updating…';
+    }
     highestObservedSuffix = null;
     detailLoadSequence += 1;
     emailUpdatesLoadSequence += 1;
@@ -4059,6 +3888,13 @@
     renderMap();
     syncSelectedBoundaries();
     refreshNowAndReschedule({ force: true });
+    if (overviewIsActive()) {
+      if (overviewSummaryTimer !== null) {
+        window.clearTimeout(overviewSummaryTimer);
+        overviewSummaryTimer = null;
+      }
+      void refreshLiveSummary().finally(() => scheduleOverviewSummary());
+    }
     scheduleArchiveSearch();
   }
   precinctFilter.addEventListener('change', handleGeographyFilterChange);

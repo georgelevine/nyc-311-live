@@ -71,13 +71,8 @@ test('overview exposes email delivery, enrollment, verification, and response-ti
   assert.equal($('#email-subscriptions-count').length, 1);
   assert.equal($('#email-coverage-rate').length, 1);
   assert.equal($('#email-coverage-limitation').length, 1);
-  assert.equal($('#subscription-count').length, 1);
   assert.equal($('#monitored-count').length, 0);
-  assert.equal($('#status-clarity').length, 1);
-  assert.equal($('#status-tracked-count').length, 1);
-  assert.equal($('#status-email-count').length, 1);
-  assert.equal($('#status-closed-email-count').length, 1);
-  assert.equal($('#status-portal-closed-count').length, 1);
+  assert.equal($('#status-clarity').length, 0);
   assert.equal($('#release-speed').length, 1);
   assert.equal($('#release-total-time').length, 1);
   assert.equal(html.includes('Checked every 24 hours'), false);
@@ -86,8 +81,12 @@ test('overview exposes email delivery, enrollment, verification, and response-ti
   assert.equal($('#overall-notification-median').length, 1);
   assert.equal($('#overall-notification-detail').length, 1);
   assert.equal($('#response-cohort-note').length, 1);
-  assert.match($('#email-monitoring').text(), /known Portal closure coverage/i);
-  assert.match($('#email-coverage-limitation').text(), /independently found/i);
+  assert.match($('#email-monitoring').text(), /known closures with an email/i);
+  assert.match($('#email-monitoring').text(), /new-request confirmations/i);
+  assert.match($('#email-monitoring').text(), /agency updates/i);
+  assert.match($('#email-monitoring').text(), /closure notices/i);
+  assert.match($('#email-coverage-limitation').text(), /independently confirmed closed/i);
+  assert.equal($('.overview-operations:not([open])').length, 1);
   assert.match($('#response-time-definition').text(), /not official agency SLAs/i);
   assert.match($('#response-time-definition').text(), /first usable “Updated” email/i);
   assert.match($('#response-time-definition').text(), /closure time published by the NYC311 Portal/i);
@@ -104,7 +103,7 @@ test('overview exposes email delivery, enrollment, verification, and response-ti
   assert.match(dashboard, /Observed since/);
   assert.match(dashboard, /known closures \$\{matureAge\} had a matched Closed email/);
   assert.match(dashboard, /Each median uses requests that reached that event/);
-  assert.match(dashboard, /Closed emails are fast; Portal verification saves the final proof/);
+  assert.match(dashboard, /Coverage compares closure emails with requests independently confirmed closed/);
   assert.match(dashboard, /Release timing service/);
 });
 
@@ -117,13 +116,13 @@ test('overview exposes lightweight health for every live pipeline', () => {
       $(element).attr('data-health-component')
     )).get(),
     [
-      'database',
       'collector',
-      'map',
       'details',
       'email',
-      'subscriptions',
       'closures',
+      'database',
+      'map',
+      'subscriptions',
       'analytics'
     ]
   );
@@ -132,23 +131,11 @@ test('overview exposes lightweight health for every live pipeline', () => {
   assert.match(dashboard, /refreshOperationalHealth\(\)\.finally/);
 });
 
-test('overview exposes an honest one-time legacy reconciliation progress panel', () => {
-  assert.equal($('#legacy-reconciliation[hidden][aria-live="polite"]').length, 1);
-  assert.equal($('#legacy-reconciliation-progress[max="100"]').length, 1);
-  assert.equal($('#legacy-reconciliation-percent').length, 1);
-  assert.equal($('#legacy-reconciliation-count').length, 1);
-  assert.equal($('#legacy-reconciliation-returned').length, 1);
-  assert.equal($('#legacy-reconciliation-closed').length, 1);
-  assert.equal($('#legacy-reconciliation-open').length, 1);
-  assert.equal($('#legacy-reconciliation-omitted').length, 1);
-  assert.match($('#legacy-reconciliation').text(), /one-time historical repair/i);
-  assert.match($('#legacy-reconciliation').text(), /API is not part of live monitoring/i);
-  assert.match(dashboard, /renderLegacyReconciliation\(stats\.legacy_reconciliation\)/);
-  assert.match(dashboard, /paused_rate_limit/);
-  assert.match(dashboard, /Saving verified results/);
-  assert.match(dashboard, /Subscribing open requests/);
-  assert.match(dashboard, /root\.hidden = true/);
-  assert.match(dashboard, /progress\.value = model\.percent/);
+test('overview omits one-time reconciliation operator information', () => {
+  assert.equal($('#legacy-reconciliation').length, 0);
+  assert.equal(html.includes('One-time reconciliation'), false);
+  assert.equal(dashboard.includes('renderLegacyReconciliation'), false);
+  assert.equal(dashboard.includes('legacyReconciliationElements'), false);
 });
 
 test('request detail exposes status evidence separately from the status history timeline', () => {
@@ -186,11 +173,15 @@ test('status update UI exposes incomplete Portal verification without calling it
 });
 
 test('overview metrics load lazily, refresh only while visible, and degrade independently', () => {
+  assert.match(dashboard, /const LIVE_SUMMARY_REFRESH_MS = 60_000/);
+  assert.match(dashboard, /fetchJson\(\s*scopedUrl\('\/api\/live-summary'\)/);
   assert.match(dashboard, /const EMAIL_METRICS_REFRESH_MS = 60_000/);
   assert.match(dashboard, /fetchJson\('\/api\/email-metrics', 'Email metrics service'\)/);
   assert.match(dashboard, /syncOverviewRefreshes\(normalizedView === 'overview'\)/);
   assert.match(dashboard, /function overviewIsActive\(\)/);
   assert.match(dashboard, /function scheduleOverviewEmailMetrics/);
+  assert.match(dashboard, /function scheduleOverviewSummary/);
+  assert.match(dashboard, /scheduleOverviewSummary\(lastGoodSummary\s*\?[\s\S]*?: 0\)/);
   assert.match(dashboard, /function scheduleOverviewReleaseInfo/);
   assert.match(dashboard, /if \(!overviewIsActive\(\) \|\| emailMetricsInFlight/);
   assert.match(dashboard, /if \(!overviewIsActive\(\) \|\| releaseInfoInFlight/);

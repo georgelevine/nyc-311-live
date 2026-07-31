@@ -40,10 +40,10 @@
       <div class="overview-view">
         <header class="view-heading overview-heading">
           <div>
-            <span class="eyebrow">City dashboard</span>
+            <span class="eyebrow">At a glance</span>
             <h2>Overview</h2>
           </div>
-          <p>Live demand, archive health, and observed response timing.</p>
+          <p>What NYC is reporting, what has been saved, and how quickly requests change.</p>
         </header>
         <section
           id="system-health"
@@ -53,112 +53,64 @@
         >
           <header class="system-health-header">
             <div>
-              <span class="eyebrow">System health</span>
-              <h2 id="system-health-title">Collection pipeline</h2>
+              <span class="eyebrow">Live system</span>
+              <h2 id="system-health-title">Is everything working?</h2>
             </div>
             <span id="system-health-overall" class="system-health-badge" data-status="starting">
               Checking…
             </span>
           </header>
           <div class="system-health-grid">
-            <article data-health-component="database">
-              <span>Website &amp; database</span>
-              <strong id="health-database-status">Checking</strong>
-              <small id="health-database-detail">Testing the live service</small>
-            </article>
             <article data-health-component="collector">
-              <span>New requests</span>
+              <span>Request capture</span>
               <strong id="health-collector-status">Checking</strong>
-              <small id="health-collector-detail">Reading the collector heartbeat</small>
-            </article>
-            <article data-health-component="map">
-              <span>Map feed</span>
-              <strong id="health-map-status">Checking</strong>
-              <small id="health-map-detail">Checking map discovery</small>
+              <small id="health-collector-detail">Checking for new NYC311 requests</small>
             </article>
             <article data-health-component="details">
-              <span>Submitted details</span>
+              <span>Request details</span>
               <strong id="health-details-status">Checking</strong>
-              <small id="health-details-detail">Checking detail hydration</small>
+              <small id="health-details-detail">Checking submitted information</small>
             </article>
             <article data-health-component="email">
-              <span>Email updates</span>
+              <span>Status updates</span>
               <strong id="health-email-status">Checking</strong>
-              <small id="health-email-detail">Checking the latest received response</small>
-            </article>
-            <article data-health-component="subscriptions">
-              <span>Subscriptions</span>
-              <strong id="health-subscriptions-status">Checking</strong>
-              <small id="health-subscriptions-detail">Checking enrollment work</small>
+              <small id="health-email-detail">Checking NYC311 email delivery</small>
             </article>
             <article data-health-component="closures">
-              <span>Closure verification</span>
+              <span>Closed requests</span>
               <strong id="health-closures-status">Checking</strong>
-              <small id="health-closures-detail">Checking final-status work</small>
-            </article>
-            <article data-health-component="analytics">
-              <span>Response statistics</span>
-              <strong id="health-analytics-status">Checking</strong>
-              <small id="health-analytics-detail">Checking the saved snapshot</small>
+              <small id="health-closures-detail">Checking final NYC311 status</small>
             </article>
           </div>
+          <details class="system-health-more">
+            <summary>More system checks</summary>
+            <div class="system-health-grid system-health-grid-secondary">
+              <article data-health-component="database">
+                <span>Website &amp; database</span>
+                <strong id="health-database-status">Checking</strong>
+                <small id="health-database-detail">Testing the live service</small>
+              </article>
+              <article data-health-component="map">
+                <span>Map locations</span>
+                <strong id="health-map-status">Checking</strong>
+                <small id="health-map-detail">Checking map discovery</small>
+              </article>
+              <article data-health-component="subscriptions">
+                <span>Email enrollment</span>
+                <strong id="health-subscriptions-status">Checking</strong>
+                <small id="health-subscriptions-detail">Checking subscription work</small>
+              </article>
+              <article data-health-component="analytics">
+                <span>Response-time statistics</span>
+                <strong id="health-analytics-status">Checking</strong>
+                <small id="health-analytics-detail">Checking the saved snapshot</small>
+              </article>
+            </div>
+          </details>
           <footer class="system-health-footer">
             <time id="system-health-updated">Waiting for the first health check</time>
-            <span>Health checks never scan the full request archive.</span>
+            <span>Current status of the live collection system.</span>
           </footer>
-        </section>
-        <section
-          id="legacy-reconciliation"
-          class="legacy-reconciliation"
-          aria-labelledby="legacy-reconciliation-title"
-          aria-live="polite"
-          hidden
-        >
-          <header class="legacy-reconciliation-header">
-            <div>
-              <span class="eyebrow">Historical status repair</span>
-              <h2 id="legacy-reconciliation-title">One-time reconciliation</h2>
-            </div>
-            <span id="legacy-reconciliation-status">Preparing</span>
-          </header>
-          <div class="legacy-reconciliation-lead">
-            <p>
-              <strong id="legacy-reconciliation-percent">0%</strong>
-              <span id="legacy-reconciliation-count">0 of 0 checked</span>
-            </p>
-            <time id="legacy-reconciliation-updated">Waiting to start</time>
-          </div>
-          <progress
-            id="legacy-reconciliation-progress"
-            max="100"
-            value="0"
-            aria-label="Historical reconciliation progress"
-          >0%</progress>
-          <dl class="legacy-reconciliation-breakdown">
-            <div>
-              <dt>Official records returned</dt>
-              <dd id="legacy-reconciliation-returned">0</dd>
-            </div>
-            <div>
-              <dt>Closures corrected</dt>
-              <dd id="legacy-reconciliation-closed">0</dd>
-            </div>
-            <div>
-              <dt>Still open</dt>
-              <dd id="legacy-reconciliation-open">0</dd>
-            </div>
-            <div>
-              <dt>API omissions</dt>
-              <dd id="legacy-reconciliation-omitted">0</dd>
-            </div>
-          </dl>
-          <p id="legacy-reconciliation-detail" class="legacy-reconciliation-detail">
-            Preparing the one-time historical check.
-          </p>
-          <p class="legacy-reconciliation-disclosure">
-            This is a one-time historical repair. The NYC311 API is not part of live monitoring
-            and will not continue after this run.
-          </p>
         </section>
         <section id="city-summary" class="city-summary" aria-labelledby="city-summary-title" aria-busy="true">
           <header class="city-summary-header">
@@ -200,128 +152,72 @@
         <section id="email-monitoring" class="email-monitoring" aria-labelledby="email-monitoring-title" aria-busy="true">
           <header class="email-monitoring-header">
             <div>
-              <span class="eyebrow">Monitoring health</span>
-              <h2 id="email-monitoring-title">Status &amp; closure tracking</h2>
+              <span class="eyebrow">Email tracking</span>
+              <h2 id="email-monitoring-title">NYC311 status updates</h2>
             </div>
             <span id="email-monitoring-mode" class="monitoring-mode-badge">Checking mode…</span>
           </header>
           <div class="email-monitoring-lead">
-            <p><strong id="email-deliveries-total">—</strong><span>emails received</span></p>
+            <p><strong id="email-deliveries-total">—</strong><span>status emails saved</span></p>
             <div>
-              <strong id="email-deliveries-usable">— usable</strong>
+              <strong id="email-deliveries-usable">— matched to requests</strong>
               <small id="email-deliveries-last">Waiting for the first metrics refresh</small>
             </div>
           </div>
           <dl class="email-delivery-breakdown" aria-label="Email delivery breakdown">
-            <div><dt>Submitted emails</dt><dd id="email-submitted-count">—</dd></div>
-            <div><dt>Updated emails</dt><dd id="email-updated-count">—</dd></div>
-            <div><dt>Closed emails</dt><dd id="email-closed-count">—</dd></div>
-            <div><dt>Email issues</dt><dd id="email-issues-count">—</dd></div>
+            <div><dt>New-request confirmations</dt><dd id="email-submitted-count">—</dd></div>
+            <div><dt>Agency updates</dt><dd id="email-updated-count">—</dd></div>
+            <div><dt>Closure notices</dt><dd id="email-closed-count">—</dd></div>
+            <div><dt>Processing issues</dt><dd id="email-issues-count">—</dd></div>
           </dl>
           <div class="email-monitoring-health">
             <div>
-              <span>Subscriptions</span>
+              <span>Requests subscribed</span>
               <strong id="email-subscriptions-count">—</strong>
               <small id="email-subscriptions-note">Checking enrollment</small>
             </div>
             <div>
-              <span>Known Portal closure coverage</span>
+              <span>Known closures with an email</span>
               <strong id="email-coverage-rate">—</strong>
               <small id="email-coverage-note">Checking independently known closures</small>
             </div>
           </div>
           <p id="email-coverage-limitation" class="email-coverage-limitation">
-            Known Portal closures only; this cannot detect closures not independently found in stored Portal data.
+            Coverage compares closure emails with requests independently confirmed closed by NYC311.
           </p>
           <details class="email-quality-notes">
-            <summary>Delivery quality details</summary>
+            <summary>About these email numbers</summary>
             <p id="email-metrics-status" class="email-metrics-status" role="status">
               Loading email monitoring metrics…
             </p>
           </details>
         </section>
 
-        <section id="status-clarity" class="status-clarity" aria-labelledby="status-clarity-title">
-          <header class="status-clarity-header">
-            <div>
-              <span class="eyebrow">Status clarity</span>
-              <h2 id="status-clarity-title">What is known right now</h2>
-            </div>
-            <span id="status-clarity-mode">Checking evidence…</span>
-          </header>
-          <div class="status-clarity-grid" aria-label="Status and closure evidence">
-            <article>
-              <span>Email-monitored requests</span>
-              <strong id="status-tracked-count">—</strong>
-              <small id="status-tracked-note">Checking subscriptions</small>
-            </article>
-            <article>
-              <span>Status emails received</span>
-              <strong id="status-email-count">—</strong>
-              <small id="status-email-note">Submitted, Updated, and Closed</small>
-            </article>
-            <article>
-              <span>Closed emails</span>
-              <strong id="status-closed-email-count">—</strong>
-              <small id="status-closed-email-note">Direct NYC311 closed notices</small>
-            </article>
-            <article>
-              <span>Portal-verified closures</span>
-              <strong id="status-portal-closed-count">—</strong>
-              <small id="status-portal-closed-note">Final snapshots saved</small>
-            </article>
-          </div>
-          <p id="status-clarity-note" class="status-clarity-note">
-            Email notices are the fast signal. Portal verification is the saved final proof.
-          </p>
-        </section>
-
         <section class="metrics" aria-label="Live collection statistics">
           <header class="overview-section-header">
             <div>
-              <span class="eyebrow">Archive health</span>
-              <h2>Collection &amp; coverage</h2>
+              <span class="eyebrow">Data coverage</span>
+              <h2>What is in the archive?</h2>
             </div>
-            <p>What is stored and how complete each record is.</p>
+            <p>Archive size and coverage for requests arriving right now.</p>
           </header>
           <div class="metric-group">
-            <header>
-              <span class="eyebrow">Collection</span>
-              <h2>Archive</h2>
-            </header>
-            <div class="metric-grid">
+            <div class="metric-grid metric-grid-overview">
               <article>
-                <strong id="total-count">0</strong><span>Captured</span>
-                <small>Stored in database</small>
+                <strong id="total-count">0</strong><span>Requests stored</span>
+                <small>All records in this archive</small>
               </article>
               <article>
-                <strong id="subscription-count">—</strong><span>Email subscribed</span>
-                <small id="subscription-note">Checking enrollment</small>
+                <strong id="archive-history-count">—</strong><span>Days collected</span>
+                <small id="archive-history-note">Checking archive history</small>
               </article>
               <article>
-                <strong id="closures-count">0</strong><span>Closures saved</span>
-                <small id="closures-note">0 checks in progress</small>
-              </article>
-            </div>
-          </div>
-
-          <div class="metric-group">
-            <header>
-              <span class="eyebrow">Coverage</span>
-              <h2>Completeness</h2>
-            </header>
-            <div class="metric-grid">
-              <article>
-                <strong id="details-coverage-rate">—</strong><span>Details loaded</span>
-                <small id="details-coverage-note">Checking coverage</small>
+                <strong id="details-coverage-rate">—</strong><span>Submitted details</span>
+                <small id="details-coverage-note">Checking recent requests</small>
               </article>
               <article>
-                <strong id="map-coverage-rate">—</strong><span>Map coverage</span>
-                <small id="map-coverage-note">Checking coordinates</small>
-              </article>
-              <article>
-                <strong id="pending-count">0</strong><span>Audit queued</span>
-                <small>Request numbers waiting</small>
+                <strong id="map-coverage-rate">—</strong><span>Map locations</span>
+                <small id="map-coverage-note">Checking recent requests</small>
               </article>
             </div>
           </div>
@@ -337,17 +233,17 @@
           </header>
           <div class="response-time-overall">
             <article>
-              <span>Typical (median) first update</span>
+              <span>First agency update</span>
               <strong id="overall-update-median">—</strong>
               <small id="overall-update-detail">n=0</small>
             </article>
             <article>
-              <span>Typical (median) Portal closure</span>
+              <span>Request closure</span>
               <strong id="overall-closure-median">—</strong>
               <small id="overall-closure-detail">n=0</small>
             </article>
             <article>
-              <span>Typical (median) email delay</span>
+              <span>Closure email delivery</span>
               <strong id="overall-notification-median">—</strong>
               <small id="overall-notification-detail">n=0</small>
             </article>
@@ -395,50 +291,57 @@
           </div>
         </section>
 
-        <section class="monitor-strip" aria-labelledby="collector-settings-title">
-          <div class="monitor-copy">
-            <span class="eyebrow">New request discovery</span>
-            <h2 id="collector-settings-title">Live feed refresh</h2>
-            <p>How often the newest NYC311 requests are checked.</p>
-          </div>
-          <label>
-            <span>Check every</span>
-            <select id="poll-interval">
-              <option value="5">5 seconds</option>
-              <option value="10">10 seconds</option>
-              <option value="15" selected>15 seconds</option>
-              <option value="30">30 seconds</option>
-              <option value="60">60 seconds</option>
-            </select>
-          </label>
-          <div class="clock-block">
-            <strong id="nyc-clock">—</strong>
-            <span id="next-check">New York time</span>
-          </div>
-        </section>
+        <details class="overview-operations">
+          <summary>
+            <span><small>Operations</small><strong>Controls &amp; site updates</strong></span>
+          </summary>
+          <div class="overview-operations-content">
+            <section class="monitor-strip" aria-labelledby="collector-settings-title">
+              <div class="monitor-copy">
+                <span class="eyebrow">New request discovery</span>
+                <h2 id="collector-settings-title">Live feed refresh</h2>
+                <p>How often the newest NYC311 requests are checked.</p>
+              </div>
+              <label>
+                <span>Check every</span>
+                <select id="poll-interval">
+                  <option value="5">5 seconds</option>
+                  <option value="10">10 seconds</option>
+                  <option value="15" selected>15 seconds</option>
+                  <option value="30">30 seconds</option>
+                  <option value="60">60 seconds</option>
+                </select>
+              </label>
+              <div class="clock-block">
+                <strong id="nyc-clock">—</strong>
+                <span id="next-check">New York time</span>
+              </div>
+            </section>
 
-        <section id="release-speed" class="release-speed" aria-labelledby="release-speed-title" aria-busy="true">
-          <header class="release-speed-header">
-            <div>
-              <span class="eyebrow">Change speed</span>
-              <h2 id="release-speed-title">Site update timer</h2>
-            </div>
-            <time id="release-speed-updated">Measuring…</time>
-          </header>
-          <div class="release-speed-lead">
-            <p><strong id="release-total-time">—</strong><span>last live update</span></p>
-            <small id="release-summary">Waiting for the next timed deployment.</small>
+            <section id="release-speed" class="release-speed" aria-labelledby="release-speed-title" aria-busy="true">
+              <header class="release-speed-header">
+                <div>
+                  <span class="eyebrow">Change speed</span>
+                  <h2 id="release-speed-title">Site update timer</h2>
+                </div>
+                <time id="release-speed-updated">Measuring…</time>
+              </header>
+              <div class="release-speed-lead">
+                <p><strong id="release-total-time">—</strong><span>last live update</span></p>
+                <small id="release-summary">Waiting for the next timed deployment.</small>
+              </div>
+              <dl class="release-speed-phases" aria-label="Deployment timing breakdown">
+                <div><dt>Local tests</dt><dd id="release-tests-time">—</dd></div>
+                <div><dt>Package + upload</dt><dd id="release-upload-time">—</dd></div>
+                <div><dt>Production switch</dt><dd id="release-activate-time">—</dd></div>
+                <div><dt>Live check</dt><dd id="release-visible-time">—</dd></div>
+              </dl>
+              <p id="release-speed-note" class="release-speed-note">
+                This measures the deploy path from local validation through the production health check.
+              </p>
+            </section>
           </div>
-          <dl class="release-speed-phases" aria-label="Deployment timing breakdown">
-            <div><dt>Local tests</dt><dd id="release-tests-time">—</dd></div>
-            <div><dt>Package + upload</dt><dd id="release-upload-time">—</dd></div>
-            <div><dt>Production switch</dt><dd id="release-activate-time">—</dd></div>
-            <div><dt>Live check</dt><dd id="release-visible-time">—</dd></div>
-          </dl>
-          <p id="release-speed-note" class="release-speed-note">
-            This measures the deploy path from local validation through the production health check.
-          </p>
-        </section>
+        </details>
       </div>
 
       <div class="requests-view">

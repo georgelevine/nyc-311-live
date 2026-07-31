@@ -409,6 +409,46 @@ a:focus-visible {
   line-height: 1.35;
 }
 
+.system-health-more {
+  margin-top: 11px;
+  border-top: 1px solid #e2eaf1;
+}
+
+.system-health-more > summary {
+  display: flex;
+  min-height: 40px;
+  align-items: center;
+  justify-content: space-between;
+  color: #536675;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 780;
+  list-style: none;
+}
+
+.system-health-more > summary::-webkit-details-marker {
+  display: none;
+}
+
+.system-health-more > summary::after {
+  content: "+";
+  font-size: 18px;
+  font-weight: 500;
+}
+
+.system-health-more[open] > summary::after {
+  content: "−";
+}
+
+.system-health-grid-secondary {
+  margin-top: 0;
+  padding-bottom: 4px;
+}
+
+.system-health-grid-secondary article {
+  background: #f8fafc;
+}
+
 .system-health-footer {
   align-items: flex-start;
   margin-top: 13px;
@@ -1443,6 +1483,10 @@ a:focus-visible {
   gap: 8px;
 }
 
+.metric-grid-overview {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .metrics article {
   padding: 13px 8px 11px;
   border: 1px solid #e5ebef;
@@ -1467,6 +1511,78 @@ a:focus-visible {
   color: #788996;
   font-size: 10px;
   line-height: 1.35;
+}
+
+.overview-operations {
+  margin: 14px 0 0;
+  overflow: hidden;
+  border: 1px solid var(--panel-border);
+  border-radius: var(--radius-lg);
+  background: var(--panel-background);
+  box-shadow: var(--soft-shadow);
+}
+
+.overview-operations > summary {
+  display: flex;
+  min-height: 62px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 17px;
+  color: var(--ink);
+  cursor: pointer;
+  list-style: none;
+}
+
+.overview-operations > summary::-webkit-details-marker {
+  display: none;
+}
+
+.overview-operations > summary::after {
+  content: "+";
+  color: #627589;
+  font-size: 22px;
+  font-weight: 450;
+}
+
+.overview-operations[open] > summary {
+  border-bottom: 1px solid #e3eaf0;
+}
+
+.overview-operations[open] > summary::after {
+  content: "−";
+}
+
+.overview-operations > summary span,
+.overview-operations > summary small,
+.overview-operations > summary strong {
+  display: block;
+}
+
+.overview-operations > summary small {
+  margin-bottom: 3px;
+  color: #718291;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .7px;
+  text-transform: uppercase;
+}
+
+.overview-operations > summary strong {
+  font-size: 15px;
+}
+
+.overview-operations-content {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  background: #f7f9fb;
+}
+
+.overview-operations-content .monitor-strip,
+.overview-operations-content .release-speed {
+  margin: 0;
+  box-shadow: none;
 }
 
 .monitor-strip {
@@ -1980,10 +2096,7 @@ a:focus-visible {
   .app-shell[data-mobile-view="overview"] .system-health,
   .app-shell[data-mobile-view="overview"] .metrics,
   .app-shell[data-mobile-view="overview"] .response-times,
-  .app-shell[data-mobile-view="overview"] .monitor-strip,
-  .app-shell[data-mobile-view="overview"] .legacy-reconciliation,
-  .app-shell[data-mobile-view="overview"] .status-clarity,
-  .app-shell[data-mobile-view="overview"] .release-speed {
+  .app-shell[data-mobile-view="overview"] .overview-operations {
     grid-column: 1 / -1;
   }
 
@@ -2010,8 +2123,7 @@ a:focus-visible {
   }
 
   .app-shell[data-mobile-view="overview"] .response-times,
-  .app-shell[data-mobile-view="overview"] .monitor-strip,
-  .app-shell[data-mobile-view="overview"] .release-speed {
+  .app-shell[data-mobile-view="overview"] .overview-operations {
     margin: 0;
   }
 
@@ -2134,6 +2246,10 @@ a:focus-visible {
 
   .metric-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .metric-grid-overview {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .metrics article {
