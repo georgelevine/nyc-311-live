@@ -67,6 +67,23 @@ and [CLOUD_DEPLOYMENT.md](CLOUD_DEPLOYMENT.md) covers managed PostgreSQL/Render.
 Copy an example environment file and supply real credentials outside Git. Never
 commit `.env` files, database files, passwords, private keys, or cloud secrets.
 
+After the first Lightsail installation, use `npm run deploy`. It compares the
+production release with `main` and automatically chooses the narrowest safe
+path:
+
+- `assets` for HTML, CSS, browser JavaScript, and vendor files. Static files
+  switch atomically and no container restarts.
+- `web` for the Express dashboard/API and its read-only presentation modules.
+  Only the web container restarts; collection and email intake remain live.
+- `service` for collectors, inbound email, dependencies, Docker, Caddy,
+  database, or other infrastructure changes. This retains the full coordinated
+  restart and fresh-poll health gate.
+
+The explicit commands `npm run deploy:assets`, `npm run deploy:web`, and
+`npm run deploy:service` remain available. Each fast path independently rejects
+changes outside its permitted scope instead of silently deploying a partial
+release.
+
 ## Read-only live statistics
 
 `GET /api/live-summary` returns the same deterministic statistics shown in the

@@ -44,6 +44,8 @@ done
 deployment_directory="/opt/nyc-311-live/aws/lightsail-sqlite"
 cd "${deployment_directory}"
 install_lock="/var/lib/nyc-311-live-lock/install.lock"
+static_publisher="/usr/local/sbin/nyc311-publish-static-release"
+static_asset_root="/var/lib/nyc-311-live-assets"
 if [[ -L "${install_lock}" || ! -f "${install_lock}"
     || "$(stat -c '%u' "${install_lock}")" != "0"
     || "$(stat -c '%a' "${install_lock}")" != "600"
@@ -70,6 +72,7 @@ declare -A deployment_env=()
 declare -A allowed_env_keys=(
   [COMPOSE_PROJECT_NAME]=1
   [IMAGE_TAG]=1
+  [WEB_IMAGE_TAG]=1
   [SITE_ADDRESS]=1
   [ACME_EMAIL]=1
   [DASHBOARD_USERNAME]=1
@@ -194,12 +197,35 @@ else
   exit 1
 fi
 
-if [[ -z "${IMAGE_TAG:-}" || "${IMAGE_TAG}" == "local" || "${IMAGE_TAG}" == "replace-with-git-sha" ]]; then
+if [[ -z "${IMAGE_TAG:-}" || "${IMAGE_TAG}" == "local"
+    || "${IMAGE_TAG}" == "replace-with-git-sha"
+    || ! "${IMAGE_TAG}" =~ ^[0-9a-f]{40}$ ]]; then
   echo "Set IMAGE_TAG in .env to the immutable Git commit SHA being deployed." >&2
   exit 1
 fi
-if [[ ! "${release_commit}" =~ ^[0-9a-f]{40}$ || "${release_commit}" != "${IMAGE_TAG}" ]]; then
-  echo "IMAGE_TAG must exactly match the deployed release commit (${release_commit})." >&2
+if [[ ! "${release_commit}" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "The deployed release commit is invalid." >&2
+  exit 1
+fi
+if [[ -z "${deployment_env[WEB_IMAGE_TAG]+present}" ]]; then
+  # Releases installed before the web/service split used IMAGE_TAG for every
+  # container. Persist that exact pointer so future Compose commands remain
+  # compatible after this installer exits.
+  WEB_IMAGE_TAG="${IMAGE_TAG}"
+  export WEB_IMAGE_TAG
+  printf '\nWEB_IMAGE_TAG=%s\n' "${WEB_IMAGE_TAG}" >> .env
+  chmod 0600 .env
+  echo "Initialized WEB_IMAGE_TAG from the existing immutable IMAGE_TAG."
+fi
+if [[ -z "${WEB_IMAGE_TAG:-}" || "${WEB_IMAGE_TAG}" == "local"
+    || "${WEB_IMAGE_TAG}" == "replace-with-git-sha"
+    || ! "${WEB_IMAGE_TAG}" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "Set WEB_IMAGE_TAG in .env to an immutable web image Git SHA." >&2
+  exit 1
+fi
+if [[ ! -x "${static_publisher}" || -L "${static_publisher}"
+    || "$(stat -c '%u:%g' "${static_publisher}")" != "0:0" ]]; then
+  echo "The root-owned static publisher is missing; rerun install-host.sh." >&2
   exit 1
 fi
 if [[ ${activate} -eq 1 && "${OFFSITE_BACKUPS_CONFIRMED:-0}" != "1" ]]; then
@@ -243,28 +269,59 @@ fi
 
 export SQLITE_IMPORT_FILE="${snapshot_name}"
 docker compose config --quiet
-image_name="nyc-311-sqlite:${IMAGE_TAG}"
+service_image_name="nyc-311-sqlite:${IMAGE_TAG}"
+web_image_name="nyc-311-sqlite:${WEB_IMAGE_TAG}"
 if [[ ${skip_build} -eq 1 ]]; then
-  docker image inspect "${image_name}" >/dev/null
+  docker image inspect "${service_image_name}" >/dev/null
+  docker image inspect "${web_image_name}" >/dev/null
 else
-  if docker image inspect "${image_name}" >/dev/null 2>&1; then
-    echo "Refusing to overwrite immutable image ${image_name}; use --skip-build or deploy a new commit." >&2
+  if [[ "${IMAGE_TAG}" != "${release_commit}"
+      || "${WEB_IMAGE_TAG}" != "${release_commit}" ]]; then
+    echo "Split service/web rollback images must already exist; rerun with --skip-build." >&2
     exit 1
   fi
-  # Both runtime services share one immutable image. Building the entire
+  if docker image inspect "${service_image_name}" >/dev/null 2>&1; then
+    echo "Refusing to overwrite immutable image ${service_image_name}; use --skip-build or deploy a new commit." >&2
+    exit 1
+  fi
+  # A fresh install starts with both pointers on this release. Building the
   # Compose project can make newer BuildKit versions publish that same tag
-  # concurrently and fail with "image already exists". Build one service;
-  # the resulting tagged image is used by both web and collector.
+  # concurrently and fail with "image already exists". Build web once; the
+  # resulting tagged image is also used by the collector and inbound receiver.
   docker compose build --pull web
 fi
-image_version="$(docker image inspect --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' "${image_name}")"
-if [[ "${image_version}" != "${IMAGE_TAG}" ]]; then
-  echo "Image version label ${image_version} does not match ${IMAGE_TAG}." >&2
-  exit 1
+image_names=("${service_image_name}")
+image_tags=("${IMAGE_TAG}")
+if [[ "${web_image_name}" != "${service_image_name}" ]]; then
+  image_names+=("${web_image_name}")
+  image_tags+=("${WEB_IMAGE_TAG}")
 fi
+for image_index in "${!image_names[@]}"; do
+  image_version="$(docker image inspect \
+    --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' \
+    "${image_names[${image_index}]}")"
+  if [[ "${image_version}" != "${image_tags[${image_index}]}" ]]; then
+    echo "Image version label ${image_version} does not match ${image_tags[${image_index}]}." >&2
+    exit 1
+  fi
+done
 
 # First verification reads only the root-owned staging directory.
 docker compose --profile tools run --rm --no-deps verify
+
+# Seed Caddy's stable static mount before any service starts. The publisher
+# verifies every file and switches `current` atomically, so a fresh host cannot
+# report a healthy API while serving a missing or mixed dashboard shell.
+"${static_publisher}" "${repository_directory}/public" "${release_commit}"
+static_release_directory="${static_asset_root}/releases/${release_commit}"
+expected_public_shell_sha="$(sha256sum \
+  "${static_release_directory}/live.html" | cut -d' ' -f1)"
+expected_public_dashboard_sha="$(sha256sum \
+  "${static_release_directory}/js/live-dashboard.js" | cut -d' ' -f1)"
+expected_public_css_sha="$(sha256sum \
+  "${static_release_directory}/css/live-ui.css" | cut -d' ' -f1)"
+expected_public_vendor_sha="$(sha256sum \
+  "${static_release_directory}/vendor/leaflet/leaflet.js" | cut -d' ' -f1)"
 
 timer_was_active=0
 data_directory_locked=0
@@ -383,7 +440,27 @@ fi
 if [[ -n "${SITE_ADDRESS:-}" ]]; then
   tls_ready=0
   for _ in $(seq 1 24); do
-    if curl --fail --silent --show-error --max-time 20 "https://${SITE_ADDRESS}/api/health" >/dev/null; then
+    if curl --fail --silent --show-error --max-time 20 \
+        "https://${SITE_ADDRESS}/api/health" >/dev/null \
+        && public_shell_sha="$(curl --fail --silent --show-error --max-time 20 \
+          "https://${SITE_ADDRESS}/" | sha256sum | cut -d' ' -f1)" \
+        && public_manifest="$(curl --fail --silent --show-error --max-time 20 \
+          "https://${SITE_ADDRESS}/release.json?release=${release_commit}")" \
+        && public_dashboard_sha="$(curl --fail --silent --show-error --max-time 20 \
+          "https://${SITE_ADDRESS}/_ui/${release_commit}/js/live-dashboard.js" \
+          | sha256sum | cut -d' ' -f1)" \
+        && public_css_sha="$(curl --fail --silent --show-error --max-time 20 \
+          "https://${SITE_ADDRESS}/_ui/${release_commit}/css/live-ui.css" \
+          | sha256sum | cut -d' ' -f1)" \
+        && public_vendor_sha="$(curl --fail --silent --show-error --max-time 20 \
+          "https://${SITE_ADDRESS}/_ui/${release_commit}/vendor/leaflet/leaflet.js" \
+          | sha256sum | cut -d' ' -f1)" \
+        && [[ "${public_shell_sha}" == "${expected_public_shell_sha}"
+          && "$(printf '%s' "${public_manifest}" | tr -d '[:space:]')" \
+            == "{\"release_sha\":\"${release_commit}\"}"
+          && "${public_dashboard_sha}" == "${expected_public_dashboard_sha}"
+          && "${public_css_sha}" == "${expected_public_css_sha}"
+          && "${public_vendor_sha}" == "${expected_public_vendor_sha}" ]]; then
       tls_ready=1
       break
     fi
@@ -391,7 +468,7 @@ if [[ -n "${SITE_ADDRESS:-}" ]]; then
   done
   if [[ ${tls_ready} -ne 1 ]]; then
     docker compose logs --tail=100 proxy || true
-    echo "Public HTTPS validation failed; the collector remains stopped." >&2
+    echo "Public HTTPS did not serve the exact shell, manifest, and versioned UI assets; the collector remains stopped." >&2
     exit 1
   fi
 fi

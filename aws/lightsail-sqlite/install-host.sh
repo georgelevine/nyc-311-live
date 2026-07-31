@@ -11,6 +11,11 @@ if [[ ! -f "${deployment_directory}/compose.yml" ]]; then
   echo "Install the repository at /opt/nyc-311-live before running this script." >&2
   exit 1
 fi
+static_publisher_source="${deployment_directory}/publish-static-release.sh"
+if [[ ! -f "${static_publisher_source}" || -L "${static_publisher_source}" ]]; then
+  echo "The root-owned static release publisher is missing from the deployment." >&2
+  exit 1
+fi
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
@@ -29,8 +34,13 @@ chown -R root:root /opt/nyc-311-live
 chmod -R go-w /opt/nyc-311-live
 install -d -m 0750 -o 10001 -g 10001 /var/lib/nyc-311-live
 install -d -m 0700 -o root -g root /var/lib/nyc-311-live-imports
+install -d -m 0755 -o root -g root \
+  /var/lib/nyc-311-live-assets \
+  /var/lib/nyc-311-live-assets/releases
 install -d -m 0750 -o 10001 -g 10001 /var/backups/nyc-311-live
 install -d -m 0750 -o root -g 10001 /var/lib/nyc-311-live-lock
+install -m 0755 -o root -g root "${static_publisher_source}" \
+  /usr/local/sbin/nyc311-publish-static-release
 collector_lock="/var/lib/nyc-311-live-lock/collector.lock"
 if [[ -L "${collector_lock}" || ( -e "${collector_lock}" && ! -f "${collector_lock}" ) ]]; then
   echo "Collector lock path is not a regular file." >&2
@@ -60,6 +70,22 @@ else
   fi
   chown root:root "${install_lock}"
   chmod 0600 "${install_lock}"
+fi
+static_release_lock="/var/lib/nyc-311-live-lock/static-release.lock"
+if [[ -L "${static_release_lock}"
+    || ( -e "${static_release_lock}" && ! -f "${static_release_lock}" ) ]]; then
+  echo "Static release lock path is not a regular file." >&2
+  exit 1
+fi
+if [[ ! -e "${static_release_lock}" ]]; then
+  install -m 0600 -o root -g root /dev/null "${static_release_lock}"
+else
+  if [[ "$(stat -c '%h' "${static_release_lock}")" != "1" ]]; then
+    echo "Static release lock path must not have additional hard links." >&2
+    exit 1
+  fi
+  chown root:root "${static_release_lock}"
+  chmod 0600 "${static_release_lock}"
 fi
 
 if ! swapon --show=NAME --noheadings | grep -Fxq /swapfile; then

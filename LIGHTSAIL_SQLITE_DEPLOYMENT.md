@@ -14,7 +14,7 @@ any, are also outside the instance price.
 The PostgreSQL/PostGIS design in `aws/lightsail/` remains an optional later
 migration if measured load eventually requires more than one application host.
 
-## Fast UI-only releases
+## Fast automatic releases
 
 After the first full release is installed, install the root-owned UI deployment
 helper once:
@@ -25,21 +25,26 @@ sudo install -m 0755 -o root -g root \
   /usr/local/sbin/nyc311-deploy-ui-release
 ```
 
-Future browser-only changes are one command from a clean, pushed `main` branch:
+Future changes are one command from a clean, pushed `main` branch:
 
 ```bash
 cd /Users/georgelevine/nyc-bid-311
-npm run deploy:ui
+npm run deploy
 ```
 
-The command runs the UI contract tests, archives the exact pushed commit, checks
-the archive checksum and expanded `RELEASE_COMMIT` on Lightsail, and refuses to
-continue if anything outside `public/` changed since the running release. It
-builds the cached web image while the existing site stays online, replaces only
-the `web` container, verifies local and public health, and rolls back on failure.
-It does not restart the collector or read, copy, migrate, or replace the SQLite
-database. Full collector, schema, dependency, Compose, and infrastructure changes
-must continue through the reviewed full-release process.
+The command runs the tests, archives the exact pushed commit, verifies it on
+Lightsail, and automatically chooses the narrowest safe release lane. Browser
+files switch atomically without restarting a container. Express/API changes
+replace only `web`; the collector and inbound-email receiver remain live.
+Collector, dependency, Compose, and infrastructure changes use the complete
+health-checked service lane. Every fast lane refuses changes outside its
+allowlist, verifies the exact public release, and rolls back on failure. None of
+the lanes mutates, copies, migrates, or replaces the SQLite database; bounded
+read-only health checks confirm that the archive remains available.
+
+Explicit `npm run deploy:assets`, `npm run deploy:web`, and
+`npm run deploy:service` commands are available for controlled testing, but the
+normal command is always `npm run deploy`.
 
 ## Safety rules
 
@@ -171,10 +176,10 @@ sudoedit .env
 ```
 
 Put the generated password in `DASHBOARD_PASSWORD`. Put the exact Git commit SHA
-in `IMAGE_TAG`; tags are immutable so the previous image remains available for
-rollback. When DNS is ready, set `SITE_ADDRESS` to the hostname without
-`https://` and set `ACME_EMAIL`. Leave both activation confirmations at `0` for
-now. Never commit `.env`.
+in both `IMAGE_TAG` and `WEB_IMAGE_TAG`; tags are immutable so the previous
+images remain available for rollback. When DNS is ready, set `SITE_ADDRESS` to
+the hostname without `https://` and set `ACME_EMAIL`. Leave both activation
+confirmations at `0` for now. Never commit `.env`.
 
 ## 4. Rehearse while the Mac keeps collecting
 
@@ -461,12 +466,14 @@ sudo ./install-snapshot.sh --activate --skip-build rollback.sqlite
 ```
 
 For code rollback, fail closed unless the prior immutable image and matching
-version label are both still present. Then set `IMAGE_TAG` in `.env` to that exact
-prior SHA and recreate without allowing Compose to build the current checkout:
+version label are both still present. Then set both `IMAGE_TAG` and
+`WEB_IMAGE_TAG` in `.env` to that exact prior SHA and recreate without allowing
+Compose to build the current checkout:
 
 ```bash
 cd /opt/nyc-311-live/aws/lightsail-sqlite
 PRIOR_SHA=PUT_THE_40_CHARACTER_PRIOR_GIT_SHA_HERE
+PRIOR_RELEASE_DIRECTORY=/opt/PUT_THE_RETAINED_PRIOR_RELEASE_DIRECTORY_HERE
 sudo docker image inspect "nyc-311-sqlite:$PRIOR_SHA" >/dev/null
 IMAGE_LABEL="$(sudo docker image inspect \
   --format '{{ index .Config.Labels "org.opencontainers.image.version" }}' \
@@ -474,9 +481,11 @@ IMAGE_LABEL="$(sudo docker image inspect \
 test "$IMAGE_LABEL" = "$PRIOR_SHA"
 sudoedit .env
 test "$(sudo sed -n 's/^IMAGE_TAG=//p' .env)" = "$PRIOR_SHA"
-sudo docker compose up -d --no-build web collector
-# Run this as well only when SITE_ADDRESS contains a domain:
-sudo docker compose up -d --no-build proxy
+test "$(sudo sed -n 's/^WEB_IMAGE_TAG=//p' .env)" = "$PRIOR_SHA"
+sudo /usr/local/sbin/nyc311-publish-static-release \
+  "$PRIOR_RELEASE_DIRECTORY/public" "$PRIOR_SHA"
+sudo docker compose up -d --no-build --force-recreate \
+  web inbound-email collector proxy
 ```
 
 If activation fails before a fresh cloud poll, the script stops the cloud

@@ -6,12 +6,16 @@ deploy_host="${LIGHTSAIL_HOST:-34.201.212.109}"
 deploy_user="${LIGHTSAIL_USER:-ubuntu}"
 deploy_key="${LIGHTSAIL_KEY:-${HOME}/Downloads/LightsailDefaultKey-us-east-1.pem}"
 public_health_url="${PUBLIC_HEALTH_URL:-https://311.georgelevine.com/api/health}"
-deployment_scope="${DEPLOY_SCOPE:-web}"
+requested_scope="${DEPLOY_SCOPE:-auto}"
+deployment_scope="${requested_scope}"
 deploy_started_epoch="$(date +%s)"
 deploy_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-if [[ "${deployment_scope}" != "web" && "${deployment_scope}" != "service" ]]; then
-  echo "DEPLOY_SCOPE must be web or service." >&2
+if [[ "${requested_scope}" != "auto"
+    && "${requested_scope}" != "assets"
+    && "${requested_scope}" != "web"
+    && "${requested_scope}" != "service" ]]; then
+  echo "DEPLOY_SCOPE must be auto, assets, web, or service." >&2
   exit 1
 fi
 
@@ -34,6 +38,14 @@ if [[ "${release_sha}" != "${remote_main_sha}" ]]; then
   echo "Push ${release_sha} to origin/main before deploying it." >&2
   exit 1
 fi
+if [[ "${requested_scope}" == "auto" ]]; then
+  deployment_scope="$(node scripts/select-deploy-scope.js)"
+  if [[ "${deployment_scope}" == "none" ]]; then
+    echo "Production already matches ${release_sha}; nothing to deploy."
+    exit 0
+  fi
+fi
+echo "Deploying ${release_sha} through the ${deployment_scope} lane."
 if [[ ! -f "${deploy_key}" ]]; then
   echo "Lightsail SSH key not found at ${deploy_key}." >&2
   exit 1
@@ -48,7 +60,7 @@ npm test
 tests_seconds=$(($(date +%s) - phase_started_epoch))
 
 working_directory="$(mktemp -d "${TMPDIR:-/tmp}/nyc311-ui-deploy.XXXXXX")"
-trap 'rm -rf -- "${working_directory}"' EXIT
+ssh_control_path="/tmp/nyc311-deploy-ssh-${PPID}-$$"
 archive="${working_directory}/${release_sha}.tar.gz"
 phase_started_epoch="$(date +%s)"
 git archive --format=tar.gz --output "${archive}" "${release_sha}"
@@ -58,6 +70,9 @@ remote_upload="/tmp/nyc311-ui-${release_sha}.tar.gz"
 release_helper="${repository_directory}/aws/lightsail-sqlite/deploy-ui-release.sh"
 remote_helper="/tmp/nyc311-deploy-ui-release-${release_sha}"
 helper_sha256="$(shasum -a 256 "${release_helper}" | cut -d' ' -f1)"
+static_publisher="${repository_directory}/aws/lightsail-sqlite/publish-static-release.sh"
+remote_publisher="/tmp/nyc311-publish-static-release-${release_sha}"
+publisher_sha256="$(shasum -a 256 "${static_publisher}" | cut -d' ' -f1)"
 
 ssh_options=(
   -o IdentitiesOnly=yes
@@ -65,21 +80,35 @@ ssh_options=(
   -o ConnectTimeout=10
   -o ServerAliveInterval=10
   -o ServerAliveCountMax=3
+  -o ControlMaster=auto
+  -o ControlPersist=60
+  -o ControlPath="${ssh_control_path}"
   -i "${deploy_key}"
 )
+cleanup() {
+  ssh "${ssh_options[@]}" -O exit "${deploy_user}@${deploy_host}" >/dev/null 2>&1 || true
+  rm -f -- "${ssh_control_path}"
+  rm -rf -- "${working_directory}"
+}
+trap cleanup EXIT
 
 phase_started_epoch="$(date +%s)"
 scp "${ssh_options[@]}" "${archive}" \
   "${deploy_user}@${deploy_host}:${remote_upload}"
 scp "${ssh_options[@]}" "${release_helper}" \
   "${deploy_user}@${deploy_host}:${remote_helper}"
+scp "${ssh_options[@]}" "${static_publisher}" \
+  "${deploy_user}@${deploy_host}:${remote_publisher}"
 upload_seconds=$(($(date +%s) - phase_started_epoch))
 phase_started_epoch="$(date +%s)"
 ssh "${ssh_options[@]}" "${deploy_user}@${deploy_host}" \
   "printf '%s  %s\n' '${helper_sha256}' '${remote_helper}' | sha256sum --check --status && \
+   printf '%s  %s\n' '${publisher_sha256}' '${remote_publisher}' | sha256sum --check --status && \
    sudo install -m 0755 -o root -g root '${remote_helper}' \
      /usr/local/sbin/nyc311-deploy-ui-release && \
-   rm -f '${remote_helper}' && \
+   sudo install -m 0755 -o root -g root '${remote_publisher}' \
+     /usr/local/sbin/nyc311-publish-static-release && \
+   rm -f '${remote_helper}' '${remote_publisher}' && \
    sudo install -d -m 0700 -o root -g root /var/lib/nyc-311-live-releases/inbox && \
    sudo install -m 0600 -o root -g root '${remote_upload}' \
      '/var/lib/nyc-311-live-releases/inbox/${release_sha}.tar.gz' && \
@@ -89,7 +118,8 @@ ssh "${ssh_options[@]}" "${deploy_user}@${deploy_host}" \
 remote_activate_seconds=$(($(date +%s) - phase_started_epoch))
 
 phase_started_epoch="$(date +%s)"
-curl --fail --silent --show-error "${public_health_url}" >/dev/null
+curl --fail --silent --show-error --connect-timeout 3 --max-time 5 \
+  "${public_health_url}" >/dev/null
 visible_seconds=$(($(date +%s) - phase_started_epoch))
 finished_epoch="$(date +%s)"
 deployed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -102,6 +132,7 @@ release_info="${working_directory}/release-info.json"
   printf '  "release_sha": "%s",\n' "${release_sha}"
   printf '  "short_sha": "%s",\n' "${short_sha}"
   printf '  "branch": "main",\n'
+  printf '  "scope": "%s",\n' "${deployment_scope}"
   printf '  "deployed_at": "%s",\n' "${deployed_at}"
   printf '  "started_at": "%s",\n' "${deploy_started_at}"
   printf '  "site_url": "https://311.georgelevine.com",\n'

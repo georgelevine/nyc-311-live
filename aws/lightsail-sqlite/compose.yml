@@ -1,12 +1,20 @@
 name: ${COMPOSE_PROJECT_NAME:-nyc311}
 
-x-app-image: &app-image
+x-service-image: &service-image
   image: nyc-311-sqlite:${IMAGE_TAG:-local}
   build:
     context: ../..
     dockerfile: Dockerfile.sqlite
     args:
       APP_VERSION: ${IMAGE_TAG:-local}
+
+x-web-image: &web-image
+  image: nyc-311-sqlite:${WEB_IMAGE_TAG:?Set WEB_IMAGE_TAG in aws/lightsail-sqlite/.env}
+  build:
+    context: ../..
+    dockerfile: Dockerfile.sqlite
+    args:
+      APP_VERSION: ${WEB_IMAGE_TAG:?Set WEB_IMAGE_TAG in aws/lightsail-sqlite/.env}
 
 x-app-runtime: &app-runtime
   init: true
@@ -38,7 +46,7 @@ x-logging: &default-logging
 
 services:
   collector:
-    <<: [*app-image, *app-runtime]
+    <<: [*service-image, *app-runtime]
     command: ["flock", "--nonblock", "--no-fork", "/locks/collector.lock", "node", "live-311.js"]
     restart: unless-stopped
     environment:
@@ -80,7 +88,7 @@ services:
     logging: *default-logging
 
   web:
-    <<: [*app-image, *app-runtime]
+    <<: [*web-image, *app-runtime]
     command: ["node", "server.js"]
     restart: unless-stopped
     environment:
@@ -114,7 +122,7 @@ services:
     logging: *default-logging
 
   inbound-email:
-    <<: [*app-image, *app-runtime]
+    <<: [*service-image, *app-runtime]
     command: ["node", "inbound-email-server.js"]
     restart: unless-stopped
     environment:
@@ -145,7 +153,7 @@ services:
     logging: *default-logging
 
   backup:
-    <<: [*app-image, *app-runtime]
+    <<: [*service-image, *app-runtime]
     profiles: [tools]
     command:
       - ionice
@@ -193,7 +201,7 @@ services:
     logging: *default-logging
 
   verify:
-    <<: [*app-image, *app-runtime]
+    <<: [*service-image, *app-runtime]
     user: "0:0"
     profiles: [tools]
     command:
@@ -226,8 +234,10 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - type: bind
-        source: ../../public
-        target: /srv/public
+        # Mount the stable parent, not one release directory. Deployments can
+        # atomically switch its `current` symlink without restarting Caddy.
+        source: /var/lib/nyc-311-live-assets
+        target: /srv/public-releases
         read_only: true
       - caddy_data:/data
       - caddy_config:/config

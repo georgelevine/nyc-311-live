@@ -2972,20 +2972,29 @@
       : {};
     const deployedAt = portalDate(payload.deployed_at);
     const shortSha = String(payload.short_sha || payload.release_sha || '').slice(0, 7);
+    const scope = ['assets', 'web', 'service'].includes(payload.scope)
+      ? payload.scope
+      : 'service';
+    const scopeLabel = scope === 'assets'
+      ? 'Interface'
+      : scope === 'web' ? 'Web/API' : 'Full service';
     releaseSpeedElements.root.setAttribute('aria-busy', 'false');
     releaseSpeedElements.updated.textContent = deployedAt && !Number.isNaN(deployedAt.getTime())
       ? `Deployed ${fullTimeLabel(payload.deployed_at)}`
       : 'Latest timed deployment';
     releaseSpeedElements.total.textContent = releasePhaseLabel(phases.total);
     releaseSpeedElements.summary.textContent = shortSha
-      ? `Release ${shortSha} reached production.`
-      : 'Latest release reached production.';
+      ? `${scopeLabel} release ${shortSha} reached production.`
+      : `${scopeLabel} release reached production.`;
     releaseSpeedElements.tests.textContent = releasePhaseLabel(phases.tests);
     releaseSpeedElements.upload.textContent = releasePhaseLabel(phases.package_upload);
     releaseSpeedElements.activate.textContent = releasePhaseLabel(phases.remote_activate);
     releaseSpeedElements.visible.textContent = releasePhaseLabel(phases.public_health_check);
-    releaseSpeedElements.note.textContent =
-      'Measured from local validation through the public production health check.';
+    releaseSpeedElements.note.textContent = scope === 'assets'
+      ? 'Static files switched atomically. No container restarted.'
+      : scope === 'web'
+        ? 'Only the web/API container restarted; collection and email intake stayed live.'
+        : 'Collector and service changes used the full health-checked deployment path.';
     return true;
   }
 

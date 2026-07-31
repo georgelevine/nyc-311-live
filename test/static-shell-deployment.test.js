@@ -26,10 +26,15 @@ const installSnapshot = fs.readFileSync(
   path.join(root, 'aws', 'lightsail-sqlite', 'install-snapshot.sh'),
   'utf8'
 );
+const staticPublisher = fs.readFileSync(
+  path.join(root, 'aws', 'lightsail-sqlite', 'publish-static-release.sh'),
+  'utf8'
+);
 const backupService = fs.readFileSync(
   path.join(root, 'aws', 'lightsail-sqlite', 'systemd', 'nyc311-backup.service'),
   'utf8'
 );
+const dockerfile = fs.readFileSync(path.join(root, 'Dockerfile.sqlite'), 'utf8');
 
 test('Caddy isolates inbound email before routing dashboard APIs', () => {
   assert.equal(caddy.includes('redir @root /live.html'), false);
@@ -41,17 +46,33 @@ test('Caddy isolates inbound email before routing dashboard APIs', () => {
   assert.match(caddy, /handle @api \{\s*reverse_proxy web:10000\s*\}/);
   assert.ok(caddy.indexOf('@inbound_email path') < caddy.indexOf('@api path'));
   assert.match(caddy, /@root path \//);
-  assert.match(caddy, /handle \{\s*root \* \/srv\/public\s*rewrite @root \/live\.html\s*file_server\s*\}/);
+  assert.match(
+    caddy,
+    /handle @versioned_assets \{\s*uri strip_prefix \/_ui\s*root \* \/srv\/public-releases\/releases\s*header Cache-Control "public, max-age=31536000, immutable"\s*file_server\s*\}/
+  );
+  assert.match(caddy, /handle \{\s*root \* \/srv\/public-releases\/current\s*rewrite @root \/live\.html\s*file_server\s*\}/);
   assert.equal((caddy.match(/reverse_proxy web:10000/g) || []).length, 1);
   assert.equal((caddy.match(/reverse_proxy inbound-email:10001/g) || []).length, 1);
 });
 
-test('the proxy receives the release public directory as a read-only bind mount', () => {
+test('the proxy receives a stable static-release parent as a read-only bind mount', () => {
   const proxy = compose.slice(compose.indexOf('  proxy:'));
   assert.match(
     proxy,
-    /source: \.\.\/\.\.\/public\s+target: \/srv\/public\s+read_only: true/
+    /source: \/var\/lib\/nyc-311-live-assets\s+target: \/srv\/public-releases\s+read_only: true/
   );
+  assert.doesNotMatch(proxy, /source: \.\.\/\.\.\/public/);
+});
+
+test('web and background services have independent immutable image pointers', () => {
+  assert.match(compose, /x-service-image: &service-image[\s\S]*image: nyc-311-sqlite:\$\{IMAGE_TAG:-local\}/);
+  assert.match(compose, /x-web-image: &web-image[\s\S]*image: nyc-311-sqlite:\$\{WEB_IMAGE_TAG:\?Set WEB_IMAGE_TAG/);
+  const collector = compose.slice(compose.indexOf('  collector:'), compose.indexOf('  web:'));
+  const web = compose.slice(compose.indexOf('  web:'), compose.indexOf('  inbound-email:'));
+  const inbound = compose.slice(compose.indexOf('  inbound-email:'), compose.indexOf('  backup:'));
+  assert.match(collector, /\*service-image/);
+  assert.match(web, /\*web-image/);
+  assert.match(inbound, /\*service-image/);
 });
 
 test('Compose runs inbound email separately and gates the proxy on its health', () => {
@@ -86,8 +107,9 @@ test('service activation and rollback include inbound email without changing it 
     deploy.slice(ingressStart, proxyCutover),
     /http:\/\/127\.0\.0\.1:10001\/health/
   );
+  assert.equal((deploy.match(/--no-deps --force-recreate web proxy/g) || []).length, 0);
   assert.equal(
-    (deploy.match(/--no-deps --force-recreate web proxy/g) || []).length,
+    (deploy.match(/--no-deps --force-recreate web(?:\n|; then)/g) || []).length,
     2
   );
   assert.match(deploy, /rollback_services=\(web inbound-email collector proxy\)/);
@@ -98,8 +120,36 @@ test('service activation and rollback include inbound email without changing it 
   assert.match(deploy, /for _attempt in \$\(seq 1 30\)/);
   assert.match(
     deploy,
-    /The public HTTPS health check and dashboard shell did not become ready in time/
+    /The public HTTPS health check and exact versioned assets did not become ready in time/
   );
+});
+
+test('assets publish atomically without rebuilding or restarting containers', () => {
+  assert.match(deploy, /deployment_scope\}" != "assets"[\s\S]*docker compose build web/);
+  assert.match(deploy, /static_publisher="\/usr\/local\/sbin\/nyc311-publish-static-release"/);
+  assert.match(deploy, /"\$\{static_publisher\}" "\$\{current_directory\}\/public" "\$\{release_sha\}"/);
+  assert.match(staticPublisher, /ln -s "releases\/\$\{release_sha\}" "\$\{switch_directory\}\/current"/);
+  assert.match(staticPublisher, /mv -Tf -- "\$\{switch_directory\}\/current" "\$\{asset_root\}\/current"/);
+  assert.match(staticPublisher, /Static releases cannot contain symbolic links/);
+  assert.match(staticPublisher, /sha256sum --check --status SHA256SUMS/);
+  assert.match(staticPublisher, /\/_ui\/\$\{release_sha\}/);
+  assert.match(deploy, /A container started or restarted during the restart-free assets deployment/);
+  assert.match(deploy, /Assets release \$\{release_sha\} is live\. No container restarted/);
+  const environmentUpdate = deploy.slice(
+    deploy.indexOf('set_env_value()'),
+    deploy.indexOf('chmod 0600 "${staging_env}"')
+  );
+  assert.match(environmentUpdate, /deployment_scope\}" == "web"[\s\S]*set_env_value WEB_IMAGE_TAG/);
+  assert.match(environmentUpdate, /deployment_scope\}" == "service"[\s\S]*set_env_value IMAGE_TAG[\s\S]*set_env_value WEB_IMAGE_TAG/);
+  assert.doesNotMatch(environmentUpdate, /deployment_scope\}" == "assets"[\s\S]*set_env_value/);
+});
+
+test('commit-specific image metadata does not invalidate reusable Docker layers', () => {
+  const runtimeStart = dockerfile.indexOf('FROM node:22.23.1-bookworm-slim AS runtime');
+  const runtime = dockerfile.slice(runtimeStart);
+  assert.ok(runtime.indexOf('RUN apt-get update') < runtime.indexOf('ARG APP_VERSION'));
+  assert.ok(runtime.indexOf('COPY --from=dependencies') < runtime.indexOf('ARG APP_VERSION'));
+  assert.ok(runtime.indexOf('COPY --chown=nyc311:nyc311 public ./public') < runtime.indexOf('ARG APP_VERSION'));
 });
 
 test('snapshot replacement stops the isolated database writer and checks it after restart', () => {
@@ -112,6 +162,13 @@ test('snapshot replacement stops the isolated database writer and checks it afte
     /docker compose up -d web inbound-email proxy/
   );
   assert.match(installSnapshot, /http:\/\/127\.0\.0\.1:10001\/health/);
+  assert.match(
+    installSnapshot,
+    /"\$\{static_publisher\}" "\$\{repository_directory\}\/public" "\$\{release_commit\}"/
+  );
+  assert.match(installSnapshot, /_ui\/\$\{release_commit\}\/js\/live-dashboard\.js/);
+  assert.match(installSnapshot, /service_image_name="nyc-311-sqlite:\$\{IMAGE_TAG\}"/);
+  assert.match(installSnapshot, /web_image_name="nyc-311-sqlite:\$\{WEB_IMAGE_TAG\}"/);
 });
 
 test('nightly backup priority, exclusive cleanup, and I/O limits apply inside the container', () => {
@@ -153,12 +210,30 @@ test('rollback cannot recurse or continue a failed deployment', () => {
   );
   assert.match(rollback, /trap - ERR/);
   assert.match(rollback, /exit 1/);
+  assert.ok(
+    deploy.indexOf('trap rollback ERR')
+      < deploy.indexOf('mv -- "${current_directory}" "${previous_directory}"')
+  );
+  assert.match(rollback, /rollback was incomplete; immediate operator attention is required/);
+});
+
+test('public smoke checks exact versioned JavaScript, CSS, and vendor bytes', () => {
+  assert.match(deploy, /public_js_url=.*\/_ui\/\$\{release_sha\}\/js\/live-dashboard\.js/);
+  assert.match(deploy, /public_css_url=.*\/_ui\/\$\{release_sha\}\/css\/live-ui\.css/);
+  assert.match(deploy, /public_vendor_url=.*\/_ui\/\$\{release_sha\}\/vendor\/leaflet\/leaflet\.js/);
+  assert.match(deploy, /public_js_sha[\s\S]*expected_js_sha/);
+  assert.match(deploy, /public_css_sha[\s\S]*expected_css_sha/);
+  assert.match(deploy, /public_vendor_sha[\s\S]*expected_vendor_sha/);
+  assert.match(deploy, /--connect-timeout 3 --max-time 5/);
 });
 
 test('local deployment cannot hang indefinitely on a stale SSH connection', () => {
   assert.match(localDeploy, /ConnectTimeout=10/);
   assert.match(localDeploy, /ServerAliveInterval=10/);
   assert.match(localDeploy, /ServerAliveCountMax=3/);
+  assert.match(localDeploy, /ControlMaster=auto/);
+  assert.match(localDeploy, /ControlPersist=60/);
+  assert.match(localDeploy, /DEPLOY_SCOPE:-auto/);
 });
 
 test('the web fast path permits the read-only request email projection', () => {
