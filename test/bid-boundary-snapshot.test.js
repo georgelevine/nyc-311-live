@@ -9,8 +9,7 @@ const test = require('node:test');
 const SNAPSHOT_PATH = path.join(
   __dirname,
   '..',
-  'public',
-  'data',
+  'exports',
   'nyc-bid-boundaries-2026-04-28.geojson'
 );
 const SNAPSHOT_SHA256 = 'c8c06c9ecb8b733aa829c9907e918e153c9a4230fa796d228ad3f27042208a9f';

@@ -23,8 +23,7 @@ const { geometryBounds } = require('../police-precincts');
 const BID_SNAPSHOT_PATH = path.join(
   __dirname,
   '..',
-  'public',
-  'data',
+  'exports',
   'nyc-bid-boundaries-2026-04-28.geojson'
 );
 
