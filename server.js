@@ -158,14 +158,22 @@ function businessImprovementDistrictFilter(req, database) {
 }
 
 function requestGeographyScope(req, database) {
+  const collectorScopeRow = tableExists(database, 'live_monitor_state')
+    ? database.prepare(`
+      SELECT value FROM live_monitor_state WHERE key='collector_scope'
+    `).get()
+    : null;
   return {
     precinct: policePrecinctFilter(req, database),
-    bid: businessImprovementDistrictFilter(req, database)
+    bid: businessImprovementDistrictFilter(req, database),
+    collectorBidOnly: (collectorScopeRow && collectorScopeRow.value === 'bid_only')
+      || (!collectorScopeRow && String(process.env.COLLECTOR_SCOPE || '')
+        .trim().toLowerCase() === 'bid_only')
   };
 }
 
 function scopeIsEmpty(scope) {
-  return !scope || (!scope.precinct && !scope.bid);
+  return !scope || (!scope.precinct && !scope.bid && !scope.collectorBidOnly);
 }
 
 function scopeParameters(scope) {
@@ -208,7 +216,21 @@ function scopePredicates(alias, scope, bidAlias = null) {
 }
 
 function scopedLiveRequestSource(alias, scope, bidAlias = `${alias}_scope_bid`) {
-  if (!scope || !scope.bid) return `live_portal_requests AS ${alias}`;
+  if (!scope || (!scope.bid && !scope.collectorBidOnly)) {
+    return `live_portal_requests AS ${alias}`;
+  }
+  if (!scope.bid) {
+    // A mixed database can retain historical citywide rows. In BID-only mode,
+    // start every unfiltered dashboard read from the distinct active-BID
+    // membership set so overlapping districts do not duplicate requests.
+    return `(SELECT DISTINCT membership.srnumber
+      FROM live_request_bid_memberships AS membership
+      JOIN business_improvement_district_boundary_versions AS boundary
+        ON boundary.version=membership.boundary_version AND boundary.active=1
+    ) AS ${bidAlias}
+      JOIN live_portal_requests AS ${alias}
+        ON ${alias}.srnumber=${bidAlias}.srnumber`;
+  }
   // Start BID-scoped reads at the small, indexed membership set. The former
   // correlated EXISTS predicate scanned the large request table in suffix
   // order and performed a membership lookup for every row it encountered.
@@ -250,6 +272,7 @@ function cachedLiveSummary(database, databasePath, scope = null) {
       + `:${scope.precinct ? scope.precinct.boundaryVersion : 'none'}`
       + `|bid:${scope.bid ? scope.bid.bidId : 'all'}`
       + `:${scope.bid ? scope.bid.boundaryVersion : 'none'}`
+      + `|collector:${scope.collectorBidOnly ? 'bid_only' : 'citywide'}`
     : `${databasePath}|geography:all`;
   const cached = liveSummaryCache.get(cacheKey);
   if (cached && cached.revision === revision && now - cached.created_at < LIVE_SUMMARY_CACHE_TTL_MS) {
@@ -265,7 +288,8 @@ function cachedLiveSummary(database, databasePath, scope = null) {
     policePrecinct: scope && scope.precinct && scope.precinct.precinct,
     policePrecinctBoundaryVersion: scope && scope.precinct && scope.precinct.boundaryVersion,
     businessImprovementDistrictId: scope && scope.bid && scope.bid.bidId,
-    businessImprovementDistrictBoundaryVersion: scope && scope.bid && scope.bid.boundaryVersion
+    businessImprovementDistrictBoundaryVersion: scope && scope.bid && scope.bid.boundaryVersion,
+    requireBidMembership: Boolean(scope && scope.collectorBidOnly)
   });
   if (!scoped && !archiveQuality) {
     archiveQualityCache.set(databasePath, {
@@ -615,6 +639,9 @@ function emptyCompactDashboardStats() {
     last_successful_poll_at: null,
     last_seen_at: null,
     poll_interval_seconds: 15,
+    collector_scope: 'citywide',
+    number_audit_mode: 'citywide_suffix_gap',
+    bid_collector: null,
     legacy_reconciliation: null
   };
 }
@@ -634,9 +661,25 @@ function compactLiveDashboardStats(database) {
   const frontierRow = stateByKey.get('live_frontier');
   const lastPollRow = stateByKey.get('last_successful_poll_at');
   const pollIntervalRow = stateByKey.get('poll_interval_seconds');
+  const collectorScopeRow = stateByKey.get('collector_scope');
+  const numberAuditModeRow = stateByKey.get('number_audit_mode');
+  const bidPollIntervalRow = stateByKey.get('bid_poll_interval_seconds');
+  const bidBoundaryVersionRow = stateByKey.get('bid_boundary_version');
+  const bidBoundaryHashRow = stateByKey.get('bid_boundary_sha256');
+  const bidPlanHashRow = stateByKey.get('bid_query_plan_hash');
+  const bidZoneCountRow = stateByKey.get('bid_query_zone_count');
   const reconciliationRow = stateByKey.get('legacy_reconciliation');
 
-  const frontier = frontierRow ? Number(frontierRow.value) : Number.NaN;
+  stats.collector_scope = collectorScopeRow && collectorScopeRow.value === 'bid_only'
+    ? 'bid_only'
+    : 'citywide';
+  stats.number_audit_mode = numberAuditModeRow && numberAuditModeRow.value
+    || (stats.collector_scope === 'bid_only'
+      ? 'not_applicable_bid_only'
+      : 'citywide_suffix_gap');
+  const frontier = stats.collector_scope === 'bid_only'
+    ? Number.NaN
+    : frontierRow ? Number(frontierRow.value) : Number.NaN;
   if (Number.isSafeInteger(frontier) && frontier >= 0) {
     stats.frontier = frontier;
   }
@@ -646,14 +689,45 @@ function compactLiveDashboardStats(database) {
   // A successful Portal poll is the lightweight freshness signal stored by
   // the collector; finding MAX(last_seen_at) would scan the request archive.
   stats.last_seen_at = lastSuccessfulPollAt;
-  const pollInterval = pollIntervalRow ? Number(pollIntervalRow.value) : Number.NaN;
+  const selectedIntervalRow = stats.collector_scope === 'bid_only'
+    ? bidPollIntervalRow
+    : pollIntervalRow;
+  const pollInterval = selectedIntervalRow
+    ? Number(selectedIntervalRow.value)
+    : Number.NaN;
   if (Number.isSafeInteger(pollInterval) && pollInterval > 0 && pollInterval <= 3_600) {
     stats.poll_interval_seconds = pollInterval;
   }
-  stats.legacy_reconciliation = sanitizeLegacyReconciliation(
-    reconciliationRow && reconciliationRow.value,
-    reconciliationRow && reconciliationRow.updated_at
-  );
+  stats.legacy_reconciliation = stats.collector_scope === 'bid_only'
+    ? null
+    : sanitizeLegacyReconciliation(
+      reconciliationRow && reconciliationRow.value,
+      reconciliationRow && reconciliationRow.updated_at
+    );
+  if (stats.collector_scope === 'bid_only') {
+    const planHash = bidPlanHashRow && bidPlanHashRow.value;
+    let failedZones = 0;
+    let saturatedZones = 0;
+    if (planHash && tableExists(database, 'bid_collector_zone_state')) {
+      const health = database.prepare(`
+        SELECT
+          SUM(CASE WHEN last_error IS NOT NULL THEN 1 ELSE 0 END) AS failed,
+          SUM(CASE WHEN saturation_count>0 THEN 1 ELSE 0 END) AS saturated
+        FROM bid_collector_zone_state
+        WHERE plan_hash=?
+      `).get(planHash);
+      failedZones = Number(health && health.failed || 0);
+      saturatedZones = Number(health && health.saturated || 0);
+    }
+    stats.bid_collector = {
+      boundary_version: bidBoundaryVersionRow && bidBoundaryVersionRow.value || null,
+      boundary_sha256: bidBoundaryHashRow && bidBoundaryHashRow.value || null,
+      plan_hash: planHash || null,
+      zone_count: Number(bidZoneCountRow && bidZoneCountRow.value || 0),
+      failed_zones: failedZones,
+      saturated_zones: saturatedZones
+    };
+  }
   return stats;
 }
 
@@ -1600,7 +1674,7 @@ app.get('/api/live-map', (req, res) => {
     const liveIndexClause = liveMapRequestIndexClause(database, scope, {
       exactSrnumber: exactQuery
     });
-    const liveRecordSource = scope && scope.bid
+    const liveRecordSource = scope && (scope.bid || scope.collectorBidOnly)
       ? liveSource
       : `${liveSource} ${liveIndexClause}`;
     const commonParameters = {
@@ -2204,6 +2278,23 @@ app.get('/api/live-dashboard', (req, res) => {
         ${closureStats}
     `);
     const totals = totalsStatement.get(totalsParameters);
+    const collectorScopeRow = database.prepare(`
+      SELECT value FROM live_monitor_state WHERE key='collector_scope'
+    `).get();
+    totals.collector_scope = collectorScopeRow && collectorScopeRow.value === 'bid_only'
+      ? 'bid_only'
+      : 'citywide';
+    totals.number_audit_mode = totals.collector_scope === 'bid_only'
+      ? 'not_applicable_bid_only'
+      : 'citywide_suffix_gap';
+    if (totals.collector_scope === 'bid_only') {
+      totals.pending = null;
+      totals.frontier = null;
+      const bidInterval = database.prepare(`
+        SELECT value FROM live_monitor_state WHERE key='bid_poll_interval_seconds'
+      `).get();
+      totals.poll_interval_seconds = Number(bidInterval && bidInterval.value || 60);
+    }
     try {
       totals.summary = cachedLiveSummary(database, databasePath, scope);
       totals.scope = {
@@ -2231,11 +2322,15 @@ app.get('/api/live-dashboard', (req, res) => {
       FROM live_monitor_state
       WHERE key = 'legacy_reconciliation'
     `).get();
-    totals.legacy_reconciliation = sanitizeLegacyReconciliation(
-      legacyReconciliationRow && legacyReconciliationRow.value,
-      legacyReconciliationRow && legacyReconciliationRow.updated_at
-    );
-    const catchupWindow = parseState(catchupWindowRow && catchupWindowRow.value);
+    totals.legacy_reconciliation = totals.collector_scope === 'bid_only'
+      ? null
+      : sanitizeLegacyReconciliation(
+        legacyReconciliationRow && legacyReconciliationRow.value,
+        legacyReconciliationRow && legacyReconciliationRow.updated_at
+      );
+    const catchupWindow = totals.collector_scope === 'bid_only'
+      ? null
+      : parseState(catchupWindowRow && catchupWindowRow.value);
     if (catchupWindow && Number.isInteger(Number(catchupWindow.low_suffix)) &&
         Number.isInteger(Number(catchupWindow.high_suffix))) {
       const low = Number(catchupWindow.low_suffix);
@@ -2367,6 +2462,14 @@ app.post('/api/live-settings', dashboardSettingsAuth, (req, res) => {
     const { DatabaseSync } = require('node:sqlite');
     database = new DatabaseSync(databasePath);
     database.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
+    const scope = database.prepare(`
+      SELECT value FROM live_monitor_state WHERE key='collector_scope'
+    `).get();
+    if (scope && scope.value === 'bid_only') {
+      return res.status(409).json({
+        error: 'BID-only polling is fixed by BID_POLL_INTERVAL_SECONDS to protect Portal capacity'
+      });
+    }
     database.prepare(`
       INSERT INTO live_monitor_state (key, value, updated_at)
       VALUES ('poll_interval_seconds', ?, ?)

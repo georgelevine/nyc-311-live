@@ -54,11 +54,30 @@ function safelyParseFields(value) {
   }
 }
 
+function withBidMembershipScope(sql, requireBidMembership) {
+  if (!requireBidMembership) return sql;
+  const marker = 'WHERE ';
+  const index = sql.indexOf(marker);
+  if (index < 0) throw new Error('Closure seed SQL has no scope insertion point');
+  const predicate = `EXISTS (
+    SELECT 1
+    FROM live_request_bid_memberships AS collector_membership
+    JOIN business_improvement_district_boundary_versions AS collector_boundary
+      ON collector_boundary.version=collector_membership.boundary_version
+     AND collector_boundary.active=1
+    WHERE collector_membership.srnumber=live.srnumber
+  ) AND `;
+  return sql.slice(0, index + marker.length)
+    + predicate
+    + sql.slice(index + marker.length);
+}
+
 function seedClosureTracking({
   db,
   closureTracker,
   updateLiveStatus,
-  now = new Date()
+  now = new Date(),
+  requireBidMembership = false
 }) {
   if (!db || typeof db.prepare !== 'function') {
     throw new TypeError('db must be an open SQLite database');
@@ -71,9 +90,18 @@ function seedClosureTracking({
   }
 
   const nowIso = now instanceof Date ? now.toISOString() : new Date(now).toISOString();
-  const seedMissingStatusHistory = db.prepare(SEED_MISSING_STATUS_HISTORY_SQL);
-  const detailRowsWithoutFollowUp = db.prepare(DETAIL_ROWS_WITHOUT_FOLLOWUP_SQL);
-  const liveRowsWithoutFollowUp = db.prepare(LIVE_ROWS_WITHOUT_FOLLOWUP_SQL);
+  const seedMissingStatusHistory = db.prepare(withBidMembershipScope(
+    SEED_MISSING_STATUS_HISTORY_SQL,
+    requireBidMembership
+  ));
+  const detailRowsWithoutFollowUp = db.prepare(withBidMembershipScope(
+    DETAIL_ROWS_WITHOUT_FOLLOWUP_SQL,
+    requireBidMembership
+  ));
+  const liveRowsWithoutFollowUp = db.prepare(withBidMembershipScope(
+    LIVE_ROWS_WITHOUT_FOLLOWUP_SQL,
+    requireBidMembership
+  ));
   let statusRows = 0;
   let followUpsSeeded = 0;
   let provisionalFollowUpsSeeded = 0;

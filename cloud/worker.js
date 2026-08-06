@@ -21,6 +21,10 @@ const AUDIT_DELAY_MINUTES = Math.max(5, Number(process.env.AUDIT_DELAY_MINUTES |
 const DETAIL_DELAY_MS = Math.max(500, Number(process.env.DETAIL_REQUEST_DELAY_MS || 750));
 const AUDIT_DELAY_MS = Math.max(500, Number(process.env.AUDIT_REQUEST_DELAY_MS || 750));
 const WORKER_LOCK_ID = 31120260720;
+const COLLECTOR_SCOPE = String(process.env.COLLECTOR_SCOPE || 'citywide').trim().toLowerCase();
+if (!['citywide', 'bid_only'].includes(COLLECTOR_SCOPE)) {
+  throw new Error('COLLECTOR_SCOPE must be citywide or bid_only');
+}
 let stopping = false;
 
 function sleep(milliseconds) {
@@ -717,6 +721,12 @@ async function seedClosureTracking() {
 }
 
 async function main() {
+  if (COLLECTOR_SCOPE === 'bid_only') {
+    throw new Error(
+      'COLLECTOR_SCOPE=bid_only is supported by the SQLite/Lightsail collector only; '
+      + 'the legacy PostgreSQL worker will not fall back to citywide collection'
+    );
+  }
   const schema = await query(`
     SELECT to_regclass('public.request_followup_queue') IS NOT NULL AS ready
   `);

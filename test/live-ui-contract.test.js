@@ -267,7 +267,7 @@ test('map startup is self-hosted, exhaustively paginated, and automatically reco
   );
   assert.match(
     dashboard,
-    /const includeTotals = Object\.keys\(dataFilters\)\.length === 0 \? 1 : 0/
+    /const includeTotals = firstDashboardPayload\s*\? 0\s*:\s*Object\.keys\(dataFilters\)\.length === 0 \? 1 : 0/
   );
   assert.match(
     dashboard,
@@ -287,7 +287,7 @@ test('map startup is self-hosted, exhaustively paginated, and automatically reco
   );
   assert.match(
     dashboard,
-    /Live collection · browsing older results/
+    /\$\{liveLabel\} · browsing older results/
   );
   assert.match(
     dashboard,
@@ -303,7 +303,7 @@ test('map startup is self-hosted, exhaustively paginated, and automatically reco
   );
   assert.match(
     dashboard,
-    /dashboardPayloadLoaded\s*\? 'Live · refresh delayed'\s*: 'Connecting · refresh delayed'/
+    /dashboardPayloadLoaded\s*\? `\$\{liveLabel\} · refresh delayed`\s*: 'Connecting · refresh delayed'/
   );
   assert.match(
     dashboard,
@@ -399,7 +399,7 @@ test('a hidden mobile filter change cannot let an old map request complete the n
 });
 
 test('map starts recent, keeps the chosen date scope during filters, and discloses the range', () => {
-  assert.equal($('#map-scope button[data-map-scope="all"]').text().trim(), 'All dates');
+  assert.equal($('#map-scope button[data-map-scope="all"]').text().trim(), 'All history');
   assert.equal($('#map-scope button[data-map-scope="all"]').attr('aria-pressed'), 'false');
   assert.equal($('#map-scope button[data-map-scope="24h"]').attr('aria-pressed'), 'true');
   assert.equal($('#map-date-range[aria-live="polite"]').length, 1);

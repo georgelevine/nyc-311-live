@@ -316,6 +316,27 @@ const MIGRATIONS = Object.freeze([
       ON nyc311_email_subscription_jobs(state,next_attempt_at,bid_id);
     CREATE INDEX nyc311_email_subscription_jobs_scope_idx
       ON nyc311_email_subscription_jobs(scope_type,scope_id,state);`
+  }),
+  Object.freeze({
+    version: 9,
+    name: 'add_bid_collector_zone_state',
+    sql: `CREATE TABLE IF NOT EXISTS bid_collector_zone_state (
+      boundary_version TEXT NOT NULL,
+      plan_hash TEXT NOT NULL CHECK(length(plan_hash)=64),
+      zone_id TEXT NOT NULL,
+      bbox_json TEXT NOT NULL CHECK(json_valid(bbox_json)),
+      last_successful_poll_at TEXT,
+      last_result_count INTEGER,
+      saturation_count INTEGER NOT NULL DEFAULT 0 CHECK(saturation_count>=0),
+      last_error TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(boundary_version,plan_hash,zone_id),
+      FOREIGN KEY(boundary_version)
+        REFERENCES business_improvement_district_boundary_versions(version) ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS bid_collector_zone_state_health_idx
+      ON bid_collector_zone_state(boundary_version,plan_hash,last_successful_poll_at);`
   })
 ]);
 

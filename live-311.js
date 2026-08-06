@@ -58,9 +58,49 @@ const {
 } = require('./monitoring-mode');
 const { reconcileStoredEmailClosures } = require('./nyc311-email-inbound');
 const { seedClosureTracking } = require('./closure-tracking-seed');
+const {
+  buildBidQueryZones,
+  canonicalizePortalPin,
+  collectorInteger,
+  deduplicatePortalPins,
+  filterPinsToBids,
+  mapWithConcurrency,
+  parseCollectorScope,
+  queryPlanHash,
+  verifyZoneCoverage,
+  zoneNeedsCatchup
+} = require('./bid-collector-scope');
+const {
+  PORTAL_CAP,
+  createBidPortalClient,
+  nycCalendarDay
+} = require('./bid-portal-recovery');
 
 const PORTAL_URL = 'https://portal.311.nyc.gov/entity-pin-fetch-service-requests/';
+const EXPECTED_BID_FEATURE_COUNT = 78;
+const COLLECTOR_SCOPE = parseCollectorScope(process.env);
+const BID_ONLY = COLLECTOR_SCOPE === 'bid_only';
 const POLL_INTERVAL_SECONDS = Math.max(5, Number(process.env.POLL_INTERVAL_SECONDS || 15));
+const BID_POLL_INTERVAL_SECONDS = collectorInteger(process.env, 'BID_POLL_INTERVAL_SECONDS', {
+  fallback: 60,
+  minimum: 30,
+  maximum: 3600
+});
+const BID_QUERY_CONCURRENCY = collectorInteger(process.env, 'BID_QUERY_CONCURRENCY', {
+  fallback: 3,
+  minimum: 1,
+  maximum: 8
+});
+const BID_QUERY_ZONE_TARGET = collectorInteger(process.env, 'BID_QUERY_ZONE_TARGET', {
+  fallback: 12,
+  minimum: 5,
+  maximum: 30
+});
+const BID_CATCHUP_MAX_DAYS = collectorInteger(process.env, 'BID_CATCHUP_MAX_DAYS', {
+  fallback: 2,
+  minimum: 1,
+  maximum: 31
+});
 const LIVE_DURATION_SECONDS = Math.max(0, Number(process.env.LIVE_DURATION_SECONDS || 0));
 const AUDIT_DELAY_MINUTES = Math.max(30, Number(process.env.AUDIT_DELAY_MINUTES || 35));
 // One detail request every 2.5 seconds leaves room for the four map polls per
@@ -84,6 +124,14 @@ const EMAIL_SUBSCRIPTION_WORKERS = Number.isFinite(configuredEmailSubscriptionWo
   ? Math.max(1, Math.min(4, Math.trunc(configuredEmailSubscriptionWorkers)))
   : 2;
 const SCHEDULED_OPEN_FOLLOWUPS_ENABLED = scheduledOpenFollowupsEnabled(process.env);
+const BID_ONLY_LIVE_SCOPE_SQL = BID_ONLY ? `AND EXISTS (
+  SELECT 1
+  FROM live_request_bid_memberships AS collector_membership
+  JOIN business_improvement_district_boundary_versions AS collector_boundary
+    ON collector_boundary.version=collector_membership.boundary_version
+   AND collector_boundary.active=1
+  WHERE collector_membership.srnumber=live.srnumber
+)` : '';
 const SQLITE_SYNCHRONOUS = resolveSynchronousMode(process.env.SQLITE_SYNCHRONOUS);
 const SQLITE_BUSY_TIMEOUT_MS = resolveBusyTimeoutMs(process.env.SQLITE_BUSY_TIMEOUT_MS);
 const DATABASE_PATH = process.env.DATABASE_PATH
@@ -252,6 +300,15 @@ const insertBusinessImprovementDistrictMembership = db.prepare(`
   INSERT INTO live_request_bid_memberships(srnumber,boundary_version,bid_id,matched_at)
   VALUES (?, ?, ?, ?)
 `);
+const upsertBusinessImprovementDistrictAssignment = db.prepare(`
+  INSERT INTO live_request_bid_assignment_versions (
+    srnumber,boundary_version,matched_at,latitude,longitude
+  ) VALUES (?, ?, ?, ?, ?)
+  ON CONFLICT(srnumber,boundary_version) DO UPDATE SET
+    matched_at=excluded.matched_at,
+    latitude=excluded.latitude,
+    longitude=excluded.longitude
+`);
 const updateLiveStatus = db.prepare(`
   UPDATE live_portal_requests SET status = ? WHERE srnumber = ?
 `);
@@ -279,6 +336,8 @@ const seedDetailQueue = db.prepare(`
          0, ?, NULL, ?
   FROM live_portal_requests AS live
   LEFT JOIN portal_requests AS details ON details.srnumber = live.srnumber
+  WHERE 1=1
+    ${BID_ONLY_LIVE_SCOPE_SQL}
 `);
 const nextDetailRequest = db.prepare(`
   SELECT queue.srnumber, queue.portal_id, queue.attempts, queue.updated_at,
@@ -292,6 +351,7 @@ const nextDetailRequest = db.prepare(`
   JOIN live_portal_requests AS live ON live.srnumber = queue.srnumber
   WHERE queue.status IN ('pending', 'retry')
     AND queue.next_attempt_at <= ?
+    ${BID_ONLY_LIVE_SCOPE_SQL}
     AND NOT EXISTS (
       SELECT 1 FROM request_followup_queue AS followup
       WHERE followup.srnumber = queue.srnumber
@@ -315,6 +375,7 @@ const nextClosingFollowUp = db.prepare(`
   WHERE queue.state = 'closing'
     AND queue.next_check_at IS NOT NULL
     AND queue.next_check_at <= ?
+    ${BID_ONLY_LIVE_SCOPE_SQL}
   ORDER BY queue.next_check_at, live.suffix DESC
   LIMIT 1
 `);
@@ -330,6 +391,7 @@ const nextOpenFollowUp = db.prepare(`
   WHERE queue.state = 'open'
     AND queue.next_check_at IS NOT NULL
     AND queue.next_check_at <= ?
+    ${BID_ONLY_LIVE_SCOPE_SQL}
   ORDER BY queue.next_check_at, live.suffix DESC
   LIMIT 1
 `);
@@ -396,6 +458,40 @@ const setState = db.prepare(`
   ON CONFLICT(key) DO UPDATE SET
     value = excluded.value,
     updated_at = excluded.updated_at
+`);
+const getBidBoundaryMetadata = db.prepare(`
+  SELECT version,source_sha256,source_date,feature_count
+  FROM business_improvement_district_boundary_versions
+  WHERE active=1 LIMIT 1
+`);
+const getBidZoneState = db.prepare(`
+  SELECT * FROM bid_collector_zone_state
+  WHERE boundary_version=? AND plan_hash=? AND zone_id=?
+`);
+const saveBidZoneSuccess = db.prepare(`
+  INSERT INTO bid_collector_zone_state (
+    boundary_version,plan_hash,zone_id,bbox_json,last_successful_poll_at,
+    last_result_count,saturation_count,last_error,updated_at
+  ) VALUES (?,?,?,?,?,?,?,NULL,?)
+  ON CONFLICT(boundary_version,plan_hash,zone_id) DO UPDATE SET
+    bbox_json=excluded.bbox_json,
+    last_successful_poll_at=excluded.last_successful_poll_at,
+    last_result_count=excluded.last_result_count,
+    saturation_count=bid_collector_zone_state.saturation_count+excluded.saturation_count,
+    last_error=NULL,
+    updated_at=excluded.updated_at
+`);
+const saveBidZoneFailure = db.prepare(`
+  INSERT INTO bid_collector_zone_state (
+    boundary_version,plan_hash,zone_id,bbox_json,last_successful_poll_at,
+    last_result_count,saturation_count,last_error,updated_at
+  ) VALUES (?,?,?,?,NULL,?,?,?,?)
+  ON CONFLICT(boundary_version,plan_hash,zone_id) DO UPDATE SET
+    bbox_json=excluded.bbox_json,
+    last_result_count=excluded.last_result_count,
+    saturation_count=bid_collector_zone_state.saturation_count+excluded.saturation_count,
+    last_error=excluded.last_error,
+    updated_at=excluded.updated_at
 `);
 const collectorStartedAt = new Date().toISOString();
 setState.run('audit_delay_minutes', String(AUDIT_DELAY_MINUTES), collectorStartedAt);
@@ -518,14 +614,19 @@ function startEmailSubscriptions() {
       try {
         const added = enqueueBidSubscriptions(db, EMAIL_SUBSCRIBE_BID_IDS);
         const precinctAdded = enqueuePrecinctSubscriptions(db, EMAIL_SUBSCRIBE_PRECINCTS, {
-          startAt: EMAIL_PRECINCT_START_AT
+          startAt: EMAIL_PRECINCT_START_AT,
+          requireBidMembership: BID_ONLY
         });
         const allAdded = EMAIL_SUBSCRIBE_ALL_NEW
-          ? enqueueAllSubscriptions(db, { startAt: EMAIL_ALL_START_AT })
+          ? enqueueAllSubscriptions(db, {
+            startAt: EMAIL_ALL_START_AT,
+            requireBidMembership: BID_ONLY
+          })
           : 0;
         const initialAdded = enqueueInitialAlerts(db, {
           bidIds: EMAIL_SUBSCRIBE_BID_IDS,
-          precincts: EMAIL_SUBSCRIBE_PRECINCTS
+          precincts: EMAIL_SUBSCRIBE_PRECINCTS,
+          requireBidMembership: BID_ONLY
         });
         if (added) {
           console.log(JSON.stringify({
@@ -550,7 +651,9 @@ function startEmailSubscriptions() {
         if (initialAdded) {
           console.log(JSON.stringify({ initial_emails_queued: initialAdded }));
         }
-        const initialJob = claimInitialAlert(db);
+        const initialJob = claimInitialAlert(db, new Date(), {
+          requireBidMembership: BID_ONLY
+        });
         if (initialJob) {
           try {
             await sendInitialAlert(initialJob);
@@ -585,7 +688,10 @@ function startEmailSubscriptions() {
       : 'newest';
     while (!detailHydrationStopping) {
       try {
-        const job = claimSubscription(db, new Date(), { order });
+        const job = claimSubscription(db, new Date(), {
+          order,
+          requireBidMembership: BID_ONLY
+        });
         if (!job) {
           await sleep(2000);
           continue;
@@ -642,11 +748,18 @@ function suffixOf(number) {
   return match ? Number(match[1]) : null;
 }
 
+function finitePortalCoordinate(value) {
+  if (value == null || String(value).trim() === '') return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
 function requestNumber(suffix) {
   return `311-${String(suffix).padStart(8, '0')}`;
 }
 
 function currentPollIntervalSeconds() {
+  if (BID_ONLY) return BID_POLL_INTERVAL_SECONDS;
   const saved = getState.get('poll_interval_seconds');
   const value = Number(saved && saved.value);
   return [5, 10, 15, 30, 60].includes(value) ? value : POLL_INTERVAL_SECONDS;
@@ -671,6 +784,10 @@ const startupFrontier = getState.get('live_frontier');
 let firstSuccessfulPoll = true;
 
 function recordSuccessfulPoll(result, observedAt) {
+  if (BID_ONLY) {
+    setState.run('last_successful_poll_at', observedAt, observedAt);
+    return;
+  }
   if (firstSuccessfulPoll) {
     firstSuccessfulPoll = false;
     const priorPollAt = startupLastSuccessfulPoll && startupLastSuccessfulPoll.value;
@@ -968,6 +1085,150 @@ function startDetailHydration() {
   ]);
 }
 
+const bidPortalClient = createBidPortalClient({
+  concurrency: BID_QUERY_CONCURRENCY,
+  timeoutMs: 30_000
+});
+let bidCollectorPlan = null;
+
+function refreshBidCollectorPlan() {
+  const boundaryMatchers = refreshActiveBoundaryMatchers(db, {
+    policePrecinctMatcher,
+    businessImprovementDistrictMatcher
+  }, {
+    loadPolicePrecinctMatcher: loadActivePolicePrecinctMatcher,
+    loadBusinessImprovementDistrictMatcher: loadActiveBusinessImprovementDistrictMatcher
+  });
+  policePrecinctMatcher = boundaryMatchers.policePrecinctMatcher;
+  businessImprovementDistrictMatcher = boundaryMatchers.businessImprovementDistrictMatcher;
+  if (!businessImprovementDistrictMatcher) {
+    throw new Error(
+      'BID-only collection requires a complete active business improvement district boundary release'
+    );
+  }
+  const metadata = getBidBoundaryMetadata.get();
+  if (!metadata
+      || metadata.version !== businessImprovementDistrictMatcher.version
+      || Number(metadata.feature_count) !== EXPECTED_BID_FEATURE_COUNT
+      || businessImprovementDistrictMatcher.districts.length !== EXPECTED_BID_FEATURE_COUNT) {
+    throw new Error('The active business improvement district boundary release is incomplete');
+  }
+  if (bidCollectorPlan && bidCollectorPlan.boundaryVersion === metadata.version
+      && bidCollectorPlan.boundaryHash === metadata.source_sha256) return bidCollectorPlan;
+
+  const zones = buildBidQueryZones(businessImprovementDistrictMatcher.districts, {
+    targetCount: BID_QUERY_ZONE_TARGET
+  });
+  const coverage = verifyZoneCoverage(businessImprovementDistrictMatcher.districts, zones);
+  if (!coverage.ok) {
+    throw new Error(
+      `BID query plan does not cover BID IDs ${coverage.uncoveredBidIds.join(', ')}`
+    );
+  }
+  const planHash = queryPlanHash(metadata.version, zones);
+  bidCollectorPlan = {
+    boundaryVersion: metadata.version,
+    boundaryHash: metadata.source_sha256,
+    featureCount: Number(metadata.feature_count),
+    planHash,
+    zones
+  };
+  return bidCollectorPlan;
+}
+
+function bidRecoveryRange(zoneState, now) {
+  const current = now instanceof Date ? now : new Date(now);
+  const prior = zoneState && zoneState.last_successful_poll_at
+    ? new Date(zoneState.last_successful_poll_at)
+    : null;
+  if (prior && Number.isFinite(prior.getTime())) {
+    const gapDays = (current.getTime() - prior.getTime()) / 86_400_000;
+    if (gapDays > BID_CATCHUP_MAX_DAYS) {
+      throw new Error(
+        `Zone has been offline for ${gapDays.toFixed(2)} days; `
+        + `automatic catch-up is limited to ${BID_CATCHUP_MAX_DAYS} days`
+      );
+    }
+  }
+  return {
+    from: prior && Number.isFinite(prior.getTime())
+      ? nycCalendarDay(prior)
+      : nycCalendarDay(current),
+    to: nycCalendarDay(current)
+  };
+}
+
+async function fetchBidOnlyPoll() {
+  const plan = refreshBidCollectorPlan();
+  const attemptedAt = new Date();
+  const outcomes = await mapWithConcurrency(
+    plan.zones,
+    BID_QUERY_CONCURRENCY,
+    async zone => {
+      const queryStartedAt = new Date().toISOString();
+      const priorState = getBidZoneState.get(
+        plan.boundaryVersion,
+        plan.planHash,
+        zone.zoneId
+      );
+      let initialCount = null;
+      let saturated = false;
+      try {
+        let pins = await bidPortalClient.query({ bbox: zone.bbox });
+        initialCount = pins.length;
+        saturated = zoneNeedsCatchup(
+          { pins, cap: PORTAL_CAP },
+          priorState && { successWatermark: priorState.last_successful_poll_at }
+        );
+        const priorSuccessMs = Date.parse(priorState && priorState.last_successful_poll_at);
+        const offlineGap = Number.isFinite(priorSuccessMs)
+          && attemptedAt.getTime() - priorSuccessMs > BID_POLL_INTERVAL_SECONDS * 2_000;
+        if (saturated || offlineGap) {
+          const range = bidRecoveryRange(priorState, attemptedAt);
+          pins = await bidPortalClient.collectRange({ bbox: zone.bbox, ...range });
+        }
+        return {
+          ok: true,
+          zone,
+          pins,
+          resultCount: pins.length,
+          initialCount,
+          saturated,
+          recovered: saturated || offlineGap,
+          watermarkAt: queryStartedAt
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          zone,
+          pins: [],
+          resultCount: initialCount,
+          initialCount,
+          saturated,
+          watermarkAt: queryStartedAt,
+          error: error.message
+        };
+      }
+    }
+  );
+  const successful = outcomes.filter(outcome => outcome.ok);
+  const uniquePins = deduplicatePortalPins(successful.flatMap(outcome => outcome.pins));
+  const accepted = filterPinsToBids(uniquePins, businessImprovementDistrictMatcher);
+  return {
+    records: accepted.map(item => item.pin),
+    rawUniqueCount: uniquePins.length,
+    rejectedCount: uniquePins.length - accepted.length,
+    expectedBoundaryVersion: plan.boundaryVersion,
+    boundaryHash: plan.boundaryHash,
+    planHash: plan.planHash,
+    zoneCount: plan.zones.length,
+    successfulZones: successful.length,
+    failedZones: outcomes.length - successful.length,
+    zoneOutcomes: outcomes,
+    attemptedAt: attemptedAt.toISOString()
+  };
+}
+
 async function fetchLatest() {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 30000);
@@ -994,14 +1255,28 @@ async function fetchLatest() {
 }
 
 function savePoll(records) {
+  const {
+    zoneOutcomes = [],
+    expectedBoundaryVersion = null,
+    planHash = null
+  } = arguments[1] || {};
   const now = new Date();
   const nowIso = now.toISOString();
   const auditAfter = new Date(now.getTime() + AUDIT_DELAY_MINUTES * 60 * 1000).toISOString();
   const numbered = records
-    .map(pin => ({ pin, suffix: suffixOf(pin.data && pin.data.srnumber) }))
+    .map(pin => {
+      const canonicalPin = canonicalizePortalPin(pin);
+      const srnumber = canonicalPin && canonicalPin.data.srnumber;
+      return {
+        pin: canonicalPin || pin,
+        suffix: suffixOf(srnumber)
+      };
+    })
     .filter(item => item.suffix != null);
-  const highest = numbered.length ? Math.max(...numbered.map(item => item.suffix)) : null;
-  const priorState = getState.get('live_frontier');
+  const highest = !BID_ONLY && numbered.length
+    ? Math.max(...numbered.map(item => item.suffix))
+    : null;
+  const priorState = BID_ONLY ? null : getState.get('live_frontier');
   const previousFrontier = priorState ? Number(priorState.value) : null;
   let newMapRecords = 0;
   let statusChanges = 0;
@@ -1020,13 +1295,18 @@ function savePoll(records) {
     policePrecinctMatcher = boundaryMatchers.policePrecinctMatcher;
     businessImprovementDistrictMatcher =
       boundaryMatchers.businessImprovementDistrictMatcher;
+    if (BID_ONLY && (!businessImprovementDistrictMatcher
+        || (expectedBoundaryVersion
+          && businessImprovementDistrictMatcher.version !== expectedBoundaryVersion))) {
+      throw new Error('The active BID boundary changed during the Portal poll; retrying safely');
+    }
     for (const { pin, suffix } of numbered) {
       const data = pin.data || {};
       const number = data.srnumber;
       const address = data.address || pin.sublabel || null;
       const geography = geographyFromPortalAddress(address);
-      const latitude = Number.isFinite(Number(pin.latitude)) ? Number(pin.latitude) : null;
-      const longitude = Number.isFinite(Number(pin.longitude)) ? Number(pin.longitude) : null;
+      const latitude = finitePortalCoordinate(pin.latitude);
+      const longitude = finitePortalCoordinate(pin.longitude);
       const existing = getLiveRequest.get(number);
       const coordinatesChanged = !existing
         || Number(existing.latitude) !== latitude
@@ -1042,7 +1322,7 @@ function savePoll(records) {
         : null;
       const bidAttempted = Boolean(
         businessImprovementDistrictMatcher && latitude != null && longitude != null
-        && (!existing
+        && (BID_ONLY || !existing
           || existing.business_improvement_district_boundary_version
             !== businessImprovementDistrictMatcher.version
           || coordinatesChanged)
@@ -1050,6 +1330,8 @@ function savePoll(records) {
       const bidMatch = bidAttempted
         ? businessImprovementDistrictMatcher.match(latitude, longitude)
         : null;
+      if (BID_ONLY && (!bidMatch || !Array.isArray(bidMatch.districts)
+          || bidMatch.districts.length === 0)) continue;
       if (!existing) newMapRecords += 1;
       const existingFollowUp = existing
         ? closureTracker.getFollowUp.get(number)
@@ -1106,6 +1388,13 @@ function savePoll(records) {
         JSON.stringify(pin)
       );
       if (bidAttempted) {
+        upsertBusinessImprovementDistrictAssignment.run(
+          number,
+          businessImprovementDistrictMatcher.version,
+          nowIso,
+          latitude,
+          longitude
+        );
         clearBusinessImprovementDistrictMemberships.run(number);
         for (const district of bidMatch && bidMatch.districts || []) {
           insertBusinessImprovementDistrictMembership.run(
@@ -1117,12 +1406,14 @@ function savePoll(records) {
         }
       }
       upsertDetailQueue.run(number, pin.id || null, nowIso, nowIso);
-      saveMapLedger.run(suffix, number, nowIso);
-      markNumberSeenOnMap.run(nowIso, suffix);
+      if (!BID_ONLY) {
+        saveMapLedger.run(suffix, number, nowIso);
+        markNumberSeenOnMap.run(nowIso, suffix);
+      }
     }
 
     let queued = 0;
-    if (highest != null && previousFrontier != null && highest > previousFrontier) {
+    if (!BID_ONLY && highest != null && previousFrontier != null && highest > previousFrontier) {
       const mapSuffixes = new Set(numbered.map(item => item.suffix));
       for (let suffix = previousFrontier + 1; suffix <= highest; suffix += 1) {
         upsertQueue.run(
@@ -1136,10 +1427,40 @@ function savePoll(records) {
       }
     }
 
-    if (highest != null && (previousFrontier == null || highest > previousFrontier)) {
+    if (!BID_ONLY && highest != null && (previousFrontier == null || highest > previousFrontier)) {
       setState.run('live_frontier', String(highest), nowIso);
     }
-    markMapQueueFound.run(nowIso);
+    if (!BID_ONLY) markMapQueueFound.run(nowIso);
+    if (BID_ONLY) {
+      for (const outcome of zoneOutcomes) {
+        const bboxJson = JSON.stringify(outcome.zone.bbox);
+        const saturated = outcome.saturated ? 1 : 0;
+        if (outcome.ok) {
+          saveBidZoneSuccess.run(
+            expectedBoundaryVersion,
+            planHash,
+            outcome.zone.zoneId,
+            bboxJson,
+            outcome.watermarkAt || nowIso,
+            outcome.resultCount,
+            saturated,
+            nowIso
+          );
+        } else {
+          saveBidZoneFailure.run(
+            expectedBoundaryVersion,
+            planHash,
+            outcome.zone.zoneId,
+            bboxJson,
+            outcome.resultCount,
+            saturated,
+            String(outcome.error || 'Portal zone poll failed').slice(0, 1000),
+            nowIso
+          );
+        }
+      }
+      setState.run('bid_collector_last_attempt_at', nowIso, nowIso);
+    }
     db.exec('COMMIT');
     return {
       highest,
@@ -1147,7 +1468,9 @@ function savePoll(records) {
       newMapRecords,
       queued,
       statusChanges,
-      closureRefreshesQueued
+      closureRefreshesQueued,
+      successfulZones: BID_ONLY ? zoneOutcomes.filter(outcome => outcome.ok).length : null,
+      failedZones: BID_ONLY ? zoneOutcomes.filter(outcome => !outcome.ok).length : null
     };
   } catch (error) {
     db.exec('ROLLBACK');
@@ -1293,24 +1616,58 @@ function startEligibleAudit() {
 async function main() {
   const started = Date.now();
   let polls = 0;
-  const startupPromotion = promoteAuditDiscoveries({
-    db,
-    closureTracker,
-    observedAt: new Date().toISOString()
-  });
+  const startupStateAt = new Date().toISOString();
+  setState.run('collector_scope', COLLECTOR_SCOPE, startupStateAt);
+  setState.run(
+    'number_audit_mode',
+    BID_ONLY ? 'not_applicable_bid_only' : 'citywide_suffix_gap',
+    startupStateAt
+  );
+  let startupBidPlan = null;
+  if (BID_ONLY) {
+    try {
+      startupBidPlan = refreshBidCollectorPlan();
+      db.prepare(`
+        DELETE FROM live_monitor_state WHERE key='bid_collector_startup_error'
+      `).run();
+    } catch (error) {
+      setState.run(
+        'bid_collector_startup_error',
+        String(error.message || error).slice(0, 1000),
+        startupStateAt
+      );
+      throw error;
+    }
+  }
+  if (startupBidPlan) {
+    setState.run('bid_boundary_version', startupBidPlan.boundaryVersion, startupStateAt);
+    setState.run('bid_boundary_sha256', startupBidPlan.boundaryHash, startupStateAt);
+    setState.run('bid_query_plan_hash', startupBidPlan.planHash, startupStateAt);
+    setState.run('bid_query_zone_count', String(startupBidPlan.zones.length), startupStateAt);
+    setState.run('bid_poll_interval_seconds', String(BID_POLL_INTERVAL_SECONDS), startupStateAt);
+  }
+  const startupPromotion = BID_ONLY ? { promoted: 0, conflicts: 0, invalid: 0 }
+    : promoteAuditDiscoveries({
+      db,
+      closureTracker,
+      observedAt: startupStateAt
+    });
   const detailQueueSeededAt = new Date().toISOString();
   seedDetailQueue.run(detailQueueSeededAt, detailQueueSeededAt);
   const detailQueueReconciled = reconcileStoredDetails(db, {
-    updatedAt: detailQueueSeededAt
+    updatedAt: detailQueueSeededAt,
+    requireBidMembership: BID_ONLY
   });
   const seeded = seedClosureTracking({
     db,
     closureTracker,
     updateLiveStatus,
-    now: new Date()
+    now: new Date(),
+    requireBidMembership: BID_ONLY
   });
   const emailClosuresReconciled = reconcileStoredEmailClosures(db, {
-    now: new Date()
+    now: new Date(),
+    requireBidMembership: BID_ONLY
   });
   const openFollowUpsRescheduled = SCHEDULED_OPEN_FOLLOWUPS_ENABLED
     ? closureTracker.normalizeOpenFollowUps(new Date())
@@ -1333,6 +1690,7 @@ async function main() {
   setState.run('detail_hydration_lanes', '2', monitoringStateAt);
   console.log(JSON.stringify({
     database: DATABASE_PATH,
+    collector_scope: COLLECTOR_SCOPE,
     poll_interval_seconds: currentPollIntervalSeconds(),
     duration_seconds: LIVE_DURATION_SECONDS || null,
     delayed_audit_minutes: AUDIT_DELAY_MINUTES,
@@ -1355,7 +1713,12 @@ async function main() {
       emailClosuresReconciled.skipped_later_open_status,
     open_followups_rescheduled: openFollowUpsRescheduled,
     scheduled_open_followups_enabled: SCHEDULED_OPEN_FOLLOWUPS_ENABLED,
-    status_monitoring_mode: monitoringMode(process.env)
+    status_monitoring_mode: monitoringMode(process.env),
+    bid_boundary_version: startupBidPlan && startupBidPlan.boundaryVersion,
+    bid_boundary_sha256: startupBidPlan && startupBidPlan.boundaryHash,
+    bid_query_zone_count: startupBidPlan && startupBidPlan.zones.length,
+    bid_query_plan_hash: startupBidPlan && startupBidPlan.planHash,
+    number_audit_mode: BID_ONLY ? 'not_applicable_bid_only' : 'citywide_suffix_gap'
   }));
   startDetailHydration();
   startEmailSubscriptions();
@@ -1363,16 +1726,32 @@ async function main() {
   while (!stopRequested
       && (LIVE_DURATION_SECONDS === 0 || Date.now() - started < LIVE_DURATION_SECONDS * 1000)) {
     try {
-      const records = await fetchLatest();
-      const result = savePoll(records);
+      const bidPoll = BID_ONLY ? await fetchBidOnlyPoll() : null;
+      const records = bidPoll ? bidPoll.records : await fetchLatest();
+      const result = savePoll(records, bidPoll ? {
+        zoneOutcomes: bidPoll.zoneOutcomes,
+        expectedBoundaryVersion: bidPoll.expectedBoundaryVersion,
+        planHash: bidPoll.planHash
+      } : undefined);
       const observedAt = new Date().toISOString();
-      recordSuccessfulPoll(result, observedAt);
+      const completePoll = !bidPoll || bidPoll.failedZones === 0;
+      if (completePoll) recordSuccessfulPoll(result, observedAt);
       polls += 1;
-      settleFirstPoll({ ok: true, observed_at: observedAt, records: records.length });
+      settleFirstPoll({
+        ok: completePoll,
+        observed_at: observedAt,
+        records: records.length,
+        failed_zones: bidPoll ? bidPoll.failedZones : 0
+      });
       console.log(JSON.stringify({
         poll: polls,
         observed_at: observedAt,
+        collector_scope: COLLECTOR_SCOPE,
         feed_records: records.length,
+        raw_unique_zone_records: bidPoll && bidPoll.rawUniqueCount,
+        rejected_non_bid_records: bidPoll && bidPoll.rejectedCount,
+        successful_zones: bidPoll && bidPoll.successfulZones,
+        failed_zones: bidPoll && bidPoll.failedZones,
         new_map_records: result.newMapRecords,
         previous_frontier: result.previousFrontier,
         latest_frontier: result.highest,
@@ -1380,8 +1759,10 @@ async function main() {
         status_changes: result.statusChanges,
         closure_refreshes_queued: result.closureRefreshesQueued
       }));
-      const audit = startEligibleAudit();
-      if (audit.started) console.log(JSON.stringify({ delayed_audit: 'background', ...audit }));
+      if (!BID_ONLY) {
+        const audit = startEligibleAudit();
+        if (audit.started) console.log(JSON.stringify({ delayed_audit: 'background', ...audit }));
+      }
     } catch (error) {
       settleFirstPoll({ ok: false, error: error.message });
       console.error(JSON.stringify({ poll: polls + 1, error: error.message }));

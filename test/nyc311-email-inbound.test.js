@@ -200,13 +200,13 @@ function signedHeaders(raw, recipient, metadata = signedMetadata(recipient), {
 test('email migrations create durable event, alias, and subscription job tables', t => {
   const { database } = createDatabase(t);
   t.after(() => database.close());
-  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 8);
+  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 9);
   assert.equal(MIGRATIONS.some(item => item.name === 'add_nyc311_email_ingestion'), true);
   assert.equal(MIGRATIONS.some(
     item => item.name === 'add_nyc311_email_subscription_jobs'
   ), true);
   assert.equal(MIGRATIONS.some(item => item.name === 'add_nyc311_initial_email_jobs'), true);
-  assert.equal(MIGRATIONS.at(-1).name, 'allow_all_nyc311_email_monitoring_scope');
+  assert.equal(MIGRATIONS.at(-1).name, 'add_bid_collector_zone_state');
   const tables = new Set(database.prepare(`
     SELECT name FROM sqlite_master WHERE type='table'
   `).all().map(row => row.name));
@@ -418,6 +418,49 @@ test('persists a matched closure idempotently, updates status, and wakes Portal 
     database.prepare('SELECT COUNT(*) AS count FROM request_status_history').get().count,
     1
   );
+});
+
+test('BID-only inbound intake stores non-BID mail without changing status or forwarding it', t => {
+  const { database } = createDatabase(t);
+  t.after(() => database.close());
+  const alias = createRequestAlias(database, {
+    srnumber: '311-28327449',
+    domain: DOMAIN,
+    now: NOW,
+    randomBytes: deterministicRandom
+  });
+  database.prepare(`
+    INSERT INTO business_improvement_district_boundary_versions (
+      version,source_url,source_sha256,source_date,imported_at,feature_count,active
+    ) VALUES (?,?,?,?,?,?,1)
+  `).run(
+    'test-bids',
+    'https://example.test/bids.geojson',
+    'a'.repeat(64),
+    'test',
+    NOW.toISOString(),
+    1
+  );
+  const raw = Buffer.from('From: SRNotice@customercare.nyc.gov\r\n\r\nclosed outside BID');
+  const result = persistInboundEmail(database, {
+    raw,
+    parsed: parsedClosed({ recipient: alias.recipient_address }),
+    metadata: signedMetadata(alias.recipient_address, { messageId: 'non-bid-message' }),
+    envelopeRecipient: alias.recipient_address,
+    inboundDomain: DOMAIN,
+    now: NOW,
+    requireBidMembership: true
+  });
+  assert.equal(result.duplicate, false);
+  assert.equal(result.authoritative_status_observed, 0);
+  assert.equal(result.closure_wake_queued, 0);
+  assert.equal(result.forward, null);
+  assert.equal(database.prepare(`
+    SELECT status FROM live_portal_requests WHERE srnumber='311-28327449'
+  `).get().status, 'In Progress');
+  assert.equal(database.prepare(`
+    SELECT closure_wake_queued FROM nyc311_email_events WHERE id=?
+  `).get(result.id).closure_wake_queued, 0);
 });
 
 test('stores a forwarded closure but does not treat its attached From header as authoritative', t => {

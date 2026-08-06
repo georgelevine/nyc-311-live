@@ -17,6 +17,7 @@ const OFFICIAL_GEOJSON_URL = 'https://services6.arcgis.com/yG5s3afENB5iO9fj/arcg
 const DEFAULT_VERSION = '2026-04-28';
 const DEFAULT_SOURCE_DATE = 'April 28, 2026';
 const DEFAULT_SHA256 = 'a6600c7561dbfc0b077d80c1e4bbf981771a074e371952e7882fef8d93169d6b';
+const DEFAULT_EXPORT_SHA256 = 'c8c06c9ecb8b733aa829c9907e918e153c9a4230fa796d228ad3f27042208a9f';
 
 function usage() {
   return `Usage: node import-business-improvement-districts.js [options]
@@ -27,7 +28,7 @@ Options:
   --url URL          Boundary URL (defaults to the pinned NYC Maps GeoJSON query)
   --version VERSION  Boundary release label (default: ${DEFAULT_VERSION})
   --source-date TEXT Human-readable data date (default: ${DEFAULT_SOURCE_DATE})
-  --sha256 DIGEST    Required source digest (default: pinned release digest)
+  --sha256 DIGEST    Required digest (defaults to the pinned raw or normalized export digest)
   --batch-size N     Backfill transaction size (default: 500)
   --help             Show this message`;
 }
@@ -40,7 +41,8 @@ function parseArgs(argv) {
     version: DEFAULT_VERSION,
     sourceDate: DEFAULT_SOURCE_DATE,
     sha256: DEFAULT_SHA256,
-    batchSize: 500
+    batchSize: 500,
+    sha256Explicit: false
   };
   const valueOptions = new Map([
     ['--db', 'databasePath'], ['--file', 'file'], ['--url', 'url'],
@@ -53,6 +55,7 @@ function parseArgs(argv) {
     const key = valueOptions.get(argument);
     if (!key || index + 1 >= argv.length) throw new Error(`Unknown or incomplete option: ${argument}`);
     options[key] = argv[++index];
+    if (argument === '--sha256') options.sha256Explicit = true;
   }
   options.databasePath = path.resolve(options.databasePath);
   if (options.file) options.file = path.resolve(options.file);
@@ -356,8 +359,13 @@ async function main() {
   }
   const bytes = await sourceBytes(options);
   const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
-  if (sha256 !== options.sha256) {
-    throw new Error(`Boundary SHA-256 mismatch: expected ${options.sha256}, received ${sha256}`);
+  const acceptedDigests = options.sha256Explicit
+    ? [options.sha256]
+    : [options.sha256, DEFAULT_EXPORT_SHA256];
+  if (!acceptedDigests.includes(sha256)) {
+    throw new Error(
+      `Boundary SHA-256 mismatch: expected ${acceptedDigests.join(' or ')}, received ${sha256}`
+    );
   }
   const collection = parseBoundarySource(bytes);
   const districts = normalizeBusinessImprovementDistrictCollection(collection, { expectedCount: 78 });
@@ -412,6 +420,7 @@ if (require.main === module) {
 
 module.exports = {
   DEFAULT_SHA256,
+  DEFAULT_EXPORT_SHA256,
   DEFAULT_SOURCE_DATE,
   DEFAULT_VERSION,
   OFFICIAL_GEOJSON_URL,

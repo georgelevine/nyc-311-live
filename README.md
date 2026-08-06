@@ -1,9 +1,11 @@
 # NYC 311 Live
 
 NYC 311 Live is a local-first collector and monitoring dashboard for public
-NYC311 service requests. It captures the Portal's live map feed, audits missing
-request numbers, stores public request details in SQLite, follows requests until
-closure, and displays the archive in a macOS dashboard with a live map.
+NYC311 service requests. Its default citywide scope captures the Portal's live
+map feed and audits missing request numbers. An opt-in BID-only scope instead
+captures only exact Business Improvement District polygon matches. Both scopes
+store public request details in SQLite, follow admitted requests until closure,
+and display the archive in a dashboard with a live map.
 
 ## What it stores
 
@@ -15,7 +17,8 @@ closure, and displays the archive in a macOS dashboard with a live map.
 - Status history, scheduled follow-ups, and closure snapshots
 - Per-request NYC311 Submitted, Updated, and Closed subscription emails,
   including parsed agency routing and response text
-- Audit-only requests that do not appear in the Portal's map feed
+- In citywide mode, audit-only requests that do not appear in the Portal's map
+  feed
 
 The live database is intentionally excluded from Git. It remains on the Mac at:
 
@@ -57,6 +60,59 @@ npm run desktop:package
 - `npm run cloud:web` — run the cloud dashboard service
 - `npm run cloud:worker` — run the cloud collector and monitoring worker
 
+## Collector scopes
+
+`COLLECTOR_SCOPE=citywide` is the backward-compatible default. It keeps the
+citywide Portal map poll, SR-number frontier, and delayed suffix-gap audit.
+
+`COLLECTOR_SCOPE=bid_only` is supported by the SQLite collector used locally and
+by the current Lightsail deployment. In this mode:
+
+- The collector queries 12 deterministic rectangular zones with bounded
+  concurrency. Those rectangles are retrieval tools only.
+- A request is written only when it has finite Portal coordinates and the point
+  is covered by at least one polygon in the complete active 78-feature BID
+  release.
+- Rectangle-only matches and coordinate-less requests are discarded before any
+  request, detail, closure, or subscription work is queued.
+- One request can retain multiple BID memberships without being counted twice.
+- The citywide SR-number frontier and gap audit are disabled and reported as
+  not applicable.
+- A 100-record Portal response or an offline gap enters resumable date/spatial
+  recovery. Each zone has its own success watermark; a failed recovery preserves
+  the prior watermark and appears in health output.
+- Startup fails closed if the active BID release is missing or incomplete. It
+  never falls back to citywide collection.
+
+Use a dedicated database for a clean BID-only archive. A mixed database is also
+safe: background work and unfiltered dashboard, map, and summary reads are
+automatically restricted to requests with an active BID membership, while old
+citywide rows remain intact.
+
+Install the pinned boundary release into the exact collector database first:
+
+```bash
+npm run bids:import -- \
+  --db /absolute/path/to/bid-only-portal-archive.sqlite \
+  --file exports/nyc-bid-boundaries-2026-04-28.geojson
+```
+
+Then run a finite smoke test:
+
+```bash
+COLLECTOR_SCOPE=bid_only \
+DATABASE_PATH=/absolute/path/to/bid-only-portal-archive.sqlite \
+LIVE_DURATION_SECONDS=75 \
+BID_POLL_INTERVAL_SECONDS=60 \
+BID_QUERY_CONCURRENCY=3 \
+BID_QUERY_ZONE_TARGET=12 \
+npm run live:monitor
+```
+
+The legacy PostgreSQL `cloud/worker.js` path deliberately rejects `bid_only`
+instead of silently collecting citywide data. No production scope is changed
+until its environment is explicitly updated and the service is deployed.
+
 ## Cloud deployment
 
 The recommended first deployment keeps SQLite on a single inexpensive Lightsail
@@ -89,8 +145,9 @@ release.
 `GET /api/live-summary` returns the same deterministic statistics shown in the
 dashboard. It does not call an AI service. The newest and preceding 15-minute
 windows use Portal map-feed discoveries only and are explicitly marked
-provisional. A separate delayed window combines map and request-number-audit
-discoveries without claiming the audit is complete. The response also reports
+provisional. In citywide mode, a separate delayed window combines map and
+request-number-audit discoveries without claiming the audit is complete. In
+BID-only mode, number auditing is not applicable. The response also reports
 collector freshness, archive time coverage, missing submitted times, request
 type and borough distributions, and detail/map-pin coverage.
 
@@ -114,9 +171,11 @@ selected district's complete GeoJSON feature is available from
 
 ## Data-source note
 
-Coordinates are stored only when supplied by the NYC311 Portal. Audit-recovered
-requests without Portal coordinates remain in the archive and incoming feed but
-are not assigned derived or fabricated map positions. Precincts are derived
+Coordinates are stored only when supplied by the NYC311 Portal. In citywide
+mode, audit-recovered requests without Portal coordinates remain in the archive
+and incoming feed but are not assigned derived or fabricated map positions. In
+BID-only mode, a request without Portal coordinates cannot establish polygon
+membership and is not admitted. Precincts are derived
 locally by matching those coordinates to the versioned official NYC Department
 of City Planning [police-precinct boundary dataset](https://www.nyc.gov/content/planning/pages/resources/datasets/police-precincts);
 the polygons live in related tables while the matched precinct and boundary

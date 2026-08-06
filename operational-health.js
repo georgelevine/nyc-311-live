@@ -185,7 +185,14 @@ function unavailableComponent(reason = 'database_unavailable') {
 
 function mapDiscoveryComponent(database, nowMs, thresholds) {
   const lastPollRow = readState(database, 'last_successful_poll_at');
-  const intervalRow = readState(database, 'poll_interval_seconds');
+  const scopeRow = readState(database, 'collector_scope');
+  const collectorScope = scopeRow && scopeRow.value === 'bid_only'
+    ? 'bid_only'
+    : 'citywide';
+  const intervalRow = readState(
+    database,
+    collectorScope === 'bid_only' ? 'bid_poll_interval_seconds' : 'poll_interval_seconds'
+  );
   const lastPollAt = isoTimestamp(lastPollRow && lastPollRow.value);
   const pollIntervalSeconds = Math.max(
     5,
@@ -200,38 +207,74 @@ function mapDiscoveryComponent(database, nowMs, thresholds) {
     thresholds.collectorAttentionFloorSeconds,
     pollIntervalSeconds * 20
   );
+  let bidZoneHealth = null;
+  let bidStartupFailed = false;
+  if (collectorScope === 'bid_only') {
+    const startupError = readState(database, 'bid_collector_startup_error');
+    bidStartupFailed = Boolean(startupError && startupError.value);
+    const plan = readState(database, 'bid_query_plan_hash');
+    if (plan && plan.value) {
+      const configuredZones = readState(database, 'bid_query_zone_count');
+      const failed = database.prepare(`
+        SELECT zone_id FROM bid_collector_zone_state
+        WHERE plan_hash=? AND last_error IS NOT NULL LIMIT 1
+      `).get(plan.value);
+      const saturated = database.prepare(`
+        SELECT zone_id FROM bid_collector_zone_state
+        WHERE plan_hash=? AND saturation_count>0 LIMIT 1
+      `).get(plan.value);
+      bidZoneHealth = {
+        plan_hash: plan.value,
+        zone_count: safeInteger(configuredZones && configuredZones.value),
+        failed_zones: failed ? 1 : 0,
+        saturated_zones: saturated ? 1 : 0
+      };
+    }
+  }
 
   if (!lastPollRow || !lastPollAt) {
     return {
       status: 'attention',
-      reason: 'poll_missing',
+      reason: bidStartupFailed ? 'bid_boundary_startup_failed' : 'poll_missing',
       available: true,
       last_successful_poll_at: null,
       poll_age_seconds: null,
-      poll_interval_seconds: pollIntervalSeconds
+      poll_interval_seconds: pollIntervalSeconds,
+      collector_scope: collectorScope,
+      bid_zones: bidZoneHealth
     };
   }
   if (pollAgeSeconds == null) {
     return {
       status: 'attention',
-      reason: 'poll_timestamp_invalid',
+      reason: bidStartupFailed ? 'bid_boundary_startup_failed' : 'poll_timestamp_invalid',
       available: true,
       last_successful_poll_at: lastPollAt,
       poll_age_seconds: null,
-      poll_interval_seconds: pollIntervalSeconds
+      poll_interval_seconds: pollIntervalSeconds,
+      collector_scope: collectorScope,
+      bid_zones: bidZoneHealth
     };
   }
+  const failedBidZones = bidStartupFailed
+    || (bidZoneHealth && bidZoneHealth.failed_zones > 0);
   return {
-    status: pollAgeSeconds <= healthyWindow
+    status: failedBidZones
+      ? 'attention'
+      : pollAgeSeconds <= healthyWindow
       ? 'healthy'
       : pollAgeSeconds <= attentionWindow ? 'delayed' : 'attention',
-    reason: pollAgeSeconds <= healthyWindow
+    reason: failedBidZones
+      ? bidStartupFailed ? 'bid_boundary_startup_failed' : 'bid_zone_poll_failed'
+      : pollAgeSeconds <= healthyWindow
       ? 'poll_fresh'
       : pollAgeSeconds <= attentionWindow ? 'poll_delayed' : 'poll_stale',
     available: true,
     last_successful_poll_at: lastPollAt,
     poll_age_seconds: pollAgeSeconds,
-    poll_interval_seconds: pollIntervalSeconds
+    poll_interval_seconds: pollIntervalSeconds,
+    collector_scope: collectorScope,
+    bid_zones: bidZoneHealth
   };
 }
 

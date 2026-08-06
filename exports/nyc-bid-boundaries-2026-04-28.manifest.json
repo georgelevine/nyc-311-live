@@ -1,0 +1,26 @@
+{
+  "dataset": "NYC Business Improvement District Boundaries",
+  "boundary_version": "2026-04-28",
+  "source_date": "April 28, 2026",
+  "source_url": "https://services6.arcgis.com/yG5s3afENB5iO9fj/arcgis/rest/services/BusinessImprovementDistrict_view/FeatureServer/0/query?where=1%3D1&outFields=BIDID%2CBID%2CBOROUGH&returnGeometry=true&outSR=4326&orderByFields=BIDID&f=geojson",
+  "source_sha256": "a6600c7561dbfc0b077d80c1e4bbf981771a074e371952e7882fef8d93169d6b",
+  "export_file": "nyc-bid-boundaries-2026-04-28.geojson",
+  "export_sha256": "c8c06c9ecb8b733aa829c9907e918e153c9a4230fa796d228ad3f27042208a9f",
+  "export_format": "GeoJSON (RFC 7946-compatible)",
+  "coordinate_reference_system": "EPSG:4326",
+  "coordinate_order": "longitude, latitude",
+  "feature_count": 78,
+  "geometry_types": {
+    "Polygon": 73,
+    "MultiPolygon": 5
+  },
+  "fields": {
+    "bid_id": "Stable numeric BID identifier from the official boundary source",
+    "name": "Business Improvement District name",
+    "borough_code": "NYC borough code (1 Manhattan, 2 Bronx, 3 Brooklyn, 4 Queens, 5 Staten Island)",
+    "borough": "Borough name",
+    "boundary_version": "Pinned boundary release used by NYC 311 Live",
+    "source_date": "Human-readable source snapshot date"
+  },
+  "intended_use": "Upload the GeoJSON file to another application; retain this manifest for provenance and checksum verification."
+}

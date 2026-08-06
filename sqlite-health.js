@@ -34,6 +34,11 @@ function inspectSqliteHealth(databasePath, {
           WHERE key = 'last_successful_poll_at'
         `).get()
       : null;
+    const scopeRow = hasState
+      ? database.prepare(`
+          SELECT value FROM live_monitor_state WHERE key='collector_scope'
+        `).get()
+      : null;
     const lastPoll = row && row.value ? String(row.value) : null;
     const lastPollMs = lastPoll ? Date.parse(lastPoll) : NaN;
     const materiallyFuture = Number.isFinite(lastPollMs)
@@ -51,6 +56,7 @@ function inspectSqliteHealth(databasePath, {
       status: collector === 'fresh' ? 'ok' : 'degraded',
       database: 'ok',
       collector,
+      collector_scope: scopeRow && scopeRow.value === 'bid_only' ? 'bid_only' : 'citywide',
       last_successful_poll_at: lastPoll,
       poll_age_seconds: ageSeconds == null ? null : Math.round(ageSeconds)
     };

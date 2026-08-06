@@ -88,11 +88,18 @@
   const feed = document.getElementById('request-feed');
   const feedCoverage = document.getElementById('feed-coverage');
   const appShell = document.querySelector('.app-shell');
+  const appTitle = document.getElementById('app-title');
+  const collectorScopeBadge = document.getElementById('collector-scope-badge');
   const mobileViewTabs = document.querySelector('.mobile-view-tabs');
+  const overviewTitle = document.getElementById('overview-title');
+  const overviewDescription = document.getElementById('overview-description');
+  const requestsViewEyebrow = document.getElementById('requests-view-eyebrow');
+  const requestsViewTitle = document.getElementById('requests-view-title');
   const search = document.getElementById('request-search');
   const statusFilter = document.getElementById('status-filter');
   const precinctFilter = document.getElementById('precinct-filter');
   const bidFilter = document.getElementById('bid-filter');
+  const bidScopeFilter = document.getElementById('bid-scope-filter');
   const connection = document.querySelector('.live-state');
   const connectionLabel = document.getElementById('connection-label');
   const pollInterval = document.getElementById('poll-interval');
@@ -102,7 +109,9 @@
   const mapDateRange = document.getElementById('map-date-range');
   const mapLoadStatus = document.getElementById('map-load-status');
   const mapBoundaryKey = document.getElementById('map-boundary-key');
+  const mapCollectorScope = document.getElementById('map-collector-scope');
   const requestFilters = document.getElementById('request-filters');
+  const requestFiltersLabel = document.getElementById('request-filters-label');
   const activeFilterCount = document.getElementById('active-filter-count');
   const detailsPending = document.getElementById('details-pending');
   const detailsPendingCount = document.getElementById('details-pending-count');
@@ -147,6 +156,7 @@
     comparison: document.getElementById('summary-comparison'),
     categories: document.getElementById('summary-categories'),
     otherCategories: document.getElementById('summary-other-categories'),
+    geographyLabel: document.getElementById('summary-geography-label'),
     boroughs: document.getElementById('summary-boroughs'),
     otherBoroughs: document.getElementById('summary-other-boroughs'),
     coverage: document.getElementById('summary-coverage'),
@@ -154,6 +164,21 @@
     status: document.getElementById('city-summary-status')
   };
   const hasSummaryElements = Object.values(summaryElements).every(Boolean);
+  const collectorScopeElements = {
+    root: document.getElementById('collector-scope-banner'),
+    title: document.getElementById('collector-scope-title'),
+    detail: document.getElementById('collector-scope-detail'),
+    zoneHealth: document.getElementById('collector-zone-health'),
+    cadence: document.getElementById('collector-cadence'),
+    districts: document.getElementById('bid-network-districts'),
+    zones: document.getElementById('bid-network-zones'),
+    healthyZones: document.getElementById('bid-network-zone-health'),
+    lastCheck: document.getElementById('bid-network-last-check'),
+    choose: document.getElementById('bid-network-choose'),
+    feedRoot: document.getElementById('bid-feed-scope'),
+    feedLabel: document.getElementById('bid-feed-scope-label')
+  };
+  const hasCollectorScopeElements = Object.values(collectorScopeElements).every(Boolean);
   const healthComponentNames = [
     'database',
     'collector',
@@ -285,6 +310,9 @@
   let dashboardAbortController = null;
   let lastMapRefreshStartedAt = 0;
   let currentPollSeconds = 15;
+  let currentCollectorScope = 'citywide';
+  let currentBidCollector = null;
+  let currentCollectorStats = null;
   let lastPortalCheck = null;
   let dashboardRefreshDelayed = false;
   let portalDetailByNumber = new Map();
@@ -987,9 +1015,11 @@
   function updateMapCountText() {
     if (!mapStats.totals_available) {
       const hasMutableDisplayFilters = Object.keys(activeDataFilters()).length > 0;
-      const label = hasMutableDisplayFilters && mapArchiveLoaded
-        ? `${mapShownCount.toLocaleString()} matching map ${mapShownCount === 1 ? 'pin' : 'pins'} shown · complete ${mapScopeLabel().toLowerCase()} map loaded`
-        : `${mapShownCount.toLocaleString()} matching · ${mapRecords.length.toLocaleString()} pins loaded`;
+      const label = currentCollectorScope === 'bid_only'
+        ? `${mapShownCount.toLocaleString()} BID ${mapShownCount === 1 ? 'request' : 'requests'} shown · ${mapRecords.length.toLocaleString()} exact-boundary pins loaded`
+        : hasMutableDisplayFilters && mapArchiveLoaded
+          ? `${mapShownCount.toLocaleString()} matching map ${mapShownCount === 1 ? 'pin' : 'pins'} shown · complete ${mapScopeLabel().toLowerCase()} map loaded`
+          : `${mapShownCount.toLocaleString()} matching · ${mapRecords.length.toLocaleString()} pins loaded`;
       if (mapCounts.textContent !== label) mapCounts.textContent = label;
       return;
     }
@@ -1007,7 +1037,9 @@
     const pendingDetailsLabel = mapPendingShownCount
       ? ` · ${mapPendingShownCount.toLocaleString()} showing while submitted details load`
       : '';
-    const label = `${mapShownCount.toLocaleString()} matching · ${loadedLabel}${pendingDetailsLabel} · ${unmapped.toLocaleString()} without coordinates`;
+    const label = currentCollectorScope === 'bid_only'
+      ? `${mapShownCount.toLocaleString()} BID ${mapShownCount === 1 ? 'request' : 'requests'} shown · ${loadedLabel}${pendingDetailsLabel}`
+      : `${mapShownCount.toLocaleString()} matching · ${loadedLabel}${pendingDetailsLabel} · ${unmapped.toLocaleString()} without coordinates`;
     if (mapCounts.textContent !== label) mapCounts.textContent = label;
   }
 
@@ -1904,24 +1936,27 @@
 
   function updateConnectionLabel(now = new Date()) {
     if (connection.classList.contains('offline')) return;
+    const liveLabel = currentCollectorScope === 'bid_only' ? 'BID network' : 'Live';
     if (browsingDeepFilteredResults()) {
-      connectionLabel.textContent = 'Live collection · browsing older results';
+      connectionLabel.textContent = `${liveLabel} · browsing older results`;
       return;
     }
     if (dashboardRefreshDelayed) {
       connectionLabel.textContent = dashboardPayloadLoaded
-        ? 'Live · refresh delayed'
+        ? `${liveLabel} · refresh delayed`
         : 'Connecting · refresh delayed';
       return;
     }
     if (!lastPortalCheck || Number.isNaN(lastPortalCheck.getTime())) {
-      connectionLabel.textContent = 'Live monitoring active';
+      connectionLabel.textContent = currentCollectorScope === 'bid_only'
+        ? 'BID collection active'
+        : 'Live monitoring active';
       return;
     }
     const ageSeconds = Math.max(0, Math.floor((now.getTime() - lastPortalCheck.getTime()) / 1000));
     connectionLabel.textContent = ageSeconds < 2
-      ? 'Live · checked just now'
-      : `Live · checked ${ageSeconds}s ago`;
+      ? `${liveLabel} · checked just now`
+      : `${liveLabel} · checked ${ageSeconds}s ago`;
   }
 
   function recordsMatch(left, right) {
@@ -2400,7 +2435,7 @@
       window.clearTimeout(bidCatalogRetryTimer);
       bidCatalogRetryTimer = null;
     }
-    const selected = bidFilter.value;
+    const selected = bidFilter.value || bidScopeFilter.value;
     const previousVersion = bidBoundaryVersion;
     const controller = new AbortController();
     const timeout = window.setTimeout(
@@ -2425,13 +2460,20 @@
       }
       bidBoundaryVersion = version;
       bidById = new Map(districts.map(district => [String(district.bid_id), district]));
-      bidFilter.innerHTML = '<option value="">All business improvement districts</option>'
-        + districts.map(district => {
+      const districtOptions = districts.map(district => {
           const suffix = district.borough_name ? ` — ${district.borough_name}` : '';
           return `<option value="${Number(district.bid_id)}">${esc(district.name)}${esc(suffix)}</option>`;
         }).join('');
+      bidFilter.innerHTML = '<option value="">All business improvement districts</option>'
+        + districtOptions;
+      bidScopeFilter.innerHTML = '<option value="">All active BIDs</option>'
+        + districtOptions;
       bidFilter.disabled = districts.length === 0;
-      if (selected && bidById.has(selected)) bidFilter.value = selected;
+      bidScopeFilter.disabled = currentCollectorScope !== 'bid_only' || districts.length === 0;
+      if (selected && bidById.has(selected)) {
+        bidFilter.value = selected;
+        bidScopeFilter.value = selected;
+      }
       const selectionLost = Boolean(selected && bidFilter.value !== selected);
       const releaseChanged = Boolean(
         selected && previousVersion && version && previousVersion !== version
@@ -2442,10 +2484,13 @@
         renderMap();
         if (selectedNumber) renderDetail(findRecord(selectedNumber));
       }
+      renderCollectorScope(currentCollectorStats || {});
     } catch (error) {
       if (!bidBoundaryVersion) {
         bidFilter.innerHTML = '<option value="">BID filter unavailable · retrying</option>';
+        bidScopeFilter.innerHTML = '<option value="">BID list unavailable · retrying</option>';
         bidFilter.disabled = true;
+        bidScopeFilter.disabled = true;
       }
       bidCatalogRetryTimer = window.setTimeout(() => {
         bidCatalogRetryTimer = null;
@@ -2588,10 +2633,22 @@
       percentage(detailsLoaded, currentRequests);
     document.getElementById('details-coverage-note').textContent =
       `${detailsLoaded.toLocaleString()} of ${currentRequests.toLocaleString()} in the last 15 minutes`;
-    document.getElementById('map-coverage-rate').textContent =
-      percentage(mapped, currentRequests);
-    document.getElementById('map-coverage-note').textContent =
-      `${mapped.toLocaleString()} of ${currentRequests.toLocaleString()} in the last 15 minutes`;
+    if (currentCollectorScope === 'bid_only') {
+      document.getElementById('map-coverage-rate').textContent = bidById.size
+        ? bidById.size.toLocaleString()
+        : '—';
+      document.getElementById('map-coverage-label').textContent = 'Active BIDs';
+      document.getElementById('map-coverage-note').textContent = currentBidCollector
+        && currentBidCollector.boundary_version
+        ? `Exact boundaries · ${currentBidCollector.boundary_version}`
+        : 'Exact active-boundary membership';
+    } else {
+      document.getElementById('map-coverage-rate').textContent =
+        percentage(mapped, currentRequests);
+      document.getElementById('map-coverage-label').textContent = 'Map locations';
+      document.getElementById('map-coverage-note').textContent =
+        `${mapped.toLocaleString()} of ${currentRequests.toLocaleString()} in the last 15 minutes`;
+    }
   }
 
   function releasePhaseLabel(value) {
@@ -2668,6 +2725,19 @@
     if (name === 'map') {
       const interval = Number(component.poll_interval_seconds);
       const cadence = Number.isFinite(interval) ? ` · every ${interval}s` : '';
+      if (component.collector_scope === 'bid_only') {
+        const zones = component.bid_zones || {};
+        if (Number(zones.failed_zones) > 0) {
+          return `A BID query zone failed and will retry${cadence}`;
+        }
+        const zoneCount = Number(zones.zone_count);
+        const zoneLabel = Number.isFinite(zoneCount) && zoneCount > 0
+          ? `${zoneCount} exact-BID retrieval zones`
+          : 'Exact-BID retrieval zones';
+        return component.last_successful_poll_at
+          ? `${zoneLabel} checked ${healthAge(component.poll_age_seconds)}${cadence}`
+          : `No successful BID-zone check recorded${cadence}`;
+      }
       return component.last_successful_poll_at
         ? `Portal map checked ${healthAge(component.poll_age_seconds)}${cadence}`
         : 'No successful map check recorded';
@@ -3156,6 +3226,100 @@
     element.append(fragment);
   }
 
+  function setRequestsViewHeading(text) {
+    const leadingText = [...requestsViewTitle.childNodes]
+      .find(node => node.nodeType === Node.TEXT_NODE);
+    if (leadingText) leadingText.nodeValue = `${text} `;
+  }
+
+  function renderCollectorScope(stats = {}) {
+    const bidOnly = currentCollectorScope === 'bid_only';
+    appShell.dataset.collectorScope = bidOnly ? 'bid_only' : 'citywide';
+    collectorScopeBadge.hidden = !bidOnly;
+    mapCollectorScope.hidden = !bidOnly;
+    bidScopeFilter.disabled = !bidOnly || bidById.size === 0;
+
+    if (!bidOnly) {
+      if (hasCollectorScopeElements) {
+        collectorScopeElements.root.hidden = true;
+        collectorScopeElements.feedRoot.hidden = true;
+      }
+      appTitle.textContent = 'NYC 311 Live';
+      document.title = 'NYC 311 Live';
+      overviewTitle.textContent = 'Overview';
+      overviewDescription.textContent = 'What NYC is reporting, what has been saved, and how quickly requests change.';
+      requestsViewEyebrow.textContent = 'Live request stream';
+      setRequestsViewHeading('Incoming requests');
+      summaryElements.geographyLabel.textContent = 'Boroughs';
+      requestFiltersLabel.textContent = 'Filters';
+      return;
+    }
+
+    const bidCollector = stats.bid_collector && typeof stats.bid_collector === 'object'
+      ? stats.bid_collector
+      : {};
+    const districtCount = bidById.size;
+    const zoneCount = Math.max(0, Math.round(finiteStat(bidCollector.zone_count)));
+    const failedZones = Math.min(
+      zoneCount,
+      Math.max(0, Math.round(finiteStat(bidCollector.failed_zones)))
+    );
+    const healthyZones = Math.max(0, zoneCount - failedZones);
+    const cadenceSeconds = Math.max(
+      1,
+      Math.round(finiteStat(stats.poll_interval_seconds, currentPollSeconds || 60))
+    );
+    const selectedBid = bidById.get(String(bidFilter.value));
+    const selectedName = selectedBid
+      ? `${selectedBid.name}${selectedBid.borough_name ? ` · ${selectedBid.borough_name}` : ''}`
+      : districtCount
+        ? `All ${districtCount.toLocaleString()} active BIDs`
+        : 'All active BIDs';
+    const lastCompleteScan = stats.last_successful_poll_at || stats.last_seen_at;
+
+    collectorScopeBadge.hidden = false;
+    mapCollectorScope.hidden = false;
+    appTitle.textContent = 'NYC BID 311 Live';
+    document.title = 'NYC BID 311 Live';
+    overviewTitle.textContent = 'BID network overview';
+    overviewDescription.textContent = 'Live activity, coverage, and response timing inside New York City business districts.';
+    requestsViewEyebrow.textContent = 'BID-only live stream';
+    setRequestsViewHeading('Latest BID requests');
+    summaryElements.geographyLabel.textContent = 'Borough coverage';
+    requestFiltersLabel.textContent = 'Status & precinct filters';
+    mapCollectorScope.textContent = selectedBid
+      ? `Exact BID boundary matches · ${selectedBid.name}`
+      : 'Exact BID boundary matches across the active network';
+
+    if (!hasCollectorScopeElements) return;
+    collectorScopeElements.root.hidden = false;
+    collectorScopeElements.feedRoot.hidden = false;
+    collectorScopeElements.title.textContent = 'BID-only live collection';
+    collectorScopeElements.detail.textContent = 'Exact BID boundary matching admits only coordinate-bearing NYC311 requests inside an active district.';
+    collectorScopeElements.districts.textContent = districtCount
+      ? districtCount.toLocaleString()
+      : '—';
+    collectorScopeElements.zones.textContent = zoneCount
+      ? zoneCount.toLocaleString()
+      : '—';
+    collectorScopeElements.healthyZones.textContent = zoneCount
+      ? `${healthyZones.toLocaleString()}/${zoneCount.toLocaleString()}`
+      : '—';
+    collectorScopeElements.cadence.textContent = `Fixed collection cadence · every ${cadenceSeconds.toLocaleString()} seconds`;
+    collectorScopeElements.lastCheck.textContent = lastCompleteScan
+      ? `Last complete scan ${timeLabel(lastCompleteScan)}`
+      : 'Waiting for the first complete BID scan';
+    collectorScopeElements.feedLabel.textContent = selectedName;
+    collectorScopeElements.zoneHealth.dataset.status = zoneCount === 0
+      ? 'starting'
+      : failedZones > 0 ? 'attention' : 'healthy';
+    collectorScopeElements.zoneHealth.textContent = zoneCount === 0
+      ? 'Preparing retrieval zones'
+      : failedZones > 0
+        ? `${failedZones.toLocaleString()} ${failedZones === 1 ? 'zone is' : 'zones are'} retrying`
+        : `All ${zoneCount.toLocaleString()} zones healthy`;
+  }
+
   function currentComparison(summary) {
     const current = summaryCount(summary.current && summary.current.requests);
     const previous = summaryCount(summary.previous && summary.previous.requests);
@@ -3200,7 +3364,10 @@
     const total = summaryCount(summary.current && summary.current.requests);
     const detailsLoaded = summaryCount(summary.coverage && summary.coverage.details && summary.coverage.details.loaded);
     const mapped = summaryCount(summary.coverage && summary.coverage.map && summary.coverage.map.mapped);
-    return `Live map feed · provisional · details ${detailsLoaded.toLocaleString()}/${total.toLocaleString()} · pins ${mapped.toLocaleString()}/${total.toLocaleString()}`;
+    const source = currentCollectorScope === 'bid_only'
+      ? 'Exact BID map matches'
+      : 'Live map feed · provisional';
+    return `${source} · details ${detailsLoaded.toLocaleString()}/${total.toLocaleString()} · pins ${mapped.toLocaleString()}/${total.toLocaleString()}`;
   }
 
   function historySummary(summary) {
@@ -3211,6 +3378,9 @@
     const history = summary.history && summary.history.target_reached
       ? `archive ${spanDays.toLocaleString()} days`
       : `archive ${spanDays.toLocaleString()}/${targetDays.toLocaleString()} days`;
+    if (currentCollectorScope === 'bid_only') {
+      return `Coordinate-confirmed BID coverage · ${delayedRequests.toLocaleString()} requests / ${minutes}m · ${history}`;
+    }
     return `Delayed map + audit · ${delayedRequests.toLocaleString()} requests / ${minutes}m · ${history}`;
   }
 
@@ -3285,7 +3455,9 @@
       ].filter(Boolean);
       summaryElements.eyebrow.textContent = scopeLabels.length
         ? `${scopeLabels.join(' · ')} ${captureState === 'fresh' ? 'right now' : 'last captured'}`
-        : captureState === 'fresh' ? 'NYC right now' : 'Last captured window';
+        : currentCollectorScope === 'bid_only'
+          ? captureState === 'fresh' ? 'NYC BIDs right now' : 'Last captured BID window'
+          : captureState === 'fresh' ? 'NYC right now' : 'Last captured window';
       summaryElements.title.textContent = `Last ${summaryWindowLabel(summary.window_minutes)}`;
       summaryElements.updated.textContent = asOf && !Number.isNaN(asOf.getTime())
         ? `As of ${timeLabel(summary.as_of)}`
@@ -3630,10 +3802,15 @@
     try {
       const requestedFeedKey = currentFeedQueryKey();
       const dataFilters = activeDataFilters();
-      const includeTotals = Object.keys(dataFilters).length === 0 ? 1 : 0;
+      // Keep the first paint on primary-key/index reads only. Matching totals
+      // arrive on the next refresh after useful request cards are already on
+      // screen, avoiding a whole-archive count on initial navigation.
+      const firstDashboardPayload = !dashboardPayloadLoaded;
+      const includeTotals = firstDashboardPayload
+        ? 0
+        : Object.keys(dataFilters).length === 0 ? 1 : 0;
       const queryChanged = requestedFeedKey !== feedQueryKey;
       if (queryChanged) resetFeedPagination();
-      const firstDashboardPayload = !dashboardPayloadLoaded;
       const restartFeedHead = feedHeadRestartRequired;
       const requestLimit = firstDashboardPayload || queryChanged || restartFeedHead
         ? INITIAL_FEED_PAGE_SIZE
@@ -3668,6 +3845,17 @@
       feedLoadMoreAbortController = null;
       feedLoadingMore = false;
       const stats = data.stats || {};
+      currentCollectorScope = stats.collector_scope === 'bid_only'
+        ? 'bid_only'
+        : 'citywide';
+      currentBidCollector = currentCollectorScope === 'bid_only'
+        && stats.bid_collector && typeof stats.bid_collector === 'object'
+        ? stats.bid_collector
+        : null;
+      currentPollSeconds = Number(stats.poll_interval_seconds || 15);
+      currentCollectorStats = stats;
+      lastPortalCheck = stats.last_seen_at ? new Date(stats.last_seen_at) : null;
+      renderCollectorScope(stats);
       dashboardPayloadLoaded = true;
       feedHeadRestartRequired = false;
       const previouslyCompleteDeepFeed = preserveFeedDepth && !feedHasMore;
@@ -3711,11 +3899,24 @@
       }
       updateMapStatsFromDashboard(stats);
       refreshMap(stats, force);
-      currentPollSeconds = Number(stats.poll_interval_seconds || 15);
+      if (![...pollInterval.options].some(option => Number(option.value) === currentPollSeconds)) {
+        const configured = document.createElement('option');
+        configured.value = String(currentPollSeconds);
+        configured.textContent = `${currentPollSeconds} seconds`;
+        pollInterval.append(configured);
+      }
       pollInterval.value = String(currentPollSeconds);
-      lastPortalCheck = stats.last_seen_at ? new Date(stats.last_seen_at) : null;
+      pollInterval.disabled = currentCollectorScope === 'bid_only';
+      pollInterval.title = currentCollectorScope === 'bid_only'
+        ? 'BID-only cadence is set by BID_POLL_INTERVAL_SECONDS'
+        : '';
       if (stats.summary) renderCitySummary(stats.summary);
-      document.getElementById('frontier-number').textContent = stats.frontier ? `311-${String(stats.frontier).padStart(8, '0')}` : '—';
+      document.getElementById('frontier-label').textContent = currentCollectorScope === 'bid_only'
+        ? 'BID map scope'
+        : 'Latest frontier';
+      document.getElementById('frontier-number').textContent = currentCollectorScope === 'bid_only'
+        ? `${bidById.size ? bidById.size.toLocaleString() : '—'} active BIDs · ${Number(currentBidCollector && currentBidCollector.zone_count || 0).toLocaleString()} zones`
+        : stats.frontier ? `311-${String(stats.frontier).padStart(8, '0')}` : '—';
       document.getElementById('last-updated').textContent = lastPortalCheck
         ? `Portal ${lastPortalCheck.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' })}`
         : 'Waiting for data';
@@ -3848,6 +4049,10 @@
     scheduleFilterRefresh(0);
   });
   function handleGeographyFilterChange() {
+    if (bidScopeFilter.value !== bidFilter.value) {
+      bidScopeFilter.value = bidFilter.value;
+    }
+    renderCollectorScope(currentCollectorStats || {});
     if (filterRefreshTimer !== null) {
       window.clearTimeout(filterRefreshTimer);
       filterRefreshTimer = null;
@@ -3898,7 +4103,18 @@
     scheduleArchiveSearch();
   }
   precinctFilter.addEventListener('change', handleGeographyFilterChange);
-  bidFilter.addEventListener('change', handleGeographyFilterChange);
+  bidFilter.addEventListener('change', () => {
+    bidScopeFilter.value = bidFilter.value;
+    handleGeographyFilterChange();
+  });
+  bidScopeFilter.addEventListener('change', () => {
+    bidFilter.value = bidScopeFilter.value;
+    handleGeographyFilterChange();
+  });
+  collectorScopeElements.choose.addEventListener('click', () => {
+    bidScopeFilter.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    bidScopeFilter.focus({ preventScroll: true });
+  });
   mapScopeControl.addEventListener('click', event => {
     const button = event.target.closest('button[data-map-scope]');
     if (!button || !mapScopeControl.contains(button)) return;
@@ -3920,7 +4136,7 @@
     } catch (error) {
       console.warn(error);
     } finally {
-      pollInterval.disabled = false;
+      pollInterval.disabled = currentCollectorScope === 'bid_only';
       refreshNowAndReschedule();
     }
   });

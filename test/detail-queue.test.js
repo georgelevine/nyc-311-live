@@ -19,6 +19,15 @@ function harness(t) {
       last_error TEXT,
       updated_at TEXT NOT NULL
     );
+    CREATE TABLE business_improvement_district_boundary_versions (
+      version TEXT PRIMARY KEY,
+      active INTEGER NOT NULL
+    );
+    CREATE TABLE live_request_bid_memberships (
+      srnumber TEXT NOT NULL,
+      boundary_version TEXT NOT NULL,
+      bid_id INTEGER NOT NULL
+    );
   `);
   return database;
 }
@@ -69,4 +78,31 @@ test('can reconcile one freshly persisted detail without touching other rows', t
     .get('311-28000011').status, 'pending');
   assert.equal(database.prepare('SELECT status FROM live_detail_queue WHERE srnumber=?')
     .get('311-28000012').status, 'found');
+});
+
+test('BID-only reconciliation ignores retained citywide queue rows', t => {
+  const database = harness(t);
+  queue(database, '311-28000021', 'pending');
+  queue(database, '311-28000022', 'pending');
+  database.prepare('INSERT INTO portal_requests (srnumber) VALUES (?), (?)')
+    .run('311-28000021', '311-28000022');
+  database.prepare(`
+    INSERT INTO business_improvement_district_boundary_versions(version,active)
+    VALUES ('bids-v1',1)
+  `).run();
+  database.prepare(`
+    INSERT INTO live_request_bid_memberships(srnumber,boundary_version,bid_id)
+    VALUES ('311-28000022','bids-v1',7)
+  `).run();
+
+  assert.equal(reconcileStoredDetails(database, {
+    updatedAt: '2026-07-21T14:00:00.000Z',
+    requireBidMembership: true
+  }), 1);
+  assert.equal(database.prepare(`
+    SELECT status FROM live_detail_queue WHERE srnumber='311-28000021'
+  `).get().status, 'pending');
+  assert.equal(database.prepare(`
+    SELECT status FROM live_detail_queue WHERE srnumber='311-28000022'
+  `).get().status, 'found');
 });

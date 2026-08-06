@@ -453,7 +453,8 @@ const STORED_EMAIL_CLOSURE_CANDIDATES_SQL = `
 
 function reconcileStoredEmailClosures(database, {
   now = new Date(),
-  manageTransaction = true
+  manageTransaction = true,
+  requireBidMembership = false
 } = {}) {
   if (!database || typeof database.prepare !== 'function') {
     throw new TypeError('database must be an open SQLite database');
@@ -461,7 +462,20 @@ function reconcileStoredEmailClosures(database, {
   const reconciledAt = now instanceof Date ? now.toISOString() : new Date(now).toISOString();
   applyMigrations(database, reconciledAt);
   createClosureTracker(database);
-  const candidates = database.prepare(STORED_EMAIL_CLOSURE_CANDIDATES_SQL).all();
+  const candidatesSql = requireBidMembership
+    ? STORED_EMAIL_CLOSURE_CANDIDATES_SQL.replace(
+      'WHERE (followup.state=',
+      `WHERE EXISTS (
+        SELECT 1
+        FROM live_request_bid_memberships AS collector_membership
+        JOIN business_improvement_district_boundary_versions AS collector_boundary
+          ON collector_boundary.version=collector_membership.boundary_version
+         AND collector_boundary.active=1
+        WHERE collector_membership.srnumber=live.srnumber
+      ) AND (followup.state=`
+    )
+    : STORED_EMAIL_CLOSURE_CANDIDATES_SQL;
+  const candidates = database.prepare(candidatesSql).all();
   const latestCandidateByRequest = new Map();
   for (const row of candidates) {
     if (isClosedStatus(row.live_status)
@@ -578,7 +592,8 @@ function persistInboundEmail(database, {
   metadata,
   envelopeRecipient,
   inboundDomain = DEFAULT_INBOUND_EMAIL_DOMAIN,
-  now = new Date()
+  now = new Date(),
+  requireBidMembership = false
 }) {
   if (!Buffer.isBuffer(raw)) throw new TypeError('raw must be a Buffer');
   applyMigrations(database, now.toISOString());
@@ -703,10 +718,21 @@ function persistInboundEmail(database, {
       && !reconciliation.mismatch
       && reconciliation.reconciledSrnumber
       && ['matched', 'attached'].includes(reconciliation.status);
+    const activeBidMembership = !requireBidMembership || Boolean(
+      reconciliation.reconciledSrnumber && database.prepare(`
+        SELECT 1
+        FROM live_request_bid_memberships AS membership
+        JOIN business_improvement_district_boundary_versions AS boundary
+          ON boundary.version=membership.boundary_version AND boundary.active=1
+        WHERE membership.srnumber=?
+        LIMIT 1
+      `).get(reconciliation.reconciledSrnumber)
+    );
+    const actionableEvent = matchedEvent && activeBidMembership;
     // Only a message delivered directly by NYC311 can authoritatively change
     // status. A forwarded .eml attachment is useful evidence for display, but
     // SES authenticated its outer sender rather than the attached From header.
-    const directlyAuthenticatedEvent = matchedEvent
+    const directlyAuthenticatedEvent = actionableEvent
       && parsed
       && parsed.deliveryMode === 'direct';
     const authoritativeClosureObserved =
@@ -732,7 +758,7 @@ function persistInboundEmail(database, {
       `).run(id);
     }
     database.exec('COMMIT');
-    const forward = matchedEvent
+    const forward = actionableEvent
       ? {
           recipient_address: recipient.address,
           srnumber: reconciliation.reconciledSrnumber,
@@ -872,7 +898,9 @@ function createNyc311EmailHandler({
         metadata: signed.metadata,
         envelopeRecipient: signed.recipient,
         inboundDomain: env.INBOUND_EMAIL_DOMAIN || DEFAULT_INBOUND_EMAIL_DOMAIN,
-        now: now()
+        now: now(),
+        requireBidMembership: String(env.COLLECTOR_SCOPE || '')
+          .trim().toLowerCase() === 'bid_only'
       });
       return res.status(202).json({
         accepted: true,

@@ -109,6 +109,7 @@ services:
     restart: unless-stopped
     environment:
       <<: *app-environment
+      COLLECTOR_SCOPE: ${COLLECTOR_SCOPE:-citywide}
       PG_POOL_SIZE: "5"
       POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-15}
       AUDIT_DELAY_MINUTES: ${AUDIT_DELAY_MINUTES:-35}

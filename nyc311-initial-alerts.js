@@ -5,12 +5,20 @@ const fetch = require('node-fetch');
 
 function enqueueInitialAlerts(database, {
   bidIds = [],
-  precincts = []
+  precincts = [],
+  requireBidMembership = false
 } = {}, now = new Date()) {
   if (!bidIds.length && !precincts.length) return 0;
   const bidPlaceholders = bidIds.map(() => '?').join(',') || 'NULL';
   const precinctPlaceholders = precincts.map(() => '?').join(',') || 'NULL';
   const nowIso = now.toISOString();
+  const bidMembershipFilter = requireBidMembership ? `AND EXISTS (
+    SELECT 1 FROM live_request_bid_memberships AS collector_membership
+    JOIN business_improvement_district_boundary_versions AS collector_boundary
+      ON collector_boundary.version=collector_membership.boundary_version
+     AND collector_boundary.active=1
+    WHERE collector_membership.srnumber=subscription.srnumber
+  )` : '';
   return database.prepare(`
     INSERT OR IGNORE INTO nyc311_initial_email_jobs (
       srnumber,bid_id,state,attempts,next_attempt_at,last_error,created_at,updated_at,sent_at,
@@ -27,11 +35,21 @@ function enqueueInitialAlerts(database, {
       AND subscription.scope_id IN (${precinctPlaceholders})
     ))
       AND subscription.state='subscribed'
+      ${bidMembershipFilter}
     ORDER BY subscription.created_at
   `).run(nowIso, nowIso, nowIso, ...bidIds, ...precincts).changes;
 }
 
-function claimInitialAlert(database, now = new Date()) {
+function claimInitialAlert(database, now = new Date(), {
+  requireBidMembership = false
+} = {}) {
+  const bidMembershipFilter = requireBidMembership ? `AND EXISTS (
+    SELECT 1 FROM live_request_bid_memberships AS collector_membership
+    JOIN business_improvement_district_boundary_versions AS collector_boundary
+      ON collector_boundary.version=collector_membership.boundary_version
+     AND collector_boundary.active=1
+    WHERE collector_membership.srnumber=live.srnumber
+  )` : '';
   const row = database.prepare(`
     SELECT job.*,live.problem AS map_problem,live.address AS map_address,
            live.status AS live_status,live.portal_url,
@@ -42,6 +60,7 @@ function claimInitialAlert(database, now = new Date()) {
     JOIN live_portal_requests live USING(srnumber)
     JOIN portal_requests detail USING(srnumber)
     WHERE job.state IN ('pending','retry') AND job.next_attempt_at<=?
+      ${bidMembershipFilter}
     ORDER BY job.next_attempt_at,job.created_at LIMIT 1
   `).get(now.toISOString());
   if (!row) return null;

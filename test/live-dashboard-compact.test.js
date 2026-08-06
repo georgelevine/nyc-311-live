@@ -236,11 +236,14 @@ test('compact live dashboard returns records and only key-value monitor stats', 
   assert.equal(payload.records[0].agency_response, 'The agency is reviewing this request.');
 
   assert.deepEqual(Object.keys(payload.stats).sort(), [
+    'bid_collector',
+    'collector_scope',
     'compact',
     'frontier',
     'last_seen_at',
     'last_successful_poll_at',
     'legacy_reconciliation',
+    'number_audit_mode',
     'poll_interval_seconds'
   ]);
   assert.equal(payload.stats.compact, true);
@@ -697,6 +700,45 @@ test('dashboard BID records and totals use the same indexed membership scope', a
   assert.equal(payload.stats.total, 2);
   assert.equal(payload.stats.details_loaded, 1);
   assert.equal(payload.stats.details_pending, 1);
+});
+
+test('BID-only collector scope hides retained citywide rows from unfiltered reads', async () => {
+  const writable = new DatabaseSync(databasePath);
+  try {
+    writable.prepare(`
+      INSERT INTO live_monitor_state(key,value,updated_at)
+      VALUES ('collector_scope','bid_only',?)
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at
+    `).run(new Date().toISOString());
+
+    const dashboardResponse = await fetch(
+      `${baseUrl}/api/live-dashboard?limit=20&compact=0`
+    );
+    assert.equal(dashboardResponse.status, 200);
+    const dashboard = await dashboardResponse.json();
+    assert.deepEqual(
+      dashboard.records.map(record => record.srnumber),
+      ['311-28390001', '311-28389999']
+    );
+    assert.equal(dashboard.page.matching_total, 2);
+    assert.equal(dashboard.stats.total, 2);
+    assert.equal(dashboard.stats.collector_scope, 'bid_only');
+    assert.equal(dashboard.stats.number_audit_mode, 'not_applicable_bid_only');
+
+    const mapResponse = await fetch(`${baseUrl}/api/live-map?limit=20&include_totals=1`);
+    assert.equal(mapResponse.status, 200);
+    const mapPayload = await mapResponse.json();
+    assert.deepEqual(
+      mapPayload.records.map(record => record.srnumber),
+      ['311-28390001', '311-28389999']
+    );
+    assert.equal(mapPayload.stats.total, 2);
+  } finally {
+    writable.prepare(`
+      UPDATE live_monitor_state SET value='citywide',updated_at=? WHERE key='collector_scope'
+    `).run(new Date().toISOString());
+    writable.close();
+  }
 });
 
 test('exact dashboard lookups remain available outside the 300-record page contract', async () => {

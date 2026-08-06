@@ -40,6 +40,20 @@ function precinctLabel(number) {
   return `NYPD ${value}${suffix} Precinct`;
 }
 
+function historicalBackfillPredicate(database, alias) {
+  if (!/^[a-z_][a-z0-9_]*$/i.test(String(alias || ''))) {
+    throw new TypeError('alias must be a SQL identifier');
+  }
+  const hasRawJson = database.prepare('PRAGMA table_info(live_portal_requests)').all()
+    .some(column => column.name === 'raw_json');
+  if (!hasRawJson) return '';
+  return `AND COALESCE(
+    CASE WHEN json_valid(${alias}.raw_json)
+      THEN json_extract(${alias}.raw_json,'$.backfill.source') END,
+    ''
+  )<>'historical_bid_portal_export'`;
+}
+
 function modalUrl(portalId) {
   const id = String(portalId || '').trim();
   if (!/^[0-9a-f-]{36}$/i.test(id)) throw new TypeError('portalId must be a UUID');
@@ -143,6 +157,7 @@ function enqueueBidSubscriptions(database, bidIds, {
   if (!bidIds.length) return 0;
   const nowIso = now.toISOString();
   const placeholders = bidIds.map(() => '?').join(',');
+  const historicalBackfillFilter = historicalBackfillPredicate(database, 'request');
   const rows = database.prepare(`
     SELECT DISTINCT request.srnumber
     FROM live_portal_requests AS request
@@ -151,6 +166,7 @@ function enqueueBidSubscriptions(database, bidIds, {
       ON version.version=membership.boundary_version AND version.active=1
     WHERE membership.bid_id IN (${placeholders})
       AND request.portal_id IS NOT NULL
+      ${historicalBackfillFilter}
       AND NOT EXISTS (
         SELECT 1 FROM nyc311_email_subscription_jobs AS existing
         WHERE existing.srnumber=request.srnumber
@@ -189,7 +205,8 @@ function enqueueBidSubscriptions(database, bidIds, {
 function enqueuePrecinctSubscriptions(database, precincts, {
   domain = process.env.INBOUND_EMAIL_DOMAIN,
   startAt,
-  now = new Date()
+  now = new Date(),
+  requireBidMembership = false
 } = {}) {
   if (!precincts.length) return 0;
   const cutoff = new Date(startAt);
@@ -198,12 +215,25 @@ function enqueuePrecinctSubscriptions(database, precincts, {
   }
   const nowIso = now.toISOString();
   const placeholders = precincts.map(() => '?').join(',');
+  const historicalBackfillFilter = historicalBackfillPredicate(
+    database,
+    'live_portal_requests'
+  );
+  const bidMembershipFilter = requireBidMembership ? `AND EXISTS (
+    SELECT 1 FROM live_request_bid_memberships AS collector_membership
+    JOIN business_improvement_district_boundary_versions AS collector_boundary
+      ON collector_boundary.version=collector_membership.boundary_version
+     AND collector_boundary.active=1
+    WHERE collector_membership.srnumber=live_portal_requests.srnumber
+  )` : '';
   const rows = database.prepare(`
     SELECT srnumber,police_precinct
     FROM live_portal_requests
     WHERE police_precinct IN (${placeholders})
       AND portal_id IS NOT NULL
       AND first_seen_at>=?
+      ${historicalBackfillFilter}
+      ${bidMembershipFilter}
       AND NOT EXISTS (
         SELECT 1 FROM nyc311_email_subscription_jobs AS existing
         WHERE existing.srnumber=live_portal_requests.srnumber
@@ -239,18 +269,32 @@ function enqueuePrecinctSubscriptions(database, precincts, {
 function enqueueAllSubscriptions(database, {
   domain = process.env.INBOUND_EMAIL_DOMAIN,
   startAt,
-  now = new Date()
+  now = new Date(),
+  requireBidMembership = false
 } = {}) {
   const cutoff = new Date(startAt);
   if (!Number.isFinite(cutoff.getTime())) {
     throw new Error('EMAIL_ALL_START_AT must be a valid timestamp');
   }
   const nowIso = now.toISOString();
+  const historicalBackfillFilter = historicalBackfillPredicate(
+    database,
+    'live_portal_requests'
+  );
+  const bidMembershipFilter = requireBidMembership ? `AND EXISTS (
+    SELECT 1 FROM live_request_bid_memberships AS collector_membership
+    JOIN business_improvement_district_boundary_versions AS collector_boundary
+      ON collector_boundary.version=collector_membership.boundary_version
+     AND collector_boundary.active=1
+    WHERE collector_membership.srnumber=live_portal_requests.srnumber
+  )` : '';
   const rows = database.prepare(`
     SELECT srnumber
     FROM live_portal_requests
     WHERE portal_id IS NOT NULL
       AND first_seen_at>=?
+      ${historicalBackfillFilter}
+      ${bidMembershipFilter}
       AND NOT EXISTS (
         SELECT 1 FROM nyc311_email_subscription_jobs AS existing
         WHERE existing.srnumber=live_portal_requests.srnumber
@@ -425,7 +469,8 @@ function quarantineLegacySubscriptionRetries(database, {
 }
 
 function claimSubscription(database, now = new Date(), {
-  order = 'oldest'
+  order = 'oldest',
+  requireBidMembership = false
 } = {}) {
   if (!['oldest', 'newest'].includes(order)) {
     throw new TypeError('order must be oldest or newest');
@@ -434,6 +479,13 @@ function claimSubscription(database, now = new Date(), {
   const orderSql = order === 'newest'
     ? 'request.suffix DESC,job.next_attempt_at,job.created_at'
     : 'job.next_attempt_at,job.created_at';
+  const bidMembershipFilter = requireBidMembership ? `AND EXISTS (
+    SELECT 1 FROM live_request_bid_memberships AS collector_membership
+    JOIN business_improvement_district_boundary_versions AS collector_boundary
+      ON collector_boundary.version=collector_membership.boundary_version
+     AND collector_boundary.active=1
+    WHERE collector_membership.srnumber=request.srnumber
+  )` : '';
   database.exec('BEGIN IMMEDIATE');
   try {
     recoverStaleProcessingSubscriptions(database, { now });
@@ -443,6 +495,7 @@ function claimSubscription(database, now = new Date(), {
       JOIN nyc311_email_aliases alias ON alias.id=job.alias_id
       JOIN live_portal_requests request USING(srnumber)
       WHERE job.state=? AND job.next_attempt_at<=?
+        ${bidMembershipFilter}
       ORDER BY ${orderSql} LIMIT 1
     `);
     // New enrollment is a separate indexed lookup, so retries cannot bury

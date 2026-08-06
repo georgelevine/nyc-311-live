@@ -17,7 +17,10 @@
       <header class="app-header">
         <div class="brand-mark">311</div>
         <div class="brand-copy">
-          <h1>NYC 311 Live</h1>
+          <div class="brand-title-row">
+            <h1 id="app-title">NYC 311 Live</h1>
+            <span id="collector-scope-badge" class="collector-scope-badge" hidden>BID network</span>
+          </div>
           <div class="live-state"><span class="live-dot"></span><span id="connection-label">Connecting</span></div>
         </div>
       </header>
@@ -37,14 +40,76 @@
         </button>
       </nav>
 
+      <section id="bid-feed-scope" class="bid-feed-scope" aria-live="polite" hidden>
+        <div>
+          <span>Exact-boundary feed</span>
+          <strong id="bid-feed-scope-label">All active BIDs</strong>
+        </div>
+        <label>
+          <span>Browse district</span>
+          <select id="bid-scope-filter" aria-label="Choose a business improvement district" disabled>
+            <option value="">Loading business improvement districts…</option>
+          </select>
+        </label>
+      </section>
+
       <div class="overview-view">
         <header class="view-heading overview-heading">
           <div>
             <span class="eyebrow">At a glance</span>
-            <h2>Overview</h2>
+            <h2 id="overview-title">Overview</h2>
           </div>
-          <p>What NYC is reporting, what has been saved, and how quickly requests change.</p>
+          <div class="overview-heading-actions">
+            <p id="overview-description">What NYC is reporting, what has been saved, and how quickly requests change.</p>
+            <a class="bid-metrics-link" href="/bid-metrics.html">Explore BID metrics <span aria-hidden="true">→</span></a>
+          </div>
         </header>
+        <section
+          id="collector-scope-banner"
+          class="collector-scope-banner bid-network-overview"
+          aria-labelledby="collector-scope-title"
+          aria-live="polite"
+          hidden
+        >
+          <header class="bid-network-header">
+            <div>
+              <span class="eyebrow">Collection scope</span>
+              <h2 id="collector-scope-title">Business improvement districts</h2>
+            </div>
+            <span id="collector-zone-health" class="bid-network-health" data-status="starting">Starting…</span>
+          </header>
+          <p id="collector-scope-detail" class="bid-network-description">
+            Only coordinate-bearing NYC311 requests that fall inside an active BID boundary enter this archive.
+          </p>
+          <div class="bid-network-stats" aria-label="BID collection status">
+            <article>
+              <strong id="bid-network-districts">—</strong>
+              <span>active BIDs</span>
+            </article>
+            <article>
+              <strong id="bid-network-zones">—</strong>
+              <span>retrieval zones</span>
+            </article>
+            <article>
+              <strong id="bid-network-zone-health">—</strong>
+              <span>zones healthy</span>
+            </article>
+            <article>
+              <strong>Exact</strong>
+              <span>boundary match</span>
+            </article>
+          </div>
+          <footer class="bid-network-footer">
+            <div class="bid-network-timing">
+              <strong id="collector-cadence">Fixed collection cadence</strong>
+              <span id="bid-network-last-check">Waiting for the first BID collection check</span>
+            </div>
+            <div>
+              <button id="bid-network-choose" type="button">Choose a BID</button>
+              <a href="/bid-metrics.html">View historical trends <span aria-hidden="true">→</span></a>
+            </div>
+          </footer>
+        </section>
         <section
           id="system-health"
           class="system-health"
@@ -134,7 +199,7 @@
               <small id="summary-other-categories"></small>
             </div>
             <div class="city-summary-row">
-              <span>Boroughs</span>
+              <span id="summary-geography-label">Boroughs</span>
               <p id="summary-boroughs" class="summary-rank-list">—</p>
               <small id="summary-other-boroughs"></small>
             </div>
@@ -216,7 +281,7 @@
                 <small id="details-coverage-note">Checking recent requests</small>
               </article>
               <article>
-                <strong id="map-coverage-rate">—</strong><span>Map locations</span>
+                <strong id="map-coverage-rate">—</strong><span id="map-coverage-label">Map locations</span>
                 <small id="map-coverage-note">Checking recent requests</small>
               </article>
             </div>
@@ -347,8 +412,8 @@
       <div class="requests-view">
         <header class="view-heading requests-view-heading">
           <div>
-            <span class="eyebrow">Live request stream</span>
-            <h2>Incoming requests <i class="continuous-spinner" aria-hidden="true"></i></h2>
+            <span id="requests-view-eyebrow" class="eyebrow">Live request stream</span>
+            <h2 id="requests-view-title">Incoming requests <i class="continuous-spinner" aria-hidden="true"></i></h2>
             <small id="feed-coverage" class="feed-coverage" aria-live="polite">Loading request archive…</small>
           </div>
           <time id="last-updated">Waiting for data</time>
@@ -360,7 +425,7 @@
           </div>
           <details id="request-filters" class="request-filters">
             <summary>
-              <span>Filters</span>
+              <span id="request-filters-label">Filters</span>
               <span id="active-filter-count">None selected</span>
             </summary>
             <div class="filter-fields">
@@ -376,7 +441,7 @@
                   <option value="">Loading precincts…</option>
                 </select>
               </label>
-              <label>
+              <label class="bid-filter-field">
                 <span>Business improvement district</span>
                 <select id="bid-filter" aria-label="Filter by business improvement district" disabled>
                   <option value="">Loading business improvement districts…</option>
@@ -408,16 +473,17 @@
       <div class="map-overlay top-left map-controls">
         <div class="map-summary-heading">
           <div>
-            <span class="eyebrow">Latest frontier</span>
+            <span id="frontier-label" class="eyebrow">Latest frontier</span>
             <strong id="frontier-number">—</strong>
           </div>
           <span class="eyebrow">Map scope</span>
         </div>
+        <p id="map-collector-scope" class="map-collector-scope" hidden>Exact BID boundary matches</p>
         <div id="map-boundary-key" class="map-boundary-key" aria-live="polite" hidden></div>
         <div id="map-scope" class="map-scope" role="group" aria-label="Choose which requests appear on the map">
-          <button type="button" data-map-scope="all" aria-pressed="false">All dates</button>
           <button type="button" data-map-scope="24h" aria-pressed="true">24 hours</button>
           <button type="button" data-map-scope="7d" aria-pressed="false">7 days</button>
+          <button type="button" data-map-scope="all" aria-pressed="false">All history</button>
         </div>
         <p id="map-counts" class="map-counts" aria-live="polite">0 matching · 0 map pins loaded · 0 without coordinates</p>
         <p id="map-date-range" class="map-date-range" aria-live="polite">Last 24 hours · waiting for map records</p>

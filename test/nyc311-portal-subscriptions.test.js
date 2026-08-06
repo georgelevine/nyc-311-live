@@ -6,6 +6,7 @@ const { DatabaseSync } = require('node:sqlite');
 const {
   claimSubscription,
   enqueueAllSubscriptions,
+  enqueueBidSubscriptions,
   enqueuePrecinctSubscriptions,
   formPayload,
   modalUrl,
@@ -110,6 +111,82 @@ test('all-request enrollment includes only records at or after its immutable cut
     scope_id: 0,
     scope_label: 'All NYC311'
   });
+  database.close();
+});
+
+test('subscription enrollment excludes historical list-backfill records', () => {
+  const database = new DatabaseSync(':memory:');
+  database.exec(`
+    CREATE TABLE live_portal_requests (
+      srnumber TEXT PRIMARY KEY,portal_id TEXT,police_precinct INTEGER,
+      first_seen_at TEXT NOT NULL,suffix INTEGER,raw_json TEXT NOT NULL
+    );
+    CREATE TABLE nyc311_email_aliases (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,local_part TEXT UNIQUE,domain TEXT,
+      recipient_address TEXT UNIQUE,srnumber TEXT UNIQUE,token_hash TEXT UNIQUE,
+      state TEXT,created_at TEXT,subscribed_at TEXT,last_received_at TEXT,updated_at TEXT
+    );
+    CREATE TABLE nyc311_email_subscription_jobs (
+      srnumber TEXT PRIMARY KEY,alias_id INTEGER UNIQUE,bid_id INTEGER,state TEXT,
+      attempts INTEGER,next_attempt_at TEXT,last_error TEXT,created_at TEXT,
+      updated_at TEXT,subscribed_at TEXT,scope_type TEXT,scope_id INTEGER,scope_label TEXT
+    );
+    INSERT INTO live_portal_requests VALUES
+      ('311-25775504','11111111-1111-1111-1111-111111111111',1,
+       '2026-08-04T20:00:00.000Z',1,
+       '{"backfill":{"source":"historical_bid_portal_export"}}'),
+      ('311-28400001','22222222-2222-2222-2222-222222222222',1,
+       '2026-08-04T20:00:01.000Z',2,
+       '{"data":{"srnumber":"311-28400001"}}');
+  `);
+  assert.equal(enqueueAllSubscriptions(database, {
+    startAt: '2026-08-04T19:00:00.000Z',
+    now: new Date('2026-08-04T20:01:00.000Z')
+  }), 1);
+  assert.deepEqual(database.prepare(`
+    SELECT srnumber FROM nyc311_email_subscription_jobs ORDER BY srnumber
+  `).all().map(row => row.srnumber), ['311-28400001']);
+  database.close();
+});
+
+test('BID enrollment also excludes historical list-backfill memberships', () => {
+  const database = new DatabaseSync(':memory:');
+  database.exec(`
+    CREATE TABLE live_portal_requests (
+      srnumber TEXT PRIMARY KEY,portal_id TEXT,raw_json TEXT NOT NULL
+    );
+    CREATE TABLE business_improvement_district_boundary_versions (
+      version TEXT PRIMARY KEY,active INTEGER NOT NULL
+    );
+    CREATE TABLE live_request_bid_memberships (
+      srnumber TEXT,boundary_version TEXT,bid_id INTEGER
+    );
+    CREATE TABLE nyc311_email_aliases (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,local_part TEXT UNIQUE,domain TEXT,
+      recipient_address TEXT UNIQUE,srnumber TEXT UNIQUE,token_hash TEXT UNIQUE,
+      state TEXT,created_at TEXT,subscribed_at TEXT,last_received_at TEXT,updated_at TEXT
+    );
+    CREATE TABLE nyc311_email_subscription_jobs (
+      srnumber TEXT PRIMARY KEY,alias_id INTEGER UNIQUE,bid_id INTEGER,state TEXT,
+      attempts INTEGER,next_attempt_at TEXT,last_error TEXT,created_at TEXT,
+      updated_at TEXT,subscribed_at TEXT,scope_type TEXT,scope_id INTEGER,scope_label TEXT
+    );
+    INSERT INTO business_improvement_district_boundary_versions VALUES ('2026-04-28',1);
+    INSERT INTO live_portal_requests VALUES
+      ('311-25775504','11111111-1111-1111-1111-111111111111',
+       '{"backfill":{"source":"historical_bid_portal_export"}}'),
+      ('311-28400001','22222222-2222-2222-2222-222222222222',
+       '{"data":{"srnumber":"311-28400001"}}');
+    INSERT INTO live_request_bid_memberships VALUES
+      ('311-25775504','2026-04-28',68),
+      ('311-28400001','2026-04-28',68);
+  `);
+  assert.equal(enqueueBidSubscriptions(database, [68], {
+    now: new Date('2026-08-04T20:01:00.000Z')
+  }), 1);
+  assert.deepEqual(database.prepare(`
+    SELECT srnumber FROM nyc311_email_subscription_jobs ORDER BY srnumber
+  `).all().map(row => row.srnumber), ['311-28400001']);
   database.close();
 });
 

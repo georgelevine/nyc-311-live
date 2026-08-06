@@ -106,9 +106,11 @@ function normalizeBusinessImprovementDistrictCollection(collection, { expectedCo
   const seen = new Set();
   const normalized = collection.features.map((feature, index) => {
     const properties = feature && feature.properties || {};
-    const bidId = Number(properties.BIDID);
-    const name = cleanName(properties.BID);
-    const boroughCode = Number(properties.BOROUGH);
+    // Accept both the official ArcGIS field names and this repository's pinned,
+    // normalized export. Geometry and identifiers are validated identically.
+    const bidId = Number(properties.BIDID ?? properties.bid_id);
+    const name = cleanName(properties.BID ?? properties.name);
+    const boroughCode = Number(properties.BOROUGH ?? properties.borough_code);
     const geometry = feature && feature.geometry;
     if (!Number.isInteger(bidId) || bidId <= 0) {
       throw new Error(`Feature ${index + 1} has an invalid BIDID`);
