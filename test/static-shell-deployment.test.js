@@ -234,6 +234,14 @@ test('service deployment proves BID-only scope after a fresh collector poll', ()
     deploy,
     /completed a poll without recording the required BID-only scope/
   );
+  assert.equal(
+    (deploy.match(/for _(?:rollback_)?attempt in \$\(seq 1 300\)/g) || []).length,
+    2
+  );
+  assert.match(
+    compose.slice(compose.indexOf('  collector:'), compose.indexOf('  web:')),
+    /start_period: 600s/
+  );
 });
 
 test('nightly backup priority, exclusive cleanup, and I/O limits apply inside the container', () => {

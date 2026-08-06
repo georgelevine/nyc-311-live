@@ -332,7 +332,10 @@ rollback() {
     fi
     if [[ ${rollback_failures} -eq 0 ]]; then
       rollback_runtime_ready=0
-      for _rollback_attempt in $(seq 1 60); do
+      # The first BID-only poll can include bounded recovery for all 12 query
+      # zones. Give a restored compatible collector the same ten-minute gate
+      # as a forward service activation.
+      for _rollback_attempt in $(seq 1 300); do
         if ! curl --fail --silent --max-time 5 \
             http://127.0.0.1:10000/api/health >/dev/null; then
           sleep 2
@@ -508,7 +511,11 @@ if [[ "${deployment_scope}" == "service" ]]; then
     --format '{{ .State.StartedAt }}' "${collector_after}")"
   collector_started_epoch="$(date --date "${collector_started_at}" +%s)"
   fresh_poll=""
-  for _attempt in $(seq 1 60); do
+  # A BID-only poll can include same-day recovery and spatial splitting for
+  # every query zone. Two minutes caused a healthy activation to be rolled
+  # back mid-cycle; ten minutes still fails closed while covering the bounded
+  # worst case of the Portal client's retries and timeouts.
+  for _attempt in $(seq 1 300); do
     current_poll="$(sqlite3 "${database_host_path}" \
       "SELECT value FROM live_monitor_state WHERE key='last_successful_poll_at';")"
     current_poll_epoch="$(date --date "${current_poll}" +%s 2>/dev/null || true)"

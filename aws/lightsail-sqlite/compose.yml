@@ -88,7 +88,10 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      # A BID-only cycle may recover several geographic zones after downtime.
+      # Do not declare the collector unhealthy while that bounded first cycle
+      # is still running.
+      start_period: 600s
     stop_grace_period: 90s
     logging: *default-logging
 
