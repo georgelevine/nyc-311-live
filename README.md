@@ -140,6 +140,16 @@ The explicit commands `npm run deploy:assets`, `npm run deploy:web`, and
 changes outside its permitted scope instead of silently deploying a partial
 release.
 
+On Lightsail, `DATABASE_PATH` must name a plain `.sqlite` file directly inside
+`/data`. The service deployment's fresh-poll gate, snapshot installer, and
+nightly verified backup all resolve that same configured file. Leaving it at
+`/data/portal-archive.sqlite` is the supported mixed-archive BID-only switch:
+historic citywide rows remain recoverable while BID-only reads and background
+work stay scoped. A BID-only service release is accepted only after the
+collector records a fresh poll with `collector_scope=bid_only`; a failed release
+does not report a successful rollback until the previous runtime completes a
+new poll and becomes healthy again.
+
 ## Read-only live statistics
 
 `GET /api/live-summary` returns the same deterministic statistics shown in the

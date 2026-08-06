@@ -36,6 +36,7 @@ function createHealthDatabase() {
       ON live_detail_queue(status,next_attempt_at);
     CREATE TABLE nyc311_email_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
+      reconciled_srnumber TEXT,
       received_at TEXT NOT NULL,
       created_at TEXT NOT NULL,
       parse_outcome TEXT NOT NULL,
@@ -97,8 +98,8 @@ test('returns a lightweight healthy snapshot with safe queue descriptors', () =>
   );
   database.prepare(`
     INSERT INTO nyc311_email_events(
-      received_at,created_at,parse_outcome,alias_match_status
-    ) VALUES (?,?,?,?)
+      reconciled_srnumber,received_at,created_at,parse_outcome,alias_match_status
+    ) VALUES (NULL,?,?,?,?)
   `).run(
     '2026-07-29T11:58:00.000Z',
     '2026-07-29T11:58:00.000Z',
@@ -154,6 +155,71 @@ test('returns a lightweight healthy snapshot with safe queue descriptors', () =>
   assert.equal(result.components.subscriptions.next.state, 'pending');
   assert.equal(result.components.closure_verification.next.state, 'closing');
   assert.equal(result.components.analytics.status, 'healthy');
+});
+
+test('BID-only health ignores retained citywide email and subscription rows', () => {
+  const { database, databasePath } = createHealthDatabase();
+  database.exec(`
+    CREATE TABLE business_improvement_district_boundary_versions (
+      version TEXT PRIMARY KEY,
+      active INTEGER NOT NULL
+    );
+    CREATE TABLE live_request_bid_memberships (
+      srnumber TEXT NOT NULL,
+      boundary_version TEXT NOT NULL,
+      bid_id INTEGER NOT NULL
+    );
+    INSERT INTO business_improvement_district_boundary_versions VALUES ('bids-v1',1);
+    INSERT INTO live_request_bid_memberships VALUES ('311-00000011','bids-v1',1);
+    INSERT INTO live_monitor_state VALUES (
+      'collector_scope','bid_only','2026-07-29T11:59:45.000Z'
+    );
+    INSERT INTO live_monitor_state VALUES (
+      'last_successful_poll_at','2026-07-29T11:59:45.000Z','2026-07-29T11:59:45.000Z'
+    );
+    INSERT INTO live_monitor_state VALUES (
+      'bid_poll_interval_seconds','60','2026-07-29T11:59:45.000Z'
+    );
+  `);
+  const insertEvent = database.prepare(`
+    INSERT INTO nyc311_email_events(
+      reconciled_srnumber,received_at,created_at,parse_outcome,alias_match_status
+    ) VALUES (?,?,?,?,?)
+  `);
+  insertEvent.run(
+    '311-00000011',
+    '2026-07-29T11:58:00.000Z',
+    '2026-07-29T11:58:00.000Z',
+    'parsed',
+    'matched'
+  );
+  insertEvent.run(
+    '311-00000012',
+    '2026-07-29T11:59:59.000Z',
+    '2026-07-29T11:59:59.000Z',
+    'unrecognized',
+    'unregistered'
+  );
+  database.prepare(`
+    INSERT INTO nyc311_email_subscription_jobs VALUES (?,?,?,?,?,?,?)
+  `).run(
+    '311-00000011', 'pending', 0, '2026-07-29T12:01:00.000Z',
+    null, '2026-07-29T11:59:00.000Z', 0
+  );
+  database.prepare(`
+    INSERT INTO nyc311_email_subscription_jobs VALUES (?,?,?,?,?,?,?)
+  `).run(
+    '311-00000012', 'error', 9, '2026-07-29T11:00:00.000Z',
+    'retained citywide failure', '2026-07-29T11:00:00.000Z', 0
+  );
+  database.close();
+
+  const result = loadOperationalHealth(databasePath, { now: NOW });
+  assert.equal(result.components.map_discovery.collector_scope, 'bid_only');
+  assert.equal(result.components.email_intake.latest_event.id, 1);
+  assert.equal(result.components.email_intake.status, 'healthy');
+  assert.equal(result.components.subscriptions.next.state, 'pending');
+  assert.notEqual(result.components.subscriptions.reason, 'work_failed');
 });
 
 test('classifies overdue work and a stale collector without scanning queue totals', () => {
@@ -230,8 +296,8 @@ test('surfaces failed and stalled queue lanes as attention without exposing erro
   );
   database.prepare(`
     INSERT INTO nyc311_email_events(
-      received_at,created_at,parse_outcome,alias_match_status
-    ) VALUES (?,?,?,?)
+      reconciled_srnumber,received_at,created_at,parse_outcome,alias_match_status
+    ) VALUES (NULL,?,?,?,?)
   `).run(
     '2026-07-29T11:59:00.000Z',
     '2026-07-29T11:59:00.000Z',

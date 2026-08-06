@@ -82,6 +82,12 @@ declare -A allowed_env_keys=(
   [OFFSITE_BACKUPS_CONFIRMED]=1
   [RESTORE_TEST_CONFIRMED]=1
   [POLL_INTERVAL_SECONDS]=1
+  [COLLECTOR_SCOPE]=1
+  [DATABASE_PATH]=1
+  [BID_POLL_INTERVAL_SECONDS]=1
+  [BID_QUERY_CONCURRENCY]=1
+  [BID_QUERY_ZONE_TARGET]=1
+  [BID_CATCHUP_MAX_DAYS]=1
   [AUDIT_DELAY_MINUTES]=1
   [DETAIL_REQUEST_DELAY_MS]=1
   [AUDIT_MAX_PARALLEL]=1
@@ -146,6 +152,20 @@ if [[ ! "${SCHEDULED_OPEN_FOLLOWUPS_ENABLED:-1}" =~ ^(0|1)$ ]]; then
   echo "SCHEDULED_OPEN_FOLLOWUPS_ENABLED must be 0 or 1." >&2
   exit 1
 fi
+COLLECTOR_SCOPE="${COLLECTOR_SCOPE:-citywide}"
+if [[ "${COLLECTOR_SCOPE}" != "citywide" && "${COLLECTOR_SCOPE}" != "bid_only" ]]; then
+  echo "COLLECTOR_SCOPE must be citywide or bid_only." >&2
+  exit 1
+fi
+DATABASE_PATH="${DATABASE_PATH:-/data/portal-archive.sqlite}"
+if [[ ! "${DATABASE_PATH}" =~ ^/data/[A-Za-z0-9][A-Za-z0-9._-]*\.sqlite$ ]]; then
+  echo "DATABASE_PATH must be a plain .sqlite file directly inside /data." >&2
+  exit 1
+fi
+BID_POLL_INTERVAL_SECONDS="${BID_POLL_INTERVAL_SECONDS:-60}"
+BID_QUERY_CONCURRENCY="${BID_QUERY_CONCURRENCY:-3}"
+BID_QUERY_ZONE_TARGET="${BID_QUERY_ZONE_TARGET:-12}"
+BID_CATCHUP_MAX_DAYS="${BID_CATCHUP_MAX_DAYS:-2}"
 require_integer_range() {
   local key="$1"
   local minimum="$2"
@@ -166,6 +186,10 @@ require_integer_range DETAIL_REQUEST_DELAY_MS 2500 60000
 require_integer_range AUDIT_MAX_PARALLEL 1 8
 require_integer_range AUDIT_REQUEST_DELAY_MS 500 60000
 require_integer_range EMAIL_SUBSCRIPTION_DELAY_MS 1000 60000
+require_integer_range BID_POLL_INTERVAL_SECONDS 30 3600
+require_integer_range BID_QUERY_CONCURRENCY 1 8
+require_integer_range BID_QUERY_ZONE_TARGET 5 30
+require_integer_range BID_CATCHUP_MAX_DAYS 1 31
 if [[ -n "${SQLITE_BUSY_TIMEOUT_MS:-}" ]]; then
   require_integer_range SQLITE_BUSY_TIMEOUT_MS 0 300000
 fi
@@ -248,7 +272,8 @@ import_directory="/var/lib/nyc-311-live-imports"
 collector_lock="/var/lib/nyc-311-live-lock/collector.lock"
 snapshot="${import_directory}/${snapshot_name}"
 manifest="${snapshot}.manifest.json"
-target="${data_directory}/portal-archive.sqlite"
+database_name="${DATABASE_PATH#/data/}"
+target="${data_directory}/${database_name}"
 
 if [[ ! -f "${snapshot}" || ! -f "${manifest}" || -L "${snapshot}" || -L "${manifest}" ]]; then
   echo "Place regular ${snapshot_name} and ${snapshot_name}.manifest.json files in ${import_directory}." >&2
@@ -389,7 +414,7 @@ data_directory_locked=1
 rm -f "${target}.new"
 install -m 0600 -o root -g root "${snapshot}" "${target}.new"
 docker compose --profile tools run --rm --no-deps verify \
-  node verify-sqlite-snapshot.js "/data/portal-archive.sqlite.new" "/imports/${snapshot_name}.manifest.json"
+  node verify-sqlite-snapshot.js "${DATABASE_PATH}.new" "/imports/${snapshot_name}.manifest.json"
 chown 10001:10001 "${target}.new"
 mv -f "${target}.new" "${target}"
 rm -f "${target}-shm" "${target}-wal"

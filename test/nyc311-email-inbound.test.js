@@ -25,6 +25,7 @@ const {
   hmacHex,
   persistInboundEmail,
   reconcileStoredEmailClosures,
+  resolveInboundScopePolicy,
   verifyRawSignature
 } = require('../nyc311-email-inbound');
 
@@ -53,6 +54,13 @@ function createDatabase(t) {
       audit_outcome TEXT NOT NULL DEFAULT 'pending',
       audit_after TEXT NOT NULL
     );
+    CREATE TABLE live_monitor_state (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    INSERT INTO live_monitor_state(key,value,updated_at)
+    VALUES ('collector_scope','citywide','2026-07-23T14:00:00.000Z');
   `);
   database.prepare(`
     INSERT INTO live_portal_requests (
@@ -84,6 +92,47 @@ function createDatabase(t) {
 
 function deterministicRandom() {
   return Buffer.from('0123456789abcdef0123456789abcdef', 'hex');
+}
+
+function setCollectorScope(database, value) {
+  database.prepare(`
+    INSERT INTO live_monitor_state(key,value,updated_at) VALUES ('collector_scope',?,?)
+    ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at
+  `).run(value, NOW.toISOString());
+}
+
+function activateTestBid(database, srnumber = '311-28327449') {
+  database.prepare(`
+    INSERT INTO business_improvement_district_boundary_versions (
+      version,source_url,source_sha256,source_date,imported_at,feature_count,active
+    ) VALUES (?,?,?,?,?,?,1)
+  `).run(
+    'test-active-bids',
+    'https://example.test/bids.geojson',
+    'b'.repeat(64),
+    'test',
+    NOW.toISOString(),
+    1
+  );
+  database.prepare(`
+    INSERT INTO business_improvement_districts (
+      boundary_version,bid_id,name,borough_code,borough_name,geometry_json,
+      min_longitude,min_latitude,max_longitude,max_latitude
+    ) VALUES (?,?,?,?,?,?,?,?,?,?)
+  `).run(
+    'test-active-bids', 1, 'Test BID', 1, 'Manhattan',
+    JSON.stringify({
+      type: 'Polygon',
+      coordinates: [[[-74.1, 40.6], [-73.9, 40.6], [-73.9, 40.8],
+        [-74.1, 40.8], [-74.1, 40.6]]]
+    }),
+    -74.1, 40.6, -73.9, 40.8
+  );
+  database.prepare(`
+    INSERT INTO live_request_bid_memberships (
+      srnumber,boundary_version,bid_id,matched_at
+    ) VALUES (?,?,?,?)
+  `).run(srnumber, 'test-active-bids', 1, NOW.toISOString());
 }
 
 function parsedClosed(overrides = {}) {
@@ -454,13 +503,142 @@ test('BID-only inbound intake stores non-BID mail without changing status or for
   assert.equal(result.duplicate, false);
   assert.equal(result.authoritative_status_observed, 0);
   assert.equal(result.closure_wake_queued, 0);
+  assert.equal(result.scope_disposition, 'out_of_scope');
+  assert.equal(result.alias_match_status, 'request_missing');
   assert.equal(result.forward, null);
   assert.equal(database.prepare(`
     SELECT status FROM live_portal_requests WHERE srnumber='311-28327449'
   `).get().status, 'In Progress');
   assert.equal(database.prepare(`
-    SELECT closure_wake_queued FROM nyc311_email_events WHERE id=?
+    SELECT closure_wake_queued,reconciled_srnumber,alias_match_status
+    FROM nyc311_email_events WHERE id=?
   `).get(result.id).closure_wake_queued, 0);
+  assert.deepEqual({ ...database.prepare(`
+    SELECT reconciled_srnumber,alias_match_status,parse_error
+    FROM nyc311_email_events WHERE id=?
+  `).get(result.id) }, {
+    reconciled_srnumber: null,
+    alias_match_status: 'request_missing',
+    parse_error: 'collector_scope:out_of_scope'
+  });
+  assert.equal(database.prepare(`
+    SELECT last_received_at FROM nyc311_email_aliases WHERE id=?
+  `).get(alias.id).last_received_at, null);
+});
+
+test('inbound scope policy requires explicit environment and durable state agreement', t => {
+  const { database } = createDatabase(t);
+  t.after(() => database.close());
+
+  assert.deepEqual(resolveInboundScopePolicy(database, {
+    COLLECTOR_SCOPE: 'citywide'
+  }), {
+    actionAllowed: true,
+    requireBidMembership: false,
+    mode: 'citywide',
+    disposition: 'in_scope'
+  });
+  assert.equal(resolveInboundScopePolicy(database, {}).disposition, 'scope_env_missing');
+  assert.equal(resolveInboundScopePolicy(database, {
+    COLLECTOR_SCOPE: 'bid_only'
+  }).disposition, 'scope_mismatch');
+
+  setCollectorScope(database, 'bid_only');
+  assert.deepEqual(resolveInboundScopePolicy(database, {
+    COLLECTOR_SCOPE: 'bid_only'
+  }), {
+    actionAllowed: true,
+    requireBidMembership: true,
+    mode: 'bid_only',
+    disposition: 'in_scope'
+  });
+  database.prepare(`DELETE FROM live_monitor_state WHERE key='collector_scope'`).run();
+  assert.equal(resolveInboundScopePolicy(database, {
+    COLLECTOR_SCOPE: 'bid_only'
+  }).disposition, 'scope_state_missing');
+});
+
+test('scope mismatch keeps authenticated inbound MIME as audit-only evidence', async t => {
+  const { database, databasePath } = createDatabase(t);
+  const alias = createRequestAlias(database, {
+    srnumber: '311-28327449',
+    domain: DOMAIN,
+    now: NOW,
+    randomBytes: deterministicRandom
+  });
+  database.close();
+  const raw = Buffer.from('From: SRNotice@customercare.nyc.gov\r\n\r\nscope mismatch');
+  const handler = createNyc311EmailHandler({
+    env: {
+      INBOUND_EMAIL_WEBHOOK_SECRET: SECRET,
+      INBOUND_EMAIL_DOMAIN: DOMAIN,
+      COLLECTOR_SCOPE: 'bid_only'
+    },
+    databasePath,
+    parseNotification: async () => parsedClosed({ recipient: alias.recipient_address }),
+    now: () => new Date(NOW),
+    requireHttps: true
+  });
+  const response = mockResponse();
+  await handler(mockRequest(raw, signedHeaders(raw, alias.recipient_address)), response);
+  assert.equal(response.statusCode, 202);
+  assert.equal(response.body.forward, null);
+
+  const verified = new DatabaseSync(databasePath, { readOnly: true });
+  t.after(() => verified.close());
+  assert.deepEqual({ ...verified.prepare(`
+    SELECT parse_outcome,alias_match_status,reconciled_srnumber,parse_error
+    FROM nyc311_email_events
+  `).get() }, {
+    parse_outcome: 'parsed',
+    alias_match_status: 'request_missing',
+    reconciled_srnumber: null,
+    parse_error: 'collector_scope:scope_mismatch'
+  });
+  assert.equal(verified.prepare(`
+    SELECT status FROM live_portal_requests WHERE srnumber='311-28327449'
+  `).get().status, 'In Progress');
+  assert.equal(verified.prepare(`
+    SELECT last_received_at FROM nyc311_email_aliases WHERE id=?
+  `).get(alias.id).last_received_at, null);
+});
+
+test('matching BID-only state processes active BID email normally', async t => {
+  const { database, databasePath } = createDatabase(t);
+  setCollectorScope(database, 'bid_only');
+  activateTestBid(database);
+  const alias = createRequestAlias(database, {
+    srnumber: '311-28327449',
+    domain: DOMAIN,
+    now: NOW,
+    randomBytes: deterministicRandom
+  });
+  database.close();
+  const raw = Buffer.from('From: SRNotice@customercare.nyc.gov\r\n\r\nactive BID');
+  const handler = createNyc311EmailHandler({
+    env: {
+      INBOUND_EMAIL_WEBHOOK_SECRET: SECRET,
+      INBOUND_EMAIL_DOMAIN: DOMAIN,
+      COLLECTOR_SCOPE: 'bid_only'
+    },
+    databasePath,
+    parseNotification: async () => parsedClosed({ recipient: alias.recipient_address }),
+    now: () => new Date(NOW),
+    requireHttps: true
+  });
+  const response = mockResponse();
+  await handler(mockRequest(raw, signedHeaders(raw, alias.recipient_address)), response);
+  assert.equal(response.statusCode, 202);
+  assert.equal(response.body.forward.srnumber, '311-28327449');
+
+  const verified = new DatabaseSync(databasePath, { readOnly: true });
+  t.after(() => verified.close());
+  assert.equal(verified.prepare(`
+    SELECT status FROM live_portal_requests WHERE srnumber='311-28327449'
+  `).get().status, 'Closed');
+  assert.equal(verified.prepare(`
+    SELECT alias_match_status FROM nyc311_email_events
+  `).get().alias_match_status, 'matched');
 });
 
 test('stores a forwarded closure but does not treat its attached From header as authoritative', t => {
@@ -817,7 +995,8 @@ test('handler verifies both signed layers, SES verdicts, timestamp, and idempote
   const handler = createNyc311EmailHandler({
     env: {
       INBOUND_EMAIL_WEBHOOK_SECRET: SECRET,
-      INBOUND_EMAIL_DOMAIN: DOMAIN
+      INBOUND_EMAIL_DOMAIN: DOMAIN,
+      COLLECTOR_SCOPE: 'citywide'
     },
     databasePath,
     parseNotification: async () => parsedClosed({ recipient: alias.recipient_address }),

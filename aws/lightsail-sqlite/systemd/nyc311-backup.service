@@ -3,7 +3,6 @@ Description=Verified NYC 311 Live SQLite backup
 Requires=docker.service
 After=docker.service
 ConditionPathExists=/opt/nyc-311-live/aws/lightsail-sqlite/.env
-ConditionPathExists=/var/lib/nyc-311-live/portal-archive.sqlite
 
 [Service]
 Type=oneshot

@@ -155,7 +155,8 @@ function readQueueState(database, {
   table,
   stateColumn,
   state,
-  dueColumn
+  dueColumn,
+  whereSql = ''
 }) {
   const sql = `
     SELECT ${stateColumn} AS state,${dueColumn},updated_at,attempts,
@@ -169,6 +170,7 @@ function readQueueState(database, {
            THEN 1 ELSE 0 END AS quarantined
     FROM ${table}
     WHERE ${stateColumn}=?
+      ${whereSql}
     ORDER BY ${dueColumn}
     LIMIT 1
   `;
@@ -293,9 +295,18 @@ function detailsComponent(database, nowMs, thresholds) {
 }
 
 function emailIntakeComponent(database, nowMs, thresholds) {
+  const scope = readState(database, 'collector_scope');
+  const bidOnly = scope && scope.value === 'bid_only';
   const row = database.prepare(`
     SELECT id,received_at,created_at,parse_outcome,alias_match_status
-    FROM nyc311_email_events
+    FROM nyc311_email_events AS email
+    ${bidOnly ? `WHERE EXISTS (
+      SELECT 1
+      FROM live_request_bid_memberships AS membership
+      JOIN business_improvement_district_boundary_versions AS boundary
+        ON boundary.version=membership.boundary_version AND boundary.active=1
+      WHERE membership.srnumber=email.reconciled_srnumber
+    )` : ''}
     ORDER BY id DESC
     LIMIT 1
   `).get();
@@ -337,12 +348,22 @@ function emailIntakeComponent(database, nowMs, thresholds) {
 }
 
 function subscriptionsComponent(database, nowMs, thresholds) {
+  const scope = readState(database, 'collector_scope');
+  const bidOnly = scope && scope.value === 'bid_only';
+  const bidWhere = bidOnly ? `AND EXISTS (
+    SELECT 1
+    FROM live_request_bid_memberships AS membership
+    JOIN business_improvement_district_boundary_versions AS boundary
+      ON boundary.version=membership.boundary_version AND boundary.active=1
+    WHERE membership.srnumber=nyc311_email_subscription_jobs.srnumber
+  )` : '';
   return queueComponent(['error', 'processing', 'pending', 'retry'].map(state =>
     readQueueState(database, {
       table: 'nyc311_email_subscription_jobs',
       stateColumn: 'state',
       state,
-      dueColumn: 'next_attempt_at'
+      dueColumn: 'next_attempt_at',
+      whereSql: bidWhere
     })
   ), nowMs, thresholds, {
     quarantinedState: 'retry'

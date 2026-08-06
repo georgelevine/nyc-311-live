@@ -1652,23 +1652,40 @@ async function main() {
       closureTracker,
       observedAt: startupStateAt
     });
-  const detailQueueSeededAt = new Date().toISOString();
-  seedDetailQueue.run(detailQueueSeededAt, detailQueueSeededAt);
-  const detailQueueReconciled = reconcileStoredDetails(db, {
-    updatedAt: detailQueueSeededAt,
-    requireBidMembership: BID_ONLY
-  });
-  const seeded = seedClosureTracking({
-    db,
-    closureTracker,
-    updateLiveStatus,
-    now: new Date(),
-    requireBidMembership: BID_ONLY
-  });
-  const emailClosuresReconciled = reconcileStoredEmailClosures(db, {
-    now: new Date(),
-    requireBidMembership: BID_ONLY
-  });
+  let detailQueueReconciled = { reconciled: 0 };
+  let seeded = {
+    statusRows: 0,
+    followUpsSeeded: 0,
+    provisionalFollowUpsSeeded: 0
+  };
+  let emailClosuresReconciled = {
+    reconciled: 0,
+    verification_queued: 0,
+    skipped_later_open_status: 0
+  };
+  // Citywide mode still performs the legacy, archive-wide startup repair. In
+  // BID-only mode it is both redundant and harmful: an existing mixed archive
+  // can contain hundreds of thousands of intentionally dormant citywide rows,
+  // while current BID rows are already queued when each exact polygon match is
+  // saved. Skipping the historical sweep lets the first BID poll establish a
+  // fresh watermark immediately; all ongoing detail, closure, and subscription
+  // workers remain restricted to active BID memberships below.
+  if (!BID_ONLY) {
+    const detailQueueSeededAt = new Date().toISOString();
+    seedDetailQueue.run(detailQueueSeededAt, detailQueueSeededAt);
+    detailQueueReconciled = reconcileStoredDetails(db, {
+      updatedAt: detailQueueSeededAt
+    });
+    seeded = seedClosureTracking({
+      db,
+      closureTracker,
+      updateLiveStatus,
+      now: new Date()
+    });
+    emailClosuresReconciled = reconcileStoredEmailClosures(db, {
+      now: new Date()
+    });
+  }
   const openFollowUpsRescheduled = SCHEDULED_OPEN_FOLLOWUPS_ENABLED
     ? closureTracker.normalizeOpenFollowUps(new Date())
     : 0;

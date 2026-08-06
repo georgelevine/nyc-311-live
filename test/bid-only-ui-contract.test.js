@@ -97,6 +97,16 @@ test('BID-only mode has one dedicated, accessible collection-scope summary', () 
   assert.doesNotMatch(renderScope, /audit|reconcil/i);
 });
 
+test('BID-only live UI does not link to the unpublished metrics page', () => {
+  const localLinks = $('a[href]')
+    .map((_index, link) => $(link).attr('href'))
+    .get();
+
+  assert.equal(localLinks.includes('/bid-metrics.html'), false);
+  assert.equal(HTML.includes('/bid-metrics.html'), false);
+  assert.equal(CSS.includes('.bid-metrics-link'), false);
+});
+
 test('BID-only summaries describe exact BID capture without operator audit language', () => {
   const coverage = functionSource('coverageSummary', 'historySummary');
   assert.match(coverage, /Exact BID map matches/);

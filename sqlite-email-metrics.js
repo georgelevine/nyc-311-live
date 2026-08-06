@@ -155,6 +155,25 @@ function tableNames(database) {
   `).all().map(row => row.name));
 }
 
+function collectorBidOnly(database, tables) {
+  if (!tables.has('live_monitor_state')) return false;
+  const row = database.prepare(`
+    SELECT value FROM live_monitor_state WHERE key='collector_scope' LIMIT 1
+  `).get();
+  return String(row && row.value || '').trim().toLowerCase() === 'bid_only';
+}
+
+function activeBidMembershipWhere(srnumberSql) {
+  return `EXISTS (
+    SELECT 1
+    FROM live_request_bid_memberships AS metric_membership
+    JOIN business_improvement_district_boundary_versions AS metric_boundary
+      ON metric_boundary.version=metric_membership.boundary_version
+     AND metric_boundary.active=1
+    WHERE metric_membership.srnumber=${srnumberSql}
+  )`;
+}
+
 function canonicalSubmittedSql(hasPortalRequests) {
   return hasPortalRequests
     ? `COALESCE(
@@ -216,7 +235,7 @@ function expectedDetailIssueWhere(alias = 'email') {
     )`;
 }
 
-function loadDeliveryMetrics(database) {
+function loadDeliveryMetrics(database, bidOnly = false) {
   const row = database.prepare(`
     SELECT
       COUNT(*) AS all_accepted,
@@ -268,6 +287,7 @@ function loadDeliveryMetrics(database) {
         THEN 1 ELSE 0 END) AS issues,
       MAX(email.received_at) AS latest_received_at
     FROM nyc311_email_events AS email
+    ${bidOnly ? `WHERE ${activeBidMembershipWhere('email.reconciled_srnumber')}` : ''}
   `).get();
   const submitted = Number(row.submitted || 0);
   const updated = Number(row.updated || 0);
@@ -292,7 +312,13 @@ function loadDeliveryMetrics(database) {
   };
 }
 
-function loadSubscriptionMetrics(database, tables, earlySubscriptionSeconds, dataQuality) {
+function loadSubscriptionMetrics(
+  database,
+  tables,
+  earlySubscriptionSeconds,
+  dataQuality,
+  bidOnly = false
+) {
   if (!tables.has('nyc311_email_subscription_jobs')) {
     return {
       total: 0,
@@ -311,6 +337,7 @@ function loadSubscriptionMetrics(database, tables, earlySubscriptionSeconds, dat
   const stateRows = database.prepare(`
     SELECT state,COUNT(*) AS count
     FROM nyc311_email_subscription_jobs
+    ${bidOnly ? `WHERE ${activeBidMembershipWhere('nyc311_email_subscription_jobs.srnumber')}` : ''}
     GROUP BY state
     ORDER BY state
   `).all();
@@ -347,6 +374,7 @@ function loadSubscriptionMetrics(database, tables, earlySubscriptionSeconds, dat
     JOIN live_portal_requests AS live ON live.srnumber=jobs.srnumber
     ${portalJoinSql(hasPortalRequests)}
     WHERE jobs.state='subscribed'
+      ${bidOnly ? `AND ${activeBidMembershipWhere('jobs.srnumber')}` : ''}
   `).all();
 
   const lagValues = [];
@@ -402,7 +430,7 @@ function loadSubscriptionMetrics(database, tables, earlySubscriptionSeconds, dat
   };
 }
 
-function loadClosureCoverage(database, tables, now, graceSeconds) {
+function loadClosureCoverage(database, tables, now, graceSeconds, bidOnly = false) {
   if (!tables.has('nyc311_email_subscription_jobs')
       || !tables.has('portal_requests')
       || !tables.has('nyc311_email_events')) {
@@ -436,6 +464,7 @@ function loadClosureCoverage(database, tables, now, graceSeconds) {
       LEFT JOIN nyc311_email_events AS email
         ON email.reconciled_srnumber=jobs.srnumber
       WHERE jobs.state='subscribed'
+        ${bidOnly ? `AND ${activeBidMembershipWhere('jobs.srnumber')}` : ''}
         AND jobs.subscribed_at IS NOT NULL
         AND portal.date_closed IS NOT NULL
         AND julianday(portal.date_closed)>=julianday(jobs.subscribed_at)
@@ -750,15 +779,26 @@ function computeSqliteEmailMetrics(database, {
   result.measured_closure_email_coverage.grace_seconds = graceSeconds;
   result.observed_response_times.prospective_cohort.early_subscription_seconds = earlySeconds;
   const tables = tableNames(database);
+  const bidOnly = collectorBidOnly(database, tables);
+  const bidScopeReady = !bidOnly || (
+    tables.has('live_request_bid_memberships')
+    && tables.has('business_improvement_district_boundary_versions')
+  );
+
+  // A BID-only dashboard must never fall back to citywide analytics when its
+  // membership tables are unavailable. Returning the empty contract is safer
+  // than publishing misleading SES/email totals.
+  if (!bidScopeReady) return result;
 
   if (tables.has('nyc311_email_events')) {
-    result.deliveries = loadDeliveryMetrics(database);
+    result.deliveries = loadDeliveryMetrics(database, bidOnly);
   }
   const subscriptionMetrics = loadSubscriptionMetrics(
     database,
     tables,
     earlySeconds,
-    result.data_quality
+    result.data_quality,
+    bidOnly
   );
   const {
     prospectiveRequestNumbers,
@@ -770,7 +810,8 @@ function computeSqliteEmailMetrics(database, {
     database,
     tables,
     normalizedNow,
-    graceSeconds
+    graceSeconds,
+    bidOnly
   );
   result.observed_response_times = loadResponseMetrics(
     database,

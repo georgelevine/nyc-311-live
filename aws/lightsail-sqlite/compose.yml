@@ -176,7 +176,7 @@ services:
       - node
       - backup-sqlite.js
       - --db
-      - /data/portal-archive.sqlite
+      - ${DATABASE_PATH:-/data/portal-archive.sqlite}
       - --directory
       - /backups
       - --retain

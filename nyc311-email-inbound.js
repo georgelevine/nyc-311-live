@@ -18,6 +18,7 @@ const MAX_DELIVERY_AGE_SECONDS = 5 * 60;
 const REQUEST_NUMBER_PATTERN = /^311-\d{8}$/;
 const SIGNATURE_PATTERN = /^(?:v1=|sha256=)?([a-f0-9]{64})$/i;
 const EMAIL_PATTERN = /^[^@\s<>]+@[^@\s<>]+$/;
+const COLLECTOR_SCOPES = new Set(['citywide', 'bid_only']);
 
 function cleanText(value, maximumLength = 2048) {
   if (value == null) return null;
@@ -31,6 +32,64 @@ function normalizedRequestNumber(value) {
   return requestNumber && REQUEST_NUMBER_PATTERN.test(requestNumber)
     ? requestNumber
     : null;
+}
+
+function normalizedCollectorScope(value) {
+  const scope = String(value || '').trim().toLowerCase();
+  return COLLECTOR_SCOPES.has(scope) ? scope : null;
+}
+
+function tableExists(database, name) {
+  return Boolean(database.prepare(`
+    SELECT 1 FROM sqlite_master WHERE type='table' AND name=?
+  `).get(name));
+}
+
+function durableCollectorScope(database) {
+  if (!tableExists(database, 'live_monitor_state')) return null;
+  const row = database.prepare(`
+    SELECT value FROM live_monitor_state WHERE key='collector_scope' LIMIT 1
+  `).get();
+  return normalizedCollectorScope(row && row.value);
+}
+
+// Inbound email runs in its own process. Requiring its explicit configuration
+// to agree with the collector's durable state prevents a stale container from
+// mutating requests or forwarding mail after a collection-scope switch.
+function resolveInboundScopePolicy(database, env = process.env) {
+  const configuredScope = normalizedCollectorScope(env && env.COLLECTOR_SCOPE);
+  const durableScope = durableCollectorScope(database);
+  if (!configuredScope) {
+    return {
+      actionAllowed: false,
+      requireBidMembership: false,
+      mode: null,
+      disposition: 'scope_env_missing'
+    };
+  }
+  if (!durableScope) {
+    return {
+      actionAllowed: false,
+      requireBidMembership: configuredScope === 'bid_only',
+      mode: configuredScope,
+      disposition: 'scope_state_missing'
+    };
+  }
+  if (configuredScope !== durableScope) {
+    return {
+      actionAllowed: false,
+      requireBidMembership: configuredScope === 'bid_only'
+        || durableScope === 'bid_only',
+      mode: durableScope,
+      disposition: 'scope_mismatch'
+    };
+  }
+  return {
+    actionAllowed: true,
+    requireBidMembership: durableScope === 'bid_only',
+    mode: durableScope,
+    disposition: 'in_scope'
+  };
 }
 
 function signatureBytes(value) {
@@ -338,6 +397,55 @@ function reconcileAlias(database, {
   };
 }
 
+function inspectAlias(database, { recipientAddress, recipientLocalPart }) {
+  if (recipientAddress) {
+    const alias = database.prepare(`
+      SELECT * FROM nyc311_email_aliases WHERE recipient_address=?
+    `).get(recipientAddress);
+    if (alias) return alias;
+  }
+  return recipientLocalPart
+    ? database.prepare(`
+        SELECT * FROM nyc311_email_aliases WHERE local_part=?
+      `).get(recipientLocalPart) || null
+    : null;
+}
+
+function hasActiveBidMembership(database, srnumber) {
+  if (!srnumber
+      || !tableExists(database, 'live_request_bid_memberships')
+      || !tableExists(database, 'business_improvement_district_boundary_versions')) {
+    return false;
+  }
+  return Boolean(database.prepare(`
+    SELECT 1
+    FROM live_request_bid_memberships AS membership
+    JOIN business_improvement_district_boundary_versions AS boundary
+      ON boundary.version=membership.boundary_version AND boundary.active=1
+    WHERE membership.srnumber=?
+    LIMIT 1
+  `).get(srnumber));
+}
+
+function scopeAuditReconciliation(database, recipient, parsedSrnumber, disposition) {
+  const alias = inspectAlias(database, {
+    recipientAddress: recipient.address,
+    recipientLocalPart: recipient.localPart
+  });
+  return {
+    alias,
+    // Keep the durable enum compatible with existing databases. The precise
+    // scope disposition is stored in parse_error and returned to the caller.
+    status: alias && alias.srnumber && parsedSrnumber && alias.srnumber !== parsedSrnumber
+      ? 'mismatch'
+      : alias ? 'request_missing'
+        : recipient.address ? 'unregistered' : 'missing_recipient',
+    reconciledSrnumber: null,
+    mismatch: Boolean(alias && alias.srnumber && parsedSrnumber
+      && alias.srnumber !== parsedSrnumber)
+  };
+}
+
 function wakeClosureVerification(database, srnumber, checkedAt, {
   allowAlreadyClosedStatus = false
 } = {}) {
@@ -593,7 +701,8 @@ function persistInboundEmail(database, {
   envelopeRecipient,
   inboundDomain = DEFAULT_INBOUND_EMAIL_DOMAIN,
   now = new Date(),
-  requireBidMembership = false
+  requireBidMembership = false,
+  scopePolicy = null
 }) {
   if (!Buffer.isBuffer(raw)) throw new TypeError('raw must be a Buffer');
   applyMigrations(database, now.toISOString());
@@ -615,6 +724,17 @@ function persistInboundEmail(database, {
     : createdAt;
   const recipient = recipientParts(parsed, envelopeRecipient, inboundDomain);
   const verdicts = metadata && metadata.verdicts || {};
+  const processingPolicy = scopePolicy && typeof scopePolicy === 'object'
+    ? {
+        actionAllowed: scopePolicy.actionAllowed === true,
+        requireBidMembership: scopePolicy.requireBidMembership === true,
+        disposition: cleanText(scopePolicy.disposition, 64) || 'scope_blocked'
+      }
+    : {
+        actionAllowed: true,
+        requireBidMembership: Boolean(requireBidMembership),
+        disposition: 'in_scope'
+      };
 
   database.exec('BEGIN IMMEDIATE');
   try {
@@ -627,12 +747,35 @@ function persistInboundEmail(database, {
       database.exec('COMMIT');
       return { ...raced, duplicate: true };
     }
-    const reconciliation = reconcileAlias(database, {
+    const inspectedAlias = inspectAlias(database, {
       recipientAddress: recipient.address,
-      recipientLocalPart: recipient.localPart,
-      parsedSrnumber: values.parsedSrnumber,
-      receivedAt
+      recipientLocalPart: recipient.localPart
     });
+    const scopeRequestNumbers = [
+      values.parsedSrnumber,
+      inspectedAlias && inspectedAlias.srnumber
+    ].filter(Boolean);
+    const bidMembershipAllowed = !processingPolicy.requireBidMembership
+      || (scopeRequestNumbers.length > 0 && scopeRequestNumbers.every(
+        srnumber => hasActiveBidMembership(database, srnumber)
+      ));
+    const eventActionAllowed = processingPolicy.actionAllowed && bidMembershipAllowed;
+    const scopeDisposition = eventActionAllowed
+      ? processingPolicy.disposition
+      : processingPolicy.actionAllowed ? 'out_of_scope' : processingPolicy.disposition;
+    const reconciliation = eventActionAllowed
+      ? reconcileAlias(database, {
+          recipientAddress: recipient.address,
+          recipientLocalPart: recipient.localPart,
+          parsedSrnumber: values.parsedSrnumber,
+          receivedAt
+        })
+      : scopeAuditReconciliation(
+          database,
+          recipient,
+          values.parsedSrnumber,
+          scopeDisposition
+        );
     const insert = database.prepare(`
       INSERT INTO nyc311_email_events (
         raw_sha256,raw_bytes,ses_message_id,internet_message_id,
@@ -700,7 +843,11 @@ function persistInboundEmail(database, {
       dmarc_verdict: cleanText(verdicts.dmarcVerdict, 32),
       parsed_json: parsed == null ? null : jsonText(parsed),
       parse_outcome: values.parseOutcome,
-      parse_error: cleanText(parseError && parseError.message || parseError, 4096),
+      parse_error: cleanText(
+        parseError && parseError.message || parseError
+          || (!eventActionAllowed ? `collector_scope:${scopeDisposition}` : null),
+        4096
+      ),
       received_at: receivedAt,
       created_at: createdAt
     });
@@ -718,17 +865,7 @@ function persistInboundEmail(database, {
       && !reconciliation.mismatch
       && reconciliation.reconciledSrnumber
       && ['matched', 'attached'].includes(reconciliation.status);
-    const activeBidMembership = !requireBidMembership || Boolean(
-      reconciliation.reconciledSrnumber && database.prepare(`
-        SELECT 1
-        FROM live_request_bid_memberships AS membership
-        JOIN business_improvement_district_boundary_versions AS boundary
-          ON boundary.version=membership.boundary_version AND boundary.active=1
-        WHERE membership.srnumber=?
-        LIMIT 1
-      `).get(reconciliation.reconciledSrnumber)
-    );
-    const actionableEvent = matchedEvent && activeBidMembership;
+    const actionableEvent = eventActionAllowed && matchedEvent;
     // Only a message delivered directly by NYC311 can authoritatively change
     // status. A forwarded .eml attachment is useful evidence for display, but
     // SES authenticated its outer sender rather than the attached From header.
@@ -782,6 +919,7 @@ function persistInboundEmail(database, {
       authoritative_status_observed: authoritativeClosureObserved ? 1 : 0,
       closure_wake_queued: closureWakeQueued ? 1 : 0,
       alias_match_status: reconciliation.status,
+      scope_disposition: scopeDisposition,
       forward
     };
   } catch (error) {
@@ -891,6 +1029,9 @@ function createNyc311EmailHandler({
         return res.status(503).json({ error: 'inbound email receiver unavailable' });
       }
       database = openDatabaseFn(databasePath);
+      const receivedAt = now();
+      applyMigrations(database, receivedAt.toISOString());
+      const scopePolicy = resolveInboundScopePolicy(database, env);
       const result = persistInboundEmail(database, {
         raw,
         parsed,
@@ -898,9 +1039,8 @@ function createNyc311EmailHandler({
         metadata: signed.metadata,
         envelopeRecipient: signed.recipient,
         inboundDomain: env.INBOUND_EMAIL_DOMAIN || DEFAULT_INBOUND_EMAIL_DOMAIN,
-        now: now(),
-        requireBidMembership: String(env.COLLECTOR_SCOPE || '')
-          .trim().toLowerCase() === 'bid_only'
+        now: receivedAt,
+        scopePolicy
       });
       return res.status(202).json({
         accepted: true,
@@ -930,6 +1070,7 @@ module.exports = {
   persistInboundEmail,
   reconcileStoredEmailClosures,
   recipientParts,
+  resolveInboundScopePolicy,
   secureSignatureMatch,
   verifyRawSignature,
   verifySignedEnvelope,

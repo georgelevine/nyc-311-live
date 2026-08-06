@@ -552,6 +552,70 @@ test('rejects unzoned canonical timestamps instead of applying host timezone', (
   database.close();
 });
 
+test('BID-only email metrics exclude retained citywide receipts and subscriptions', () => {
+  const database = new DatabaseSync(':memory:');
+  createSchema(database);
+  database.exec(`
+    CREATE TABLE live_monitor_state (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE business_improvement_district_boundary_versions (
+      version TEXT PRIMARY KEY,
+      active INTEGER NOT NULL
+    );
+    CREATE TABLE live_request_bid_memberships (
+      srnumber TEXT NOT NULL,
+      boundary_version TEXT NOT NULL,
+      bid_id INTEGER NOT NULL
+    );
+    INSERT INTO live_monitor_state VALUES (
+      'collector_scope','bid_only','2026-07-25T15:00:00.000Z'
+    );
+    INSERT INTO business_improvement_district_boundary_versions VALUES ('bids-v1',1);
+  `);
+  insertRequest(database, {
+    srnumber: '311-00000051',
+    liveSubmitted: '2026-07-25T12:00:00.000Z',
+    subscribedAt: '2026-07-25T12:01:00.000Z'
+  });
+  insertRequest(database, {
+    srnumber: '311-00000052',
+    liveSubmitted: '2026-07-25T12:00:00.000Z',
+    subscribedAt: '2026-07-25T12:01:00.000Z'
+  });
+  database.prepare(`
+    INSERT INTO live_request_bid_memberships VALUES (?,?,?)
+  `).run('311-00000051', 'bids-v1', 1);
+  insertEmail(database, {
+    srnumber: '311-00000051',
+    kind: 'Updated',
+    receivedAt: '2026-07-25T12:02:00.000Z',
+    agencyAcronym: 'BID',
+    requestType: 'Noise'
+  });
+  insertEmail(database, {
+    srnumber: '311-00000052',
+    kind: 'Closed',
+    receivedAt: '2026-07-25T12:03:00.000Z',
+    agencyAcronym: 'OUT',
+    requestType: 'Illegal Parking'
+  });
+
+  const result = computeSqliteEmailMetrics(database, {
+    now: new Date('2026-07-25T15:00:00.000Z')
+  });
+  assert.equal(result.deliveries.all_accepted, 1);
+  assert.equal(result.deliveries.updated, 1);
+  assert.equal(result.deliveries.closed, 0);
+  assert.equal(result.subscriptions.total, 1);
+  assert.equal(result.subscriptions.confirmed, 1);
+  assert.equal(result.observed_response_times.prospective_cohort.requests, 1);
+  assert.equal(result.observed_response_times.by_agency[0].agency_acronym, 'BID');
+  database.close();
+});
+
 test('can open a database path read-only and reports a missing path safely', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-email-metrics-'));
   const databasePath = path.join(directory, 'archive.sqlite');

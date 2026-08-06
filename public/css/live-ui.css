@@ -381,17 +381,6 @@ a:focus-visible {
   gap: 6px;
 }
 
-.bid-metrics-link {
-  color: #1769e0;
-  font-size: var(--font-sm);
-  font-weight: 750;
-  text-decoration: none;
-}
-
-.bid-metrics-link:hover {
-  text-decoration: underline;
-}
-
 .bid-network-overview {
   margin: 0 0 14px;
   overflow: hidden;

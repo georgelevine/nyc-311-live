@@ -171,6 +171,71 @@ test('snapshot replacement stops the isolated database writer and checks it afte
   assert.match(installSnapshot, /web_image_name="nyc-311-sqlite:\$\{WEB_IMAGE_TAG\}"/);
 });
 
+test('snapshot installation accepts and validates the complete BID-only environment', () => {
+  for (const key of [
+    'COLLECTOR_SCOPE',
+    'DATABASE_PATH',
+    'BID_POLL_INTERVAL_SECONDS',
+    'BID_QUERY_CONCURRENCY',
+    'BID_QUERY_ZONE_TARGET',
+    'BID_CATCHUP_MAX_DAYS'
+  ]) {
+    assert.match(installSnapshot, new RegExp(`\\[${key}\\]=1`));
+  }
+  assert.match(installSnapshot, /COLLECTOR_SCOPE must be citywide or bid_only/);
+  assert.match(
+    installSnapshot,
+    /DATABASE_PATH must be a plain \.sqlite file directly inside \/data/
+  );
+  assert.match(installSnapshot, /require_integer_range BID_POLL_INTERVAL_SECONDS 30 3600/);
+  assert.match(installSnapshot, /require_integer_range BID_QUERY_CONCURRENCY 1 8/);
+  assert.match(installSnapshot, /require_integer_range BID_QUERY_ZONE_TARGET 5 30/);
+  assert.match(installSnapshot, /require_integer_range BID_CATCHUP_MAX_DAYS 1 31/);
+});
+
+test('backup, snapshot restore, and deploy polling share the configured database path', () => {
+  const backup = compose.slice(
+    compose.indexOf('  backup:'),
+    compose.indexOf('  verify:')
+  );
+  assert.match(backup, /- \$\{DATABASE_PATH:-\/data\/portal-archive\.sqlite\}/);
+  assert.doesNotMatch(
+    backupService,
+    /ConditionPathExists=\/var\/lib\/nyc-311-live\/portal-archive\.sqlite/
+  );
+  assert.match(installSnapshot, /database_name="\$\{DATABASE_PATH#\/data\/\}"/);
+  assert.match(installSnapshot, /target="\$\{data_directory\}\/\$\{database_name\}"/);
+  assert.match(
+    installSnapshot,
+    /node verify-sqlite-snapshot\.js "\$\{DATABASE_PATH\}\.new"/
+  );
+  assert.match(
+    deploy,
+    /database_host_path="\/var\/lib\/nyc-311-live\/\$\{container_database_path#\/data\/\}"/
+  );
+  assert.equal(
+    (deploy.match(/sqlite3 "\$\{database_host_path\}"/g) || []).length >= 4,
+    true
+  );
+  assert.doesNotMatch(
+    deploy,
+    /sqlite3 \/var\/lib\/nyc-311-live\/portal-archive\.sqlite/
+  );
+});
+
+test('service deployment proves BID-only scope after a fresh collector poll', () => {
+  assert.match(deploy, /expected_collector_scope="\$\{expected_collector_scope:-citywide\}"/);
+  assert.match(deploy, /expected_collector_scope\}" == "bid_only"/);
+  assert.match(
+    deploy,
+    /SELECT value FROM live_monitor_state WHERE key='collector_scope'/
+  );
+  assert.match(
+    deploy,
+    /completed a poll without recording the required BID-only scope/
+  );
+});
+
 test('nightly backup priority, exclusive cleanup, and I/O limits apply inside the container', () => {
   const backup = compose.slice(
     compose.indexOf('  backup:'),
@@ -215,6 +280,9 @@ test('rollback cannot recurse or continue a failed deployment', () => {
       < deploy.indexOf('mv -- "${current_directory}" "${previous_directory}"')
   );
   assert.match(rollback, /rollback was incomplete; immediate operator attention is required/);
+  assert.match(rollback, /rollback_poll_before/);
+  assert.match(rollback, /rollback_runtime_ready/);
+  assert.match(rollback, /previous runtime did not become healthy/);
 });
 
 test('public smoke checks exact versioned JavaScript, CSS, and vendor bytes', () => {

@@ -49,10 +49,50 @@ if ! flock --exclusive --nonblock 9; then
   exit 1
 fi
 
-if [[ ! -d "${current_directory}" || ! -f "${current_directory}/aws/lightsail-sqlite/.env" ]]; then
+current_env="${current_directory}/aws/lightsail-sqlite/.env"
+if [[ ! -d "${current_directory}" || ! -f "${current_env}" || -L "${current_env}" ]]; then
   echo "The current Lightsail release or its protected environment file is missing." >&2
   exit 1
 fi
+if [[ "$(stat -c '%u' "${current_env}")" != "0"
+    || "$(stat -c '%a' "${current_env}")" != "600" ]]; then
+  echo "The protected environment file must be owned by root with mode 0600." >&2
+  exit 1
+fi
+read_protected_env_value() {
+  local key="$1"
+  local file="$2"
+  awk -v key="${key}" '
+    index($0, key "=") == 1 {
+      count += 1
+      value = substr($0, length(key) + 2)
+    }
+    END {
+      if (count > 1) exit 2
+      if (count == 1) printf "%s", value
+    }
+  ' "${file}"
+}
+if ! expected_collector_scope="$(read_protected_env_value COLLECTOR_SCOPE "${current_env}")"; then
+  echo "The protected environment has duplicate COLLECTOR_SCOPE entries." >&2
+  exit 1
+fi
+expected_collector_scope="${expected_collector_scope:-citywide}"
+if [[ "${expected_collector_scope}" != "citywide"
+    && "${expected_collector_scope}" != "bid_only" ]]; then
+  echo "COLLECTOR_SCOPE must be citywide or bid_only." >&2
+  exit 1
+fi
+if ! container_database_path="$(read_protected_env_value DATABASE_PATH "${current_env}")"; then
+  echo "The protected environment has duplicate DATABASE_PATH entries." >&2
+  exit 1
+fi
+container_database_path="${container_database_path:-/data/portal-archive.sqlite}"
+if [[ ! "${container_database_path}" =~ ^/data/[A-Za-z0-9][A-Za-z0-9._-]*\.sqlite$ ]]; then
+  echo "DATABASE_PATH must be a plain .sqlite file directly inside /data." >&2
+  exit 1
+fi
+database_host_path="/var/lib/nyc-311-live/${container_database_path#/data/}"
 if [[ ! -f "${archive}" || -L "${archive}" ]]; then
   echo "The fixed release inbox does not contain ${release_sha}." >&2
   exit 1
@@ -134,7 +174,6 @@ elif [[ "${deployment_scope}" == "web" ]]; then
   fi
 fi
 
-current_env="${current_directory}/aws/lightsail-sqlite/.env"
 staging_env="${staging_directory}/aws/lightsail-sqlite/.env"
 install -m 0600 -o root -g root "${current_env}" "${staging_env}"
 set_env_value() {
@@ -197,7 +236,7 @@ collector_fingerprint_before="$(container_fingerprint "${collector_before}")"
 inbound_email_fingerprint_before="$(container_fingerprint "${inbound_email_before}")"
 baseline_poll=""
 if [[ "${deployment_scope}" == "service" ]]; then
-  baseline_poll="$(sqlite3 /var/lib/nyc-311-live/portal-archive.sqlite \
+  baseline_poll="$(sqlite3 "${database_host_path}" \
     "SELECT value FROM live_monitor_state WHERE key='last_successful_poll_at';")"
 fi
 
@@ -268,10 +307,17 @@ rollback() {
   if [[ ${runtime_activation_started} -eq 1
       && -d "${current_directory}/aws/lightsail-sqlite" ]]; then
     cd "${current_directory}/aws/lightsail-sqlite"
+    rollback_poll_before=""
+    if [[ "${deployment_scope}" == "service" && -f "${database_host_path}" ]]; then
+      rollback_poll_before="$(sqlite3 "${database_host_path}" \
+        "SELECT value FROM live_monitor_state WHERE key='last_successful_poll_at';" 2>/dev/null || true)"
+    fi
     if [[ "${deployment_scope}" == "service" ]]; then
       rollback_services=(web collector proxy)
+      rollback_has_inbound=0
       if docker compose config --services | grep --fixed-strings --line-regexp --quiet inbound-email; then
         rollback_services=(web inbound-email collector proxy)
+        rollback_has_inbound=1
       fi
       if ! docker compose up -d --no-build --force-recreate "${rollback_services[@]}"; then
         echo "Rollback could not restart every previous service." >&2
@@ -281,6 +327,44 @@ rollback() {
       # A web-only release must not roll the proxy or isolated writers.
       if ! docker compose up -d --no-build --no-deps --force-recreate web; then
         echo "Rollback could not restart the previous web service." >&2
+        rollback_failures=1
+      fi
+    fi
+    if [[ ${rollback_failures} -eq 0 ]]; then
+      rollback_runtime_ready=0
+      for _rollback_attempt in $(seq 1 60); do
+        if ! curl --fail --silent --max-time 5 \
+            http://127.0.0.1:10000/api/health >/dev/null; then
+          sleep 2
+          continue
+        fi
+        if [[ "${deployment_scope}" == "service" ]]; then
+          if [[ ${rollback_has_inbound} -eq 1 ]] \
+              && ! curl --fail --silent --max-time 5 \
+                http://127.0.0.1:10001/health >/dev/null; then
+            sleep 2
+            continue
+          fi
+          rollback_poll="$(sqlite3 "${database_host_path}" \
+            "SELECT value FROM live_monitor_state WHERE key='last_successful_poll_at';" 2>/dev/null || true)"
+          if [[ -z "${rollback_poll}" || "${rollback_poll}" == "${rollback_poll_before}" ]]; then
+            sleep 2
+            continue
+          fi
+          if [[ "${expected_collector_scope}" == "bid_only" ]]; then
+            rollback_scope="$(sqlite3 "${database_host_path}" \
+              "SELECT value FROM live_monitor_state WHERE key='collector_scope';" 2>/dev/null || true)"
+            if [[ "${rollback_scope}" != "bid_only" ]]; then
+              sleep 2
+              continue
+            fi
+          fi
+        fi
+        rollback_runtime_ready=1
+        break
+      done
+      if [[ ${rollback_runtime_ready} -ne 1 ]]; then
+        echo "Rollback restored files but the previous runtime did not become healthy." >&2
         rollback_failures=1
       fi
     fi
@@ -425,7 +509,7 @@ if [[ "${deployment_scope}" == "service" ]]; then
   collector_started_epoch="$(date --date "${collector_started_at}" +%s)"
   fresh_poll=""
   for _attempt in $(seq 1 60); do
-    current_poll="$(sqlite3 /var/lib/nyc-311-live/portal-archive.sqlite \
+    current_poll="$(sqlite3 "${database_host_path}" \
       "SELECT value FROM live_monitor_state WHERE key='last_successful_poll_at';")"
     current_poll_epoch="$(date --date "${current_poll}" +%s 2>/dev/null || true)"
     if [[ -n "${current_poll}" && "${current_poll}" != "${baseline_poll}"
@@ -439,6 +523,14 @@ if [[ "${deployment_scope}" == "service" ]]; then
   if [[ -z "${fresh_poll}" ]]; then
     echo "The updated collector did not complete a fresh Portal poll." >&2
     false
+  fi
+  if [[ "${expected_collector_scope}" == "bid_only" ]]; then
+    recorded_collector_scope="$(sqlite3 "${database_host_path}" \
+      "SELECT value FROM live_monitor_state WHERE key='collector_scope';")"
+    if [[ "${recorded_collector_scope}" != "bid_only" ]]; then
+      echo "The updated collector completed a poll without recording the required BID-only scope." >&2
+      false
+    fi
   fi
   curl --fail --silent --show-error --connect-timeout 3 --max-time 5 \
     http://127.0.0.1:10000/api/health/collector >/dev/null

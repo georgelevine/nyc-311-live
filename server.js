@@ -172,6 +172,66 @@ function requestGeographyScope(req, database) {
   };
 }
 
+function normalizedCollectorScope(value) {
+  const scope = String(value || '').trim().toLowerCase();
+  return ['citywide', 'bid_only'].includes(scope) ? scope : null;
+}
+
+function portalDetailAccess(portalId) {
+  const configuredScope = normalizedCollectorScope(process.env.COLLECTOR_SCOPE);
+  const databasePath = process.env.DATABASE_PATH
+    || path.join(__dirname, 'data', 'portal-archive.sqlite');
+  if (!require('fs').existsSync(databasePath)) {
+    return configuredScope === 'bid_only'
+      ? { allowed: false, unavailable: true }
+      : { allowed: true };
+  }
+
+  let database;
+  try {
+    const { DatabaseSync } = require('node:sqlite');
+    database = new DatabaseSync(databasePath, { readOnly: true });
+    const stateRow = tableExists(database, 'live_monitor_state')
+      ? database.prepare(`
+          SELECT value FROM live_monitor_state WHERE key='collector_scope' LIMIT 1
+        `).get()
+      : null;
+    const durableScope = normalizedCollectorScope(stateRow && stateRow.value);
+    const bidOnlyExpected = configuredScope === 'bid_only' || durableScope === 'bid_only';
+    if (!bidOnlyExpected) return { allowed: true };
+
+    // The web and collector containers must agree before the detail proxy can
+    // contact NYC311. This prevents a stale web process from reintroducing a
+    // citywide record while the durable collector is BID-only.
+    if (configuredScope !== 'bid_only' || durableScope !== 'bid_only') {
+      return { allowed: false, unavailable: true };
+    }
+    if (!tableExists(database, 'live_portal_requests')
+        || !tableExists(database, 'live_request_bid_memberships')
+        || !tableExists(database, 'business_improvement_district_boundary_versions')) {
+      return { allowed: false, unavailable: true };
+    }
+    const member = database.prepare(`
+      SELECT 1
+      FROM live_portal_requests AS live
+      JOIN live_request_bid_memberships AS membership
+        ON membership.srnumber=live.srnumber
+      JOIN business_improvement_district_boundary_versions AS boundary
+        ON boundary.version=membership.boundary_version AND boundary.active=1
+      WHERE live.portal_id=?
+      LIMIT 1
+    `).get(portalId);
+    return member
+      ? { allowed: true }
+      : { allowed: false, unavailable: false };
+  } catch (error) {
+    console.error('Portal detail scope check error:', error.message);
+    return { allowed: false, unavailable: true };
+  } finally {
+    if (database) database.close();
+  }
+}
+
 function scopeIsEmpty(scope) {
   return !scope || (!scope.precinct && !scope.bid && !scope.collectorBidOnly);
 }
@@ -1314,6 +1374,12 @@ app.get('/api/portal-detail', async (req, res) => {
   }
 
   res.setHeader('Cache-Control', 'no-store');
+  const detailAccess = portalDetailAccess(id);
+  if (!detailAccess.allowed) {
+    return detailAccess.unavailable
+      ? res.status(503).json({ error: 'BID collection scope is temporarily unavailable' })
+      : res.status(404).json({ error: 'Request is outside the active BID collection scope' });
+  }
   if (req.query.preferArchive === '1') {
     const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
     let storedDetail;
