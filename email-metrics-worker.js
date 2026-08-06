@@ -33,7 +33,7 @@ function writeSnapshotAtomically(cachePath, snapshot) {
   }
 }
 
-function statusMonitoringMode(databasePath) {
+function monitorStateValue(databasePath, key, fallback = 'unknown') {
   if (!fs.existsSync(databasePath)) return 'unknown';
   let database;
   try {
@@ -46,14 +46,24 @@ function statusMonitoringMode(databasePath) {
     if (!table) return 'unknown';
     const row = database.prepare(`
       SELECT value FROM live_monitor_state
-      WHERE key='status_monitoring_mode'
-    `).get();
-    return row && row.value ? String(row.value) : 'unknown';
+      WHERE key=?
+    `).get(key);
+    return row && row.value ? String(row.value) : fallback;
   } catch (_) {
     return 'unknown';
   } finally {
     if (database) database.close();
   }
+}
+
+function statusMonitoringMode(databasePath) {
+  return monitorStateValue(databasePath, 'status_monitoring_mode');
+}
+
+function collectorScope(databasePath) {
+  const scope = monitorStateValue(databasePath, 'collector_scope', 'citywide')
+    .trim().toLowerCase();
+  return ['citywide', 'bid_only'].includes(scope) ? scope : 'unknown';
 }
 
 function run() {
@@ -72,6 +82,10 @@ function run() {
   // Load the expensive SQLite implementation only inside this worker process.
   const { loadSqliteEmailMetrics } = require('./sqlite-email-metrics');
   const { presentEmailMetrics } = require('./email-metrics-presentation');
+  const measuredCollectorScope = collectorScope(databasePath);
+  if (!['citywide', 'bid_only'].includes(measuredCollectorScope)) {
+    throw new Error('The collector scope is unavailable');
+  }
   const measuredAt = new Date();
   const metrics = loadSqliteEmailMetrics(databasePath, {
     now: measuredAt,
@@ -82,10 +96,14 @@ function run() {
   if (!payload.database_available) {
     throw new Error('The live archive database is unavailable');
   }
+  if (collectorScope(databasePath) !== measuredCollectorScope) {
+    throw new Error('The collector scope changed while metrics were calculated');
+  }
   const generatedAt = new Date();
   const snapshot = {
     version: 1,
     database_path: databasePath,
+    collector_scope: measuredCollectorScope,
     generated_at: generatedAt.toISOString(),
     payload
   };

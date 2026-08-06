@@ -27,28 +27,50 @@ function defaultTempDirectory(databasePath) {
   return path.join(path.dirname(databasePath), 'sqlite-email-metrics-tmp');
 }
 
-function normalizeSnapshot(candidate, databasePath) {
+function normalizedCollectorScope(value) {
+  const scope = String(value || '').trim().toLowerCase();
+  return ['citywide', 'bid_only'].includes(scope) ? scope : null;
+}
+
+function normalizeSnapshot(candidate, databasePath, expectedCollectorScope = 'citywide') {
   if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
   if (candidate.version !== CACHE_VERSION) return null;
   if (candidate.database_path !== path.resolve(databasePath)) return null;
   if (!candidate.payload || typeof candidate.payload !== 'object' || Array.isArray(candidate.payload)) {
     return null;
   }
+  const taggedCollectorScope = normalizedCollectorScope(candidate.collector_scope);
+  if (candidate.collector_scope != null && !taggedCollectorScope) return null;
+  const expectedScope = normalizedCollectorScope(expectedCollectorScope) || 'citywide';
+  // Legacy snapshots were generated before scope tagging and therefore can
+  // only be trusted by the legacy citywide dashboard. BID-only mode must never
+  // display one: it may contain tens of thousands of retained citywide rows.
+  if (expectedScope === 'bid_only' && taggedCollectorScope !== 'bid_only') return null;
+  if (expectedScope === 'citywide' && taggedCollectorScope === 'bid_only') return null;
   const generatedAtMs = Date.parse(candidate.generated_at);
   if (!Number.isFinite(generatedAtMs)) return null;
   return {
     generatedAt: new Date(generatedAtMs).toISOString(),
     generatedAtMs,
+    collectorScope: taggedCollectorScope,
     payload: candidate.payload
   };
 }
 
-function readPersistedSnapshot(cachePath, databasePath) {
+function readPersistedSnapshot(
+  cachePath,
+  databasePath,
+  expectedCollectorScope = 'citywide'
+) {
   try {
     if (!fs.existsSync(cachePath)) return null;
     const stats = fs.statSync(cachePath);
     if (!stats.isFile() || stats.size <= 0 || stats.size > 5 * 1024 * 1024) return null;
-    return normalizeSnapshot(JSON.parse(fs.readFileSync(cachePath, 'utf8')), databasePath);
+    return normalizeSnapshot(
+      JSON.parse(fs.readFileSync(cachePath, 'utf8')),
+      databasePath,
+      expectedCollectorScope
+    );
   } catch (error) {
     console.error('Email metrics cache read error:', error.message);
     return null;
@@ -58,6 +80,7 @@ function readPersistedSnapshot(cachePath, databasePath) {
 function publicPayload(snapshot, state = {}) {
   return {
     ...snapshot.payload,
+    ...(snapshot.collectorScope ? { collector_scope: snapshot.collectorScope } : {}),
     metrics_generated_at: snapshot.generatedAt,
     metrics_refreshing: Boolean(state.refreshing),
     metrics_stale: Boolean(state.stale),
@@ -88,6 +111,9 @@ function createEmailMetricsBackground(options = {}) {
     options.retryAfterSeconds || process.env.EMAIL_METRICS_RETRY_AFTER_SECONDS,
     DEFAULT_RETRY_AFTER_SECONDS
   );
+  const collectorScope = normalizedCollectorScope(
+    options.collectorScope || process.env.COLLECTOR_SCOPE
+  ) || 'citywide';
   const forkWorker = options.forkWorker || fork;
   const now = options.now || (() => Date.now());
   const logger = options.logger || console;
@@ -119,7 +145,7 @@ function createEmailMetricsBackground(options = {}) {
     databasePath = resolvedDatabasePath;
     cachePath = options.cachePath || defaultCachePath(databasePath);
     tempDirectory = options.tempDirectory || defaultTempDirectory(databasePath);
-    snapshot = readPersistedSnapshot(cachePath, databasePath);
+    snapshot = readPersistedSnapshot(cachePath, databasePath, collectorScope);
     retryAtMs = 0;
     lastError = null;
   }
@@ -136,7 +162,11 @@ function createEmailMetricsBackground(options = {}) {
       return;
     }
 
-    const normalized = normalizeSnapshot(message && message.snapshot, databasePath);
+    const normalized = normalizeSnapshot(
+      message && message.snapshot,
+      databasePath,
+      collectorScope
+    );
     if (!normalized) {
       lastError = 'The metrics worker returned an invalid snapshot';
       retryAtMs = now() + failureCooldownMs;

@@ -26,11 +26,17 @@ function fakeChild() {
   return child;
 }
 
-function snapshot(databasePath, generatedAt, payload = { database_available: true, total: 12 }) {
+function snapshot(
+  databasePath,
+  generatedAt,
+  payload = { database_available: true, total: 12 },
+  collectorScope = null
+) {
   return {
     version: 1,
     database_path: path.resolve(databasePath),
     generated_at: generatedAt,
+    ...(collectorScope ? { collector_scope: collectorScope } : {}),
     payload
   };
 }
@@ -178,6 +184,60 @@ test('rejects persisted snapshots for another database or an invalid payload', (
     payload: null
   }));
   assert.equal(readPersistedSnapshot(cachePath, databasePath), null);
+});
+
+test('BID-only mode rejects legacy or citywide snapshots and serves only BID-tagged data', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-metrics-bid-scope-'));
+  const databasePath = path.join(directory, 'archive.sqlite');
+  const cachePath = path.join(directory, 'metrics.json');
+  const generatedAt = '2026-07-29T12:00:00.000Z';
+
+  fs.writeFileSync(cachePath, JSON.stringify(snapshot(databasePath, generatedAt)));
+  assert.equal(readPersistedSnapshot(cachePath, databasePath, 'bid_only'), null);
+  const legacyBackground = createEmailMetricsBackground({
+    collectorScope: 'bid_only',
+    cachePath,
+    now: () => Date.parse(generatedAt)
+  });
+  const legacyResult = legacyBackground.get(databasePath);
+  assert.equal(legacyResult.statusCode, 503);
+  assert.equal(legacyResult.payload.metrics_refresh_disabled, true);
+  legacyBackground.close();
+
+  fs.writeFileSync(cachePath, JSON.stringify(snapshot(
+    databasePath,
+    generatedAt,
+    undefined,
+    'citywide'
+  )));
+  assert.equal(readPersistedSnapshot(cachePath, databasePath, 'bid_only'), null);
+
+  fs.writeFileSync(cachePath, JSON.stringify(snapshot(
+    databasePath,
+    generatedAt,
+    undefined,
+    'bid_only'
+  )));
+  const background = createEmailMetricsBackground({
+    collectorScope: 'bid_only',
+    cachePath,
+    now: () => Date.parse(generatedAt)
+  });
+  const result = background.get(databasePath);
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.payload.total, 12);
+  assert.equal(result.payload.collector_scope, 'bid_only');
+  assert.equal(result.payload.metrics_refreshing, false);
+  background.close();
+});
+
+test('metrics worker snapshots carry the durable collector scope', () => {
+  const worker = fs.readFileSync(
+    path.join(__dirname, '..', 'email-metrics-worker.js'),
+    'utf8'
+  );
+  assert.match(worker, /collector_scope:\s*measuredCollectorScope/);
+  assert.match(worker, /collector scope changed while metrics were calculated/i);
 });
 
 test('times out a stuck worker and enters cooldown instead of starting another', async () => {
