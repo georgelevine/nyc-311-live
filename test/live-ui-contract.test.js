@@ -457,7 +457,7 @@ test('boundary releases and large marker builds cannot leave stale map state', (
 });
 
 test('geography catalogs retain release identity and retry transient failures', () => {
-  assert.match(dashboard, /const GEOGRAPHY_CATALOG_TIMEOUT_MS = 5_000/);
+  assert.match(dashboard, /const GEOGRAPHY_CATALOG_TIMEOUT_MS = 15_000/);
   assert.match(dashboard, /const GEOGRAPHY_CATALOG_REFRESH_MS = 5 \* 60_000/);
   assert.match(dashboard, /function geographyCatalogRetryDelay\(attempt\)/);
   assert.match(dashboard, /precinct_boundary_version/);

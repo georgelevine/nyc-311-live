@@ -269,7 +269,10 @@
   const MAP_MAX_FAST_RETRIES = 3;
   const MAP_PAGE_YIELD_MS = 100;
   const DASHBOARD_REQUEST_TIMEOUT_MS = 8_000;
-  const GEOGRAPHY_CATALOG_TIMEOUT_MS = 5_000;
+  // A web-container handoff can briefly pause catalog responses even though
+  // the immutable boundary release is healthy. Keep this aligned with the map
+  // timeout so a deployment cannot disable the BID selector prematurely.
+  const GEOGRAPHY_CATALOG_TIMEOUT_MS = 15_000;
   const GEOGRAPHY_CATALOG_RETRY_MAX_MS = 60_000;
   const GEOGRAPHY_CATALOG_REFRESH_MS = 5 * 60_000;
   const EMAIL_UPDATES_REFRESH_MS = 15_000;
