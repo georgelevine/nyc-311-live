@@ -212,7 +212,8 @@ test('initial boundary loading cannot replace honest request and map loading sta
   assert.match(dashboard, /dashboardPayloadLoaded = true/);
   assert.match(dashboard, /!dashboardPayloadLoaded\s*\?\s*'Loading requests…'/);
   assert.match(dashboard, /if \(dashboardPayloadLoaded\) \{\s*renderFeed\(\);\s*renderMap\(\);/);
-  assert.match(dashboard, /mapArchiveLoaded\s*\?\s*`\$\{mapScopeLabel\(\)\} · no matching dated pins`/);
+  assert.match(dashboard, /function updateMapHistorySuggestion\(visibleCount\)/);
+  assert.match(dashboard, /no requests in this period · older records are available/);
   assert.match(dashboard, /`\$\{mapScopeLabel\(\)\} · loading map records`/);
 });
 
@@ -403,11 +404,13 @@ test('map starts recent, keeps the chosen date scope during filters, and disclos
   assert.equal($('#map-scope button[data-map-scope="all"]').attr('aria-pressed'), 'false');
   assert.equal($('#map-scope button[data-map-scope="24h"]').attr('aria-pressed'), 'true');
   assert.equal($('#map-date-range[aria-live="polite"]').length, 1);
+  assert.equal($('#map-view-history[hidden]').length, 1);
   assert.match($('#map-date-range').text(), /Last 24 hours/);
   assert.match(dashboard, /let mapScope = '24h'/);
   assert.doesNotMatch(dashboard, /showAllDatesForActiveFilters/);
   assert.match(dashboard, /All captured dates/);
   assert.match(dashboard, /mapRangeDateFormatter/);
+  assert.match(dashboard, /mapViewHistory\.addEventListener\('click'/);
 });
 
 test('pending details stay separate from complete request cards but remain map-visible', () => {

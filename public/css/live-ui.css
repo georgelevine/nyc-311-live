@@ -2166,6 +2166,26 @@ a:focus-visible {
   min-height: 36px;
 }
 
+.map-view-history {
+  min-height: 34px;
+  margin: 8px 0 0;
+  padding: 7px 12px;
+  border: 1px solid #9fc3f8;
+  border-radius: 9px;
+  background: #edf5ff;
+  color: #135fca;
+  font: inherit;
+  font-size: var(--font-xs);
+  font-weight: 780;
+  cursor: pointer;
+}
+
+.map-view-history:hover,
+.map-view-history:focus-visible {
+  border-color: #1769e0;
+  background: #e2efff;
+}
+
 .request-detail {
   width: min(420px, calc(100% - 36px));
   padding: 24px;

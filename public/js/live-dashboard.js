@@ -107,6 +107,7 @@
   const mapScopeControl = document.getElementById('map-scope');
   const mapCounts = document.getElementById('map-counts');
   const mapDateRange = document.getElementById('map-date-range');
+  const mapViewHistory = document.getElementById('map-view-history');
   const mapLoadStatus = document.getElementById('map-load-status');
   const mapBoundaryKey = document.getElementById('map-boundary-key');
   const mapCollectorScope = document.getElementById('map-collector-scope');
@@ -1079,6 +1080,24 @@
     return new Date(now - duration).toISOString();
   }
 
+  function updateMapHistorySuggestion(visibleCount) {
+    const matchingTotal = Number(feedMatchingTotal);
+    const historyCount = mapArchiveLoaded
+      && currentCollectorScope === 'bid_only'
+      && Boolean(bidFilter.value)
+      && mapScope !== 'all'
+      && visibleCount === 0
+      && Number.isSafeInteger(matchingTotal)
+      && matchingTotal > 0
+      ? matchingTotal
+      : 0;
+    mapViewHistory.hidden = historyCount === 0;
+    mapViewHistory.textContent = historyCount
+      ? `View ${historyCount.toLocaleString()} older ${historyCount === 1 ? 'request' : 'requests'}`
+      : 'View older requests';
+    return historyCount;
+  }
+
   function updateMapDateRange(desired) {
     let earliest = null;
     let latest = null;
@@ -1089,11 +1108,15 @@
       latest = latest === null ? timestamp : Math.max(latest, timestamp);
     }
     if (earliest === null || latest === null) {
+      const historyCount = updateMapHistorySuggestion(desired.size);
       mapDateRange.textContent = mapArchiveLoaded
-        ? `${mapScopeLabel()} · no matching dated pins`
+        ? historyCount
+          ? `${mapScopeLabel()} · no requests in this period · older records are available`
+          : `${mapScopeLabel()} · no requests in this period`
         : `${mapScopeLabel()} · loading map records`;
       return;
     }
+    updateMapHistorySuggestion(desired.size);
     const earliestLabel = mapRangeDateFormatter.format(new Date(earliest));
     const latestLabel = mapRangeDateFormatter.format(new Date(latest));
     mapDateRange.textContent = earliestLabel === latestLabel
@@ -4134,6 +4157,11 @@
     if (!button || !mapScopeControl.contains(button)) return;
     if (button.dataset.mapScope === mapScope) return;
     setMapScope(button.dataset.mapScope);
+    renderMap();
+    refreshMap(mapStats, true);
+  });
+  mapViewHistory.addEventListener('click', () => {
+    setMapScope('all');
     renderMap();
     refreshMap(mapStats, true);
   });
