@@ -8,6 +8,7 @@ const { once } = require('node:events');
 const { DatabaseSync } = require('node:sqlite');
 
 process.env.NYC311_SERVER_NO_LISTEN = '1';
+process.env.COLLECTOR_SCOPE = 'citywide';
 
 const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-effective-filters-'));
 const databasePath = path.join(temporaryDirectory, 'archive.sqlite');
@@ -47,6 +48,9 @@ database.exec(`
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
+
+  INSERT INTO live_monitor_state(key,value,updated_at)
+  VALUES ('collector_scope','citywide','2026-07-29T12:00:00.000Z');
 
   CREATE TABLE live_number_queue (
     suffix INTEGER PRIMARY KEY,

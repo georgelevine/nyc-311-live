@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#f4f8fb">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self' data:;">
+  <title>NYC 311 BID Metrics</title>
+  <link rel="stylesheet" href="./css/bid-metrics.css?v=2">
+</head>
+<body>
+  <header class="metrics-header">
+    <a class="metrics-back" href="./live.html" aria-label="Back to NYC BID 311 Live">
+      <span aria-hidden="true"></span>
+    </a>
+    <div class="metrics-brand">
+      <h1>BID Metrics</h1>
+      <p id="coverage-label">Loading historical coverage…</p>
+    </div>
+    <nav aria-label="Related views">
+      <a href="./live.html">Live</a>
+      <a href="./timeline.html">Timeline</a>
+    </nav>
+  </header>
+
+  <main class="metrics-main">
+    <section class="metrics-intro">
+      <div>
+        <span class="metrics-eyebrow">NYC 311 by Business Improvement District</span>
+        <h2 id="page-title">All BIDs</h2>
+        <p id="range-summary">Preparing the historical archive.</p>
+      </div>
+      <span id="data-badge" class="data-badge">Portal history</span>
+    </section>
+
+    <form id="metrics-filters" class="metrics-filters">
+      <label>
+        <span>Business Improvement District</span>
+        <select id="bid-select" disabled>
+          <option value="">All BIDs</option>
+        </select>
+      </label>
+      <label>
+        <span>From</span>
+        <input id="date-from" type="date" required disabled>
+      </label>
+      <label>
+        <span>Through</span>
+        <input id="date-to" type="date" required disabled>
+      </label>
+      <button id="apply-filters" type="submit" disabled>Update metrics</button>
+      <div class="quick-ranges" aria-label="Quick date ranges">
+        <button type="button" data-days="30">30 days</button>
+        <button type="button" data-days="90">90 days</button>
+        <button type="button" data-days="all">All history</button>
+      </div>
+    </form>
+
+    <p id="metrics-status" class="metrics-status" role="status" aria-live="polite">Loading BID history…</p>
+
+    <section id="metrics-content" hidden>
+      <div class="metric-cards" aria-label="Selected period summary">
+        <article>
+          <span>Requests</span>
+          <strong id="metric-total">—</strong>
+          <small id="metric-total-note">Unique service requests</small>
+        </article>
+        <article>
+          <span>Daily average</span>
+          <strong id="metric-daily">—</strong>
+          <small id="metric-days-note">Across the selected period</small>
+        </article>
+        <article>
+          <span>Change</span>
+          <strong id="metric-change">—</strong>
+          <small id="metric-change-note">Compared with the prior period</small>
+        </article>
+        <article>
+          <span>Currently closed</span>
+          <strong id="metric-closed">—</strong>
+          <small>Latest Portal status in this archive</small>
+        </article>
+      </div>
+
+      <section class="metrics-panel monthly-panel" aria-labelledby="monthly-title">
+        <header>
+          <div>
+            <span class="metrics-eyebrow">Volume over time</span>
+            <h3 id="monthly-title">Requests by month</h3>
+          </div>
+          <span id="monthly-context"></span>
+        </header>
+        <div id="monthly-chart" class="monthly-chart" role="img" aria-label="Monthly request totals"></div>
+      </section>
+
+      <div class="metrics-columns">
+        <section class="metrics-panel" aria-labelledby="problems-title">
+          <header>
+            <div>
+              <span class="metrics-eyebrow">What people reported</span>
+              <h3 id="problems-title">Leading request types</h3>
+            </div>
+          </header>
+          <ol id="problem-ranking" class="metric-ranking"></ol>
+        </section>
+
+        <section class="metrics-panel" aria-labelledby="status-title">
+          <header>
+            <div>
+              <span class="metrics-eyebrow">Latest known state</span>
+              <h3 id="status-title">Current status mix</h3>
+            </div>
+          </header>
+          <div id="status-bar" class="status-bar" aria-hidden="true"></div>
+          <dl id="status-breakdown" class="status-breakdown"></dl>
+          <p class="panel-note">Status is the latest Portal state captured for each request, not its state on the submission date.</p>
+        </section>
+      </div>
+
+      <section id="bid-ranking-panel" class="metrics-panel" aria-labelledby="bid-ranking-title">
+        <header>
+          <div>
+            <span class="metrics-eyebrow">Across the BID network</span>
+            <h3 id="bid-ranking-title">BIDs with the most requests</h3>
+          </div>
+          <span>Overlapping districts are counted within each BID.</span>
+        </header>
+        <ol id="bid-ranking" class="metric-ranking bid-ranking"></ol>
+      </section>
+
+      <footer class="metrics-method">
+        <p id="source-note"></p>
+        <p>Membership uses the pinned April 28, 2026 BID boundary release. Requests without Portal coordinates cannot be assigned to a BID.</p>
+      </footer>
+    </section>
+  </main>
+
+  <script src="./data/sr-bid-metrics-data.js?v=20260804-1"></script>
+  <script src="./js/bid-metrics.js?v=2"></script>
+</body>
+</html>

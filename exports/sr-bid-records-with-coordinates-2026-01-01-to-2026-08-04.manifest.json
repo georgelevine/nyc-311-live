@@ -1,0 +1,22 @@
+{
+  "created_at": "2026-08-04T19:45:11.432Z",
+  "source": "https://portal.311.nyc.gov/entity-pin-fetch-service-requests/",
+  "submitted_from": "2026-01-01",
+  "submitted_to": "2026-08-04",
+  "boundary_file": "nyc-bid-boundaries-2026-04-28.geojson",
+  "boundary_version": "2026-04-28",
+  "boundary_sha256": "c8c06c9ecb8b733aa829c9907e918e153c9a4230fa796d228ad3f27042208a9f",
+  "bid_count": 78,
+  "membership_rows": 138163,
+  "unique_sr_numbers": 137859,
+  "sr_numbers_in_multiple_bids": 304,
+  "portal_calls": 14947,
+  "capped_queries_split": 7267,
+  "problem_area_splits": 2,
+  "portal_retries": 0,
+  "resumed_bids": 0,
+  "portal_results_without_sr_number": 0,
+  "coordinate_rows": 138163,
+  "elapsed_seconds": 646,
+  "csv_sha256": "0937bb77757a4419ed10a5d12de3b31efe85bf218a21e6566d1f3a0f80576437"
+}

@@ -16,6 +16,7 @@ const {
   resolveBusyTimeoutMs,
   resolveSynchronousMode
 } = require('./sqlite-runtime');
+const { ensureLiveCollectorBaseSchema } = require('./live-collector-schema');
 const { applyMigrations } = require('./sqlite-finalization');
 const { normalizePortalTimestamp } = require('./portal-timestamp');
 const { attachPortalAgencyResponse } = require('./portal-agency-response');
@@ -31,6 +32,10 @@ const {
   ensureSqliteBusinessImprovementDistrictSchema,
   loadActiveBusinessImprovementDistrictMatcher
 } = require('./business-improvement-districts');
+const {
+  importBusinessImprovementDistrictBoundaryBytes,
+  parseArgs: parseBusinessImprovementDistrictImportArgs
+} = require('./import-business-improvement-districts');
 const { refreshActiveBoundaryMatchers } = require('./boundary-matcher-coherence');
 const {
   claimSubscription,
@@ -61,19 +66,19 @@ const { seedClosureTracking } = require('./closure-tracking-seed');
 const {
   buildBidQueryZones,
   canonicalizePortalPin,
+  collectBidZonePins,
   collectorInteger,
   deduplicatePortalPins,
   filterPinsToBids,
   mapWithConcurrency,
   parseCollectorScope,
   queryPlanHash,
-  verifyZoneCoverage,
-  zoneNeedsCatchup
+  verifyZoneCoverage
 } = require('./bid-collector-scope');
 const {
   PORTAL_CAP,
-  createBidPortalClient,
-  nycCalendarDay
+  bidRecoveryRange,
+  createBidPortalClient
 } = require('./bid-portal-recovery');
 
 const PORTAL_URL = 'https://portal.311.nyc.gov/entity-pin-fetch-service-requests/';
@@ -145,96 +150,8 @@ db.exec(`
   PRAGMA journal_mode = WAL;
   PRAGMA synchronous = ${SQLITE_SYNCHRONOUS};
   PRAGMA foreign_keys = ON;
-
-  CREATE TABLE IF NOT EXISTS live_portal_requests (
-    srnumber TEXT PRIMARY KEY,
-    suffix INTEGER UNIQUE,
-    portal_id TEXT UNIQUE,
-    problem TEXT,
-    address TEXT,
-    borough TEXT,
-    incident_zip TEXT,
-    police_precinct INTEGER,
-    police_precinct_boundary_version TEXT,
-    police_precinct_matched_at TEXT,
-    business_improvement_district_boundary_version TEXT,
-    business_improvement_district_matched_at TEXT,
-    latitude REAL,
-    longitude REAL,
-    submitted_at TEXT,
-    status TEXT,
-    portal_url TEXT,
-    first_seen_at TEXT NOT NULL,
-    last_seen_at TEXT NOT NULL,
-    raw_json TEXT NOT NULL
-  );
-
-  CREATE INDEX IF NOT EXISTS live_portal_requests_submitted_at_idx
-    ON live_portal_requests(submitted_at) WHERE submitted_at IS NOT NULL;
-
-  CREATE TABLE IF NOT EXISTS live_number_queue (
-    suffix INTEGER PRIMARY KEY,
-    srnumber TEXT NOT NULL UNIQUE,
-    first_detected_at TEXT NOT NULL,
-    audit_after TEXT NOT NULL,
-    map_seen INTEGER NOT NULL DEFAULT 0,
-    audit_outcome TEXT NOT NULL DEFAULT 'pending',
-    audited_at TEXT
-  );
-
-  CREATE INDEX IF NOT EXISTS live_number_queue_pending_audit_idx
-    ON live_number_queue(audit_after, suffix) WHERE audit_outcome = 'pending';
-
-  CREATE TABLE IF NOT EXISTS live_monitor_state (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-  );
-
-  CREATE TABLE IF NOT EXISTS portal_requests (
-    srnumber TEXT PRIMARY KEY,
-    suffix INTEGER NOT NULL UNIQUE,
-    portal_id TEXT UNIQUE,
-    status TEXT,
-    problem TEXT,
-    problem_details TEXT,
-    additional_details TEXT,
-    address TEXT,
-    next_update TEXT,
-    date_reported TEXT,
-    updated_on TEXT,
-    date_closed TEXT,
-    fields_json TEXT NOT NULL,
-    portal_url TEXT NOT NULL,
-    archived_at TEXT NOT NULL
-  );
-
-  CREATE INDEX IF NOT EXISTS portal_requests_date_reported_idx
-    ON portal_requests(date_reported) WHERE date_reported IS NOT NULL;
-
-  CREATE TABLE IF NOT EXISTS live_detail_queue (
-    srnumber TEXT PRIMARY KEY,
-    portal_id TEXT,
-    status TEXT NOT NULL DEFAULT 'pending',
-    attempts INTEGER NOT NULL DEFAULT 0,
-    next_attempt_at TEXT NOT NULL,
-    last_error TEXT,
-    updated_at TEXT NOT NULL
-  );
-
-  CREATE INDEX IF NOT EXISTS live_detail_queue_status_idx
-    ON live_detail_queue(status, next_attempt_at);
-
-  CREATE TABLE IF NOT EXISTS number_ledger (
-    suffix INTEGER PRIMARY KEY,
-    srnumber TEXT NOT NULL UNIQUE,
-    outcome TEXT NOT NULL CHECK (outcome IN ('found', 'not_found', 'retry')),
-    attempts INTEGER NOT NULL,
-    http_status INTEGER,
-    error TEXT,
-    checked_at TEXT NOT NULL
-  );
 `);
+ensureLiveCollectorBaseSchema(db);
 
 ensureSqliteRequestGeography(db);
 applyMigrations(db);
@@ -1091,6 +1008,29 @@ const bidPortalClient = createBidPortalClient({
 });
 let bidCollectorPlan = null;
 
+function bootstrapBundledBidBoundaryRelease() {
+  const boundaryPath = path.resolve(
+    process.env.BID_BOUNDARY_BOOTSTRAP_FILE
+      || path.join(__dirname, 'exports', 'nyc-bid-boundaries-2026-04-28.geojson')
+  );
+  const options = parseBusinessImprovementDistrictImportArgs([
+    '--db', DATABASE_PATH,
+    '--file', boundaryPath
+  ]);
+  const result = importBusinessImprovementDistrictBoundaryBytes(
+    db,
+    options,
+    fs.readFileSync(boundaryPath)
+  );
+  console.log(JSON.stringify({
+    bid_boundary_bootstrap: 'complete',
+    boundary_version: result.version,
+    source_sha256: result.sha256,
+    feature_count: result.districtCount,
+    backfilled_requests: result.processed
+  }));
+}
+
 function refreshBidCollectorPlan() {
   const boundaryMatchers = refreshActiveBoundaryMatchers(db, {
     policePrecinctMatcher,
@@ -1101,6 +1041,10 @@ function refreshBidCollectorPlan() {
   });
   policePrecinctMatcher = boundaryMatchers.policePrecinctMatcher;
   businessImprovementDistrictMatcher = boundaryMatchers.businessImprovementDistrictMatcher;
+  if (!businessImprovementDistrictMatcher) {
+    bootstrapBundledBidBoundaryRelease();
+    businessImprovementDistrictMatcher = loadActiveBusinessImprovementDistrictMatcher(db);
+  }
   if (!businessImprovementDistrictMatcher) {
     throw new Error(
       'BID-only collection requires a complete active business improvement district boundary release'
@@ -1136,28 +1080,6 @@ function refreshBidCollectorPlan() {
   return bidCollectorPlan;
 }
 
-function bidRecoveryRange(zoneState, now) {
-  const current = now instanceof Date ? now : new Date(now);
-  const prior = zoneState && zoneState.last_successful_poll_at
-    ? new Date(zoneState.last_successful_poll_at)
-    : null;
-  if (prior && Number.isFinite(prior.getTime())) {
-    const gapDays = (current.getTime() - prior.getTime()) / 86_400_000;
-    if (gapDays > BID_CATCHUP_MAX_DAYS) {
-      throw new Error(
-        `Zone has been offline for ${gapDays.toFixed(2)} days; `
-        + `automatic catch-up is limited to ${BID_CATCHUP_MAX_DAYS} days`
-      );
-    }
-  }
-  return {
-    from: prior && Number.isFinite(prior.getTime())
-      ? nycCalendarDay(prior)
-      : nycCalendarDay(current),
-    to: nycCalendarDay(current)
-  };
-}
-
 async function fetchBidOnlyPoll() {
   const plan = refreshBidCollectorPlan();
   const attemptedAt = new Date();
@@ -1171,40 +1093,36 @@ async function fetchBidOnlyPoll() {
         plan.planHash,
         zone.zoneId
       );
-      let initialCount = null;
-      let saturated = false;
       try {
-        let pins = await bidPortalClient.query({ bbox: zone.bbox });
-        initialCount = pins.length;
-        saturated = zoneNeedsCatchup(
-          { pins, cap: PORTAL_CAP },
-          priorState && { successWatermark: priorState.last_successful_poll_at }
-        );
-        const priorSuccessMs = Date.parse(priorState && priorState.last_successful_poll_at);
-        const offlineGap = Number.isFinite(priorSuccessMs)
-          && attemptedAt.getTime() - priorSuccessMs > BID_POLL_INTERVAL_SECONDS * 2_000;
-        if (saturated || offlineGap) {
-          const range = bidRecoveryRange(priorState, attemptedAt);
-          pins = await bidPortalClient.collectRange({ bbox: zone.bbox, ...range });
-        }
+        const collected = await collectBidZonePins({
+          portalClient: bidPortalClient,
+          bbox: zone.bbox,
+          priorState,
+          attemptedAt,
+          pollIntervalSeconds: BID_POLL_INTERVAL_SECONDS,
+          cap: PORTAL_CAP,
+          resolveRecoveryRange: (state, now) => bidRecoveryRange(state, now, {
+            maxDays: BID_CATCHUP_MAX_DAYS
+          })
+        });
         return {
           ok: true,
           zone,
-          pins,
-          resultCount: pins.length,
-          initialCount,
-          saturated,
-          recovered: saturated || offlineGap,
+          ...collected,
+          resultCount: collected.pins.length,
           watermarkAt: queryStartedAt
         };
       } catch (error) {
+        const recovery = error && error.bidZoneRecovery || {};
         return {
           ok: false,
           zone,
           pins: [],
-          resultCount: initialCount,
-          initialCount,
-          saturated,
+          resultCount: recovery.initialCount ?? null,
+          initialCount: recovery.initialCount ?? null,
+          saturated: Boolean(recovery.saturated),
+          offlineGap: Boolean(recovery.offlineGap),
+          recoveryReason: recovery.recoveryReason || null,
           watermarkAt: queryStartedAt,
           error: error.message
         };
@@ -1810,6 +1728,7 @@ process.once('exit', terminateArchiveChild);
 
 const monitor = main()
   .catch(error => {
+    settleFirstPoll({ ok: false, fatal: true, error: error.message });
     console.error(error.stack || error.message);
     process.exitCode = 1;
   })

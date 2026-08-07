@@ -3,6 +3,7 @@
 const crypto = require('node:crypto');
 const { normalizePortalTimestamp } = require('./portal-timestamp');
 
+const DEFAULT_COLLECTOR_SCOPE = 'bid_only';
 const DEFAULT_ZONE_TARGET = 12;
 const DEFAULT_PORTAL_CAP = 100;
 const DEFAULT_NEARLY_ALL_RATIO = 0.9;
@@ -28,7 +29,7 @@ function parseCollectorScope(environment = process.env) {
   const rawValue = environment && typeof environment === 'object'
     ? environment.COLLECTOR_SCOPE
     : environment;
-  if (rawValue == null || String(rawValue).trim() === '') return 'citywide';
+  if (rawValue == null || String(rawValue).trim() === '') return DEFAULT_COLLECTOR_SCOPE;
   const scope = String(rawValue).trim().toLowerCase();
   if (scope === 'citywide' || scope === 'bid_only') return scope;
   throw new Error(
@@ -492,9 +493,114 @@ function zoneNeedsCatchup(result, priorState = null) {
   return newer / pins.length >= ratio;
 }
 
+function errorMessage(error) {
+  return String(error && error.message || error || 'unknown error');
+}
+
+async function collectBidZonePins({
+  portalClient,
+  bbox,
+  priorState = null,
+  attemptedAt = new Date(),
+  pollIntervalSeconds = 60,
+  cap = DEFAULT_PORTAL_CAP,
+  resolveRecoveryRange
+}) {
+  if (!portalClient || typeof portalClient.query !== 'function'
+      || typeof portalClient.collectRange !== 'function') {
+    throw new TypeError('portalClient must provide query and collectRange functions');
+  }
+  if (typeof resolveRecoveryRange !== 'function') {
+    throw new TypeError('resolveRecoveryRange must be a function');
+  }
+  const attempted = attemptedAt instanceof Date ? attemptedAt : new Date(attemptedAt);
+  if (!Number.isFinite(attempted.getTime())) {
+    throw new TypeError('attemptedAt must be a valid date');
+  }
+  if (!Number.isFinite(pollIntervalSeconds) || pollIntervalSeconds <= 0) {
+    throw new TypeError('pollIntervalSeconds must be positive');
+  }
+
+  let pins;
+  let initialCount = null;
+  let initialQueryError = null;
+  try {
+    pins = await portalClient.query({ bbox });
+    if (!Array.isArray(pins)) throw new TypeError('Portal zone query must return an array');
+    initialCount = pins.length;
+  } catch (error) {
+    initialQueryError = error;
+    try {
+      const range = resolveRecoveryRange(priorState, attempted);
+      pins = await portalClient.collectRange({ bbox, ...range });
+      if (!Array.isArray(pins)) {
+        throw new TypeError('Portal bounded recovery must return an array');
+      }
+    } catch (recoveryError) {
+      const combinedError = new Error(
+        `Undated zone query failed (${errorMessage(initialQueryError)}); `
+        + `bounded date recovery failed (${errorMessage(recoveryError)})`,
+        { cause: recoveryError }
+      );
+      combinedError.bidZoneRecovery = {
+        initialCount,
+        saturated: false,
+        offlineGap: false,
+        recoveryReason: 'initial_query_failed'
+      };
+      throw combinedError;
+    }
+    return {
+      pins,
+      initialCount,
+      saturated: false,
+      offlineGap: false,
+      recovered: true,
+      recoveryReason: 'initial_query_failed',
+      initialQueryError: errorMessage(initialQueryError)
+    };
+  }
+
+  const saturated = zoneNeedsCatchup(
+    { pins, cap },
+    priorState && { successWatermark: priorState.last_successful_poll_at }
+  );
+  const priorSuccessMs = Date.parse(priorState && priorState.last_successful_poll_at);
+  const offlineGap = Number.isFinite(priorSuccessMs)
+    && attempted.getTime() - priorSuccessMs > pollIntervalSeconds * 2_000;
+  if (saturated || offlineGap) {
+    const range = resolveRecoveryRange(priorState, attempted);
+    try {
+      pins = await portalClient.collectRange({ bbox, ...range });
+      if (!Array.isArray(pins)) {
+        throw new TypeError('Portal bounded recovery must return an array');
+      }
+    } catch (error) {
+      error.bidZoneRecovery = {
+        initialCount,
+        saturated,
+        offlineGap,
+        recoveryReason: saturated ? 'saturated' : 'offline_gap'
+      };
+      throw error;
+    }
+  }
+  return {
+    pins,
+    initialCount,
+    saturated,
+    offlineGap,
+    recovered: saturated || offlineGap,
+    recoveryReason: saturated ? 'saturated' : offlineGap ? 'offline_gap' : null,
+    initialQueryError: null
+  };
+}
+
 module.exports = {
+  DEFAULT_COLLECTOR_SCOPE,
   buildBidQueryZones,
   canonicalizePortalPin,
+  collectBidZonePins,
   collectorInteger,
   deduplicatePortalPins,
   filterPinsToBids,

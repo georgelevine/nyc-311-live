@@ -47,6 +47,7 @@ test('serves 202 immediately and starts only one metrics worker', () => {
   const children = [];
   let currentTime = Date.parse('2026-07-29T12:00:00.000Z');
   const background = createEmailMetricsBackground({
+    collectorScope: 'citywide',
     refreshEnabled: true,
     cachePath: path.join(directory, 'metrics.json'),
     tempDirectory: path.join(directory, 'sqlite-tmp'),
@@ -96,6 +97,7 @@ test('returns a stale snapshot immediately while refreshing it in the background
   fs.writeFileSync(cachePath, JSON.stringify(snapshot(databasePath, generatedAt)));
   const children = [];
   const background = createEmailMetricsBackground({
+    collectorScope: 'citywide',
     refreshEnabled: true,
     cachePath,
     cacheTtlMs: 300_000,
@@ -131,6 +133,7 @@ test('applies a failure cooldown without discarding the last good snapshot', () 
   const children = [];
   let currentTime = Date.parse('2026-07-29T12:00:00.000Z');
   const background = createEmailMetricsBackground({
+    collectorScope: 'citywide',
     refreshEnabled: true,
     cachePath,
     cacheTtlMs: 300_000,
@@ -186,16 +189,21 @@ test('rejects persisted snapshots for another database or an invalid payload', (
   assert.equal(readPersistedSnapshot(cachePath, databasePath), null);
 });
 
-test('BID-only mode rejects legacy or citywide snapshots and serves only BID-tagged data', () => {
+test('BID-only default rejects legacy or citywide snapshots and serves only BID-tagged data', t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-metrics-bid-scope-'));
   const databasePath = path.join(directory, 'archive.sqlite');
   const cachePath = path.join(directory, 'metrics.json');
   const generatedAt = '2026-07-29T12:00:00.000Z';
+  const priorScope = process.env.COLLECTOR_SCOPE;
+  delete process.env.COLLECTOR_SCOPE;
+  t.after(() => {
+    if (priorScope == null) delete process.env.COLLECTOR_SCOPE;
+    else process.env.COLLECTOR_SCOPE = priorScope;
+  });
 
   fs.writeFileSync(cachePath, JSON.stringify(snapshot(databasePath, generatedAt)));
-  assert.equal(readPersistedSnapshot(cachePath, databasePath, 'bid_only'), null);
+  assert.equal(readPersistedSnapshot(cachePath, databasePath), null);
   const legacyBackground = createEmailMetricsBackground({
-    collectorScope: 'bid_only',
     cachePath,
     now: () => Date.parse(generatedAt)
   });
@@ -210,7 +218,7 @@ test('BID-only mode rejects legacy or citywide snapshots and serves only BID-tag
     undefined,
     'citywide'
   )));
-  assert.equal(readPersistedSnapshot(cachePath, databasePath, 'bid_only'), null);
+  assert.equal(readPersistedSnapshot(cachePath, databasePath), null);
 
   fs.writeFileSync(cachePath, JSON.stringify(snapshot(
     databasePath,
@@ -219,7 +227,6 @@ test('BID-only mode rejects legacy or citywide snapshots and serves only BID-tag
     'bid_only'
   )));
   const background = createEmailMetricsBackground({
-    collectorScope: 'bid_only',
     cachePath,
     now: () => Date.parse(generatedAt)
   });
@@ -299,6 +306,7 @@ test('peek serves a saved snapshot without starting a refresh worker', () => {
   )));
   let workersStarted = 0;
   const background = createEmailMetricsBackground({
+    collectorScope: 'citywide',
     refreshEnabled: true,
     cachePath,
     cacheTtlMs: 300_000,

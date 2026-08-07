@@ -3,6 +3,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const {
+  bidRecoveryRange,
   createBidPortalClient,
   nycCalendarDay,
   portalMapUrl,
@@ -46,6 +47,38 @@ test('Portal map URLs keep bbox retrieval separate from exact BID membership', (
   ]);
   assert.equal(splitBbox(bbox).length, 4);
   assert.equal(nycCalendarDay('2026-08-06T02:00:00Z'), '2026-08-05');
+});
+
+test('BID recovery ranges use NYC calendar days and accept a gap at the maximum', () => {
+  assert.deepEqual(
+    bidRecoveryRange(null, '2026-08-06T02:00:00.000Z', { maxDays: 2 }),
+    { from: '2026-08-05', to: '2026-08-05' }
+  );
+  assert.deepEqual(
+    bidRecoveryRange(
+      { last_successful_poll_at: '2026-08-04T16:00:00.000Z' },
+      '2026-08-06T16:00:00.000Z',
+      { maxDays: 2 }
+    ),
+    { from: '2026-08-04', to: '2026-08-06' }
+  );
+});
+
+test('BID recovery ranges reject unsafe limits and gaps beyond the limit', () => {
+  for (const maxDays of [0, 32, 1.5, Number.NaN]) {
+    assert.throws(
+      () => bidRecoveryRange(null, '2026-08-06T16:00:00.000Z', { maxDays }),
+      /maxDays must be an integer from 1 through 31/
+    );
+  }
+  assert.throws(
+    () => bidRecoveryRange(
+      { last_successful_poll_at: '2026-08-04T15:59:59.000Z' },
+      '2026-08-06T16:00:00.000Z',
+      { maxDays: 2 }
+    ),
+    /automatic catch-up is limited to 2 days/
+  );
 });
 
 test('capped multi-day recovery splits dates and deduplicates results', async () => {
@@ -109,4 +142,39 @@ test('capped single-day recovery spatially subdivides until each tile is complet
   assert.equal(recovered.length, 4);
   assert.equal(calls, 5);
   assert.equal(client.diagnostics.spatialSplits, 1);
+});
+
+test('problem-filter recovery rejects an incomplete capped problem area', async () => {
+  const capped = Array.from({ length: 100 }, (_, index) =>
+    pin(`initial-${index}`, 40.71, -74.01));
+  const records = (prefix, count) => Array.from(
+    { length: count },
+    (_, index) => pin(`${prefix}-${index}`, 40.71, -74.01)
+  );
+  const fetchImpl = async url => {
+    const parsed = new URL(String(url));
+    if (parsed.pathname.includes('get-optionset-filter-options')) {
+      return response([{ value: 'area-a' }, { value: 'area-b' }]);
+    }
+    if (parsed.pathname.includes('get-lookup-filter-options')) {
+      return response([{ value: 'problem-a1' }, { value: 'problem-a2' }]);
+    }
+    const area = parsed.searchParams.get('problemarea');
+    const problem = parsed.searchParams.get('problem');
+    if (!area) return response(capped);
+    if (area === 'area-b') return response(records('area-b', 2));
+    if (!problem) return response(capped);
+    return response(records(problem, problem === 'problem-a1' ? 50 : 49));
+  };
+  const client = createBidPortalClient({
+    fetchImpl,
+    concurrency: 3,
+    retries: 1,
+    timeoutMs: 1000
+  });
+
+  await assert.rejects(
+    client.collectRange({ bbox, from: '2026-08-06', to: '2026-08-06' }),
+    /problem filters recovered only 99 capped records/
+  );
 });

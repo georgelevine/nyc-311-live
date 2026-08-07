@@ -28,6 +28,7 @@ WORKDIR /opt/nyc311
 COPY --from=dependencies --chown=nyc311:nyc311 /opt/nyc311/node_modules ./node_modules
 COPY --chown=nyc311:nyc311 package.json package-lock.json ./
 COPY --chown=nyc311:nyc311 *.js ./
+COPY --chown=nyc311:nyc311 exports/nyc-bid-boundaries-2026-04-28.geojson ./exports/nyc-bid-boundaries-2026-04-28.geojson
 COPY --chown=nyc311:nyc311 public ./public
 
 # Keep the commit-specific image metadata after every reusable runtime and

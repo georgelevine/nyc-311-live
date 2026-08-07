@@ -10,6 +10,7 @@ const { once } = require('node:events');
 const { DatabaseSync } = require('node:sqlite');
 
 process.env.NYC311_SERVER_NO_LISTEN = '1';
+process.env.COLLECTOR_SCOPE = 'bid_only';
 
 const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-boundary-api-'));
 const databasePath = path.join(temporaryDirectory, 'archive.sqlite');
@@ -58,6 +59,14 @@ database.exec(`
   );
   CREATE INDEX live_request_bid_memberships_district_idx
     ON live_request_bid_memberships(boundary_version,bid_id,srnumber);
+
+  CREATE TABLE live_monitor_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+  INSERT INTO live_monitor_state(key,value,updated_at)
+  VALUES ('collector_scope','bid_only','2026-07-29T12:00:00.000Z');
 
   CREATE TABLE police_precinct_boundary_versions (
     version TEXT PRIMARY KEY,

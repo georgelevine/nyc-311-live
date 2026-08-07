@@ -309,8 +309,8 @@
   let dashboardRequestSequence = 0;
   let dashboardAbortController = null;
   let lastMapRefreshStartedAt = 0;
-  let currentPollSeconds = 15;
-  let currentCollectorScope = 'citywide';
+  let currentPollSeconds = 60;
+  let currentCollectorScope = 'bid_only';
   let currentBidCollector = null;
   let currentCollectorStats = null;
   let lastPortalCheck = null;
@@ -3235,19 +3235,29 @@
   function renderCollectorScope(stats = {}) {
     const bidOnly = currentCollectorScope === 'bid_only';
     appShell.dataset.collectorScope = bidOnly ? 'bid_only' : 'citywide';
-    collectorScopeBadge.hidden = !bidOnly;
+    collectorScopeBadge.hidden = false;
     mapCollectorScope.hidden = !bidOnly;
     bidScopeFilter.disabled = !bidOnly || bidById.size === 0;
 
     if (!bidOnly) {
       if (hasCollectorScopeElements) {
-        collectorScopeElements.root.hidden = true;
+        collectorScopeElements.root.hidden = false;
+        collectorScopeElements.root.dataset.scope = 'citywide';
         collectorScopeElements.feedRoot.hidden = true;
+        collectorScopeElements.title.textContent = 'Citywide rollback mode';
+        collectorScopeElements.detail.textContent = 'The collector is explicitly running the legacy citywide feed. BID-only collection is paused.';
+        collectorScopeElements.zoneHealth.dataset.status = 'attention';
+        collectorScopeElements.zoneHealth.textContent = 'Rollback';
+        collectorScopeElements.cadence.textContent = 'Explicit COLLECTOR_SCOPE=citywide';
+        collectorScopeElements.lastCheck.textContent = stats.last_successful_poll_at
+          ? `Last complete citywide check ${relativeTime(stats.last_successful_poll_at)}`
+          : 'Waiting for a complete citywide check';
       }
+      collectorScopeBadge.textContent = 'Citywide rollback';
       appTitle.textContent = 'NYC 311 Live';
-      document.title = 'NYC 311 Live';
-      overviewTitle.textContent = 'Overview';
-      overviewDescription.textContent = 'What NYC is reporting, what has been saved, and how quickly requests change.';
+      document.title = 'NYC 311 Live · Citywide rollback';
+      overviewTitle.textContent = 'Citywide rollback overview';
+      overviewDescription.textContent = 'Legacy citywide collection is active for rollback or recovery.';
       requestsViewEyebrow.textContent = 'Live request stream';
       setRequestsViewHeading('Incoming requests');
       summaryElements.geographyLabel.textContent = 'Boroughs';
@@ -3278,6 +3288,7 @@
     const lastCompleteScan = stats.last_successful_poll_at || stats.last_seen_at;
 
     collectorScopeBadge.hidden = false;
+    collectorScopeBadge.textContent = 'BID network';
     mapCollectorScope.hidden = false;
     appTitle.textContent = 'NYC BID 311 Live';
     document.title = 'NYC BID 311 Live';
@@ -3293,6 +3304,7 @@
 
     if (!hasCollectorScopeElements) return;
     collectorScopeElements.root.hidden = false;
+    collectorScopeElements.root.dataset.scope = 'bid_only';
     collectorScopeElements.feedRoot.hidden = false;
     collectorScopeElements.title.textContent = 'BID-only live collection';
     collectorScopeElements.detail.textContent = 'Exact BID boundary matching admits only coordinate-bearing NYC311 requests inside an active district.';
@@ -3845,14 +3857,16 @@
       feedLoadMoreAbortController = null;
       feedLoadingMore = false;
       const stats = data.stats || {};
-      currentCollectorScope = stats.collector_scope === 'bid_only'
-        ? 'bid_only'
-        : 'citywide';
+      currentCollectorScope = stats.collector_scope === 'citywide'
+        ? 'citywide'
+        : 'bid_only';
       currentBidCollector = currentCollectorScope === 'bid_only'
         && stats.bid_collector && typeof stats.bid_collector === 'object'
         ? stats.bid_collector
         : null;
-      currentPollSeconds = Number(stats.poll_interval_seconds || 15);
+      currentPollSeconds = Number(
+        stats.poll_interval_seconds || (currentCollectorScope === 'bid_only' ? 60 : 15)
+      );
       currentCollectorStats = stats;
       lastPortalCheck = stats.last_seen_at ? new Date(stats.last_seen_at) : null;
       renderCollectorScope(stats);

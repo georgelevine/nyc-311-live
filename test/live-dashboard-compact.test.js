@@ -8,6 +8,7 @@ const { once } = require('node:events');
 const { DatabaseSync } = require('node:sqlite');
 
 process.env.NYC311_SERVER_NO_LISTEN = '1';
+process.env.COLLECTOR_SCOPE = 'citywide';
 
 const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-compact-dashboard-'));
 const databasePath = path.join(temporaryDirectory, 'archive.sqlite');
@@ -42,6 +43,8 @@ database.exec(`
   );
   CREATE INDEX live_request_bid_memberships_district_idx
     ON live_request_bid_memberships(boundary_version,bid_id,srnumber);
+  CREATE UNIQUE INDEX live_request_bid_memberships_request_idx
+    ON live_request_bid_memberships(srnumber,boundary_version,bid_id);
   CREATE TABLE business_improvement_district_boundary_versions (
     version TEXT PRIMARY KEY,
     active INTEGER NOT NULL
@@ -186,6 +189,7 @@ database.prepare(`
 const insertState = database.prepare(`
   INSERT INTO live_monitor_state (key,value,updated_at) VALUES (?,?,?)
 `);
+insertState.run('collector_scope', 'citywide', '2026-07-29T12:00:05.000Z');
 insertState.run('live_frontier', '28390001', '2026-07-29T12:00:05.000Z');
 insertState.run('last_successful_poll_at', '2026-07-29T12:00:05.000Z', '2026-07-29T12:00:05.000Z');
 insertState.run('poll_interval_seconds', '30', '2026-07-29T12:00:05.000Z');
@@ -205,7 +209,12 @@ insertState.run(
 );
 database.close();
 
-const { app, liveMapRequestIndexClause } = require('../server');
+const {
+  app,
+  liveMapRequestIndexClause,
+  scopePredicates,
+  scopedLiveRequestSource
+} = require('../server');
 let server;
 let baseUrl;
 
@@ -704,7 +713,9 @@ test('dashboard BID records and totals use the same indexed membership scope', a
 
 test('BID-only collector scope hides retained citywide rows from unfiltered reads', async () => {
   const writable = new DatabaseSync(databasePath);
+  const priorConfiguredScope = process.env.COLLECTOR_SCOPE;
   try {
+    process.env.COLLECTOR_SCOPE = 'bid_only';
     writable.prepare(`
       INSERT INTO live_monitor_state(key,value,updated_at)
       VALUES ('collector_scope','bid_only',?)
@@ -734,9 +745,86 @@ test('BID-only collector scope hides retained citywide rows from unfiltered read
     );
     assert.equal(mapPayload.stats.total, 2);
   } finally {
+    process.env.COLLECTOR_SCOPE = priorConfiguredScope;
     writable.prepare(`
       UPDATE live_monitor_state SET value='citywide',updated_at=? WHERE key='collector_scope'
     `).run(new Date().toISOString());
+    writable.close();
+  }
+});
+
+test('unfiltered BID-only pages stay suffix ordered and use active membership lookups', () => {
+  const readable = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    const scope = { precinct: null, bid: null, collectorBidOnly: true };
+    const source = scopedLiveRequestSource('live', scope, 'scope_bid');
+    const predicates = scopePredicates('live', scope, 'scope_bid');
+    const indexClause = liveMapRequestIndexClause(readable, scope);
+    assert.equal(source, 'live_portal_requests AS live');
+    assert.equal(predicates.length, 1);
+    assert.match(predicates[0], /collector_bid_boundary\.active=1/);
+    assert.match(indexClause, /sqlite_autoindex_live_portal_requests_2/);
+
+    const plan = readable.prepare(`
+      EXPLAIN QUERY PLAN
+      SELECT live.suffix
+      FROM ${source} ${indexClause}
+      WHERE ${predicates[0]}
+      ORDER BY live.suffix DESC
+      LIMIT ?
+    `).all(20);
+    assert.equal(
+      plan.some(row => /SCAN live USING INDEX sqlite_autoindex_live_portal_requests_2/i
+        .test(row.detail)),
+      true,
+      JSON.stringify(plan)
+    );
+    assert.equal(
+      plan.some(row => /SEARCH collector_bid_membership USING COVERING INDEX live_request_bid_memberships_request_idx/i
+        .test(row.detail)),
+      true,
+      JSON.stringify(plan)
+    );
+    assert.equal(
+      plan.some(row => /TEMP B-TREE/i.test(row.detail)),
+      false,
+      JSON.stringify(plan)
+    );
+  } finally {
+    readable.close();
+  }
+});
+
+test('selected BID pages stay unique when a request overlaps active districts', async () => {
+  const writable = new DatabaseSync(databasePath);
+  try {
+    writable.prepare(`
+      INSERT INTO business_improvement_districts(boundary_version,bid_id,name)
+      VALUES (?,?,?)
+    `).run('test-v1', 69, 'Overlapping Test BID');
+    writable.prepare(`
+      INSERT INTO live_request_bid_memberships(srnumber,bid_id,boundary_version)
+      VALUES (?,?,?)
+    `).run('311-28390001', 69, 'test-v1');
+
+    const response = await fetch(
+      `${baseUrl}/api/live-dashboard?limit=20&compact=1&include_totals=0&bid_id=68`
+    );
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.equal(
+      payload.records.filter(record => record.srnumber === '311-28390001').length,
+      1
+    );
+  } finally {
+    writable.prepare(`
+      DELETE FROM live_request_bid_memberships
+      WHERE srnumber=? AND bid_id=? AND boundary_version=?
+    `).run('311-28390001', 69, 'test-v1');
+    writable.prepare(`
+      DELETE FROM business_improvement_districts
+      WHERE boundary_version=? AND bid_id=?
+    `).run('test-v1', 69);
     writable.close();
   }
 });

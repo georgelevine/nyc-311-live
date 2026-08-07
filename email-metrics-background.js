@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { fork } = require('child_process');
+const { DEFAULT_COLLECTOR_SCOPE } = require('./bid-collector-scope');
 
 const CACHE_VERSION = 1;
 const DEFAULT_CACHE_TTL_MS = 5 * 60_000;
@@ -32,7 +33,11 @@ function normalizedCollectorScope(value) {
   return ['citywide', 'bid_only'].includes(scope) ? scope : null;
 }
 
-function normalizeSnapshot(candidate, databasePath, expectedCollectorScope = 'citywide') {
+function normalizeSnapshot(
+  candidate,
+  databasePath,
+  expectedCollectorScope = DEFAULT_COLLECTOR_SCOPE
+) {
   if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) return null;
   if (candidate.version !== CACHE_VERSION) return null;
   if (candidate.database_path !== path.resolve(databasePath)) return null;
@@ -41,7 +46,8 @@ function normalizeSnapshot(candidate, databasePath, expectedCollectorScope = 'ci
   }
   const taggedCollectorScope = normalizedCollectorScope(candidate.collector_scope);
   if (candidate.collector_scope != null && !taggedCollectorScope) return null;
-  const expectedScope = normalizedCollectorScope(expectedCollectorScope) || 'citywide';
+  const expectedScope = normalizedCollectorScope(expectedCollectorScope)
+    || DEFAULT_COLLECTOR_SCOPE;
   // Legacy snapshots were generated before scope tagging and therefore can
   // only be trusted by the legacy citywide dashboard. BID-only mode must never
   // display one: it may contain tens of thousands of retained citywide rows.
@@ -60,7 +66,7 @@ function normalizeSnapshot(candidate, databasePath, expectedCollectorScope = 'ci
 function readPersistedSnapshot(
   cachePath,
   databasePath,
-  expectedCollectorScope = 'citywide'
+  expectedCollectorScope = DEFAULT_COLLECTOR_SCOPE
 ) {
   try {
     if (!fs.existsSync(cachePath)) return null;
@@ -113,7 +119,7 @@ function createEmailMetricsBackground(options = {}) {
   );
   const collectorScope = normalizedCollectorScope(
     options.collectorScope || process.env.COLLECTOR_SCOPE
-  ) || 'citywide';
+  ) || DEFAULT_COLLECTOR_SCOPE;
   const forkWorker = options.forkWorker || fork;
   const now = options.now || (() => Date.now());
   const logger = options.logger || console;

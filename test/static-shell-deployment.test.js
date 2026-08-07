@@ -14,6 +14,10 @@ const compose = fs.readFileSync(
   path.join(root, 'aws', 'lightsail-sqlite', 'compose.yml'),
   'utf8'
 );
+const exampleEnvironment = fs.readFileSync(
+  path.join(root, 'aws', 'lightsail-sqlite', '.env.example'),
+  'utf8'
+);
 const deploy = fs.readFileSync(
   path.join(root, 'aws', 'lightsail-sqlite', 'deploy-ui-release.sh'),
   'utf8'
@@ -35,6 +39,30 @@ const backupService = fs.readFileSync(
   'utf8'
 );
 const dockerfile = fs.readFileSync(path.join(root, 'Dockerfile.sqlite'), 'utf8');
+const legacyCompose = fs.readFileSync(
+  path.join(root, 'aws', 'lightsail', 'compose.yml'),
+  'utf8'
+);
+const legacyWorker = fs.readFileSync(path.join(root, 'cloud', 'worker.js'), 'utf8');
+const legacyCollectorScope = fs.readFileSync(
+  path.join(root, 'cloud', 'collector-scope.js'),
+  'utf8'
+);
+
+test('the legacy PostgreSQL worker cannot silently fall back to citywide collection', () => {
+  assert.match(
+    legacyCompose,
+    /COLLECTOR_SCOPE: "\$\{COLLECTOR_SCOPE:\?Set COLLECTOR_SCOPE=citywide/
+  );
+  assert.match(
+    legacyWorker,
+    /parseLegacyCollectorScope\(process\.env\)/
+  );
+  assert.doesNotMatch(
+    `${legacyWorker}\n${legacyCollectorScope}`,
+    /process\.env\.COLLECTOR_SCOPE \|\| 'citywide'/
+  );
+});
 
 test('Caddy isolates inbound email before routing dashboard APIs', () => {
   assert.equal(caddy.includes('redir @root /live.html'), false);
@@ -73,6 +101,16 @@ test('web and background services have independent immutable image pointers', ()
   assert.match(collector, /\*service-image/);
   assert.match(web, /\*web-image/);
   assert.match(inbound, /\*service-image/);
+});
+
+test('the SQLite runtime image carries only the pinned BID bootstrap boundary', () => {
+  assert.match(
+    dockerfile,
+    /COPY --chown=nyc311:nyc311 exports\/nyc-bid-boundaries-2026-04-28\.geojson \.\/exports\/nyc-bid-boundaries-2026-04-28\.geojson/
+  );
+  const dockerignore = fs.readFileSync(path.join(root, '.dockerignore'), 'utf8');
+  assert.match(dockerignore, /!exports\/nyc-bid-boundaries-2026-04-28\.geojson/);
+  assert.doesNotMatch(dockerfile, /COPY[^\n]*exports\/\s/);
 });
 
 test('Compose runs inbound email separately and gates the proxy on its health', () => {
@@ -117,6 +155,7 @@ test('service activation and rollback include inbound email without changing it 
   assert.match(deploy, /http:\/\/127\.0\.0\.1:10001\/health/);
   assert.match(deploy, /docker compose ps -q inbound-email/);
   assert.match(deploy, /public_shell_url="https:\/\/311\.georgelevine\.com\/"/);
+  assert.match(deploy, /<title>NYC BID 311 Live<\/title>/);
   assert.match(deploy, /for _attempt in \$\(seq 1 30\)/);
   assert.match(
     deploy,
@@ -169,6 +208,8 @@ test('snapshot replacement stops the isolated database writer and checks it afte
   assert.match(installSnapshot, /_ui\/\$\{release_commit\}\/js\/live-dashboard\.js/);
   assert.match(installSnapshot, /service_image_name="nyc-311-sqlite:\$\{IMAGE_TAG\}"/);
   assert.match(installSnapshot, /web_image_name="nyc-311-sqlite:\$\{WEB_IMAGE_TAG\}"/);
+  assert.match(installSnapshot, /for _ in \$\(seq 1 300\)/);
+  assert.doesNotMatch(installSnapshot, /for _ in \$\(seq 1 60\)/);
 });
 
 test('snapshot installation accepts and validates the complete BID-only environment', () => {
@@ -182,6 +223,12 @@ test('snapshot installation accepts and validates the complete BID-only environm
   ]) {
     assert.match(installSnapshot, new RegExp(`\\[${key}\\]=1`));
   }
+  assert.match(installSnapshot, /COLLECTOR_SCOPE="\$\{COLLECTOR_SCOPE:-bid_only\}"/);
+  assert.match(exampleEnvironment, /^COLLECTOR_SCOPE=bid_only$/m);
+  assert.equal(
+    (compose.match(/COLLECTOR_SCOPE: \$\{COLLECTOR_SCOPE:-bid_only\}/g) || []).length,
+    3
+  );
   assert.match(installSnapshot, /COLLECTOR_SCOPE must be citywide or bid_only/);
   assert.match(
     installSnapshot,
@@ -223,16 +270,24 @@ test('backup, snapshot restore, and deploy polling share the configured database
   );
 });
 
-test('service deployment proves BID-only scope after a fresh collector poll', () => {
-  assert.match(deploy, /expected_collector_scope="\$\{expected_collector_scope:-citywide\}"/);
-  assert.match(deploy, /expected_collector_scope\}" == "bid_only"/);
+test('service deployment proves the exact expected scope after a fresh collector poll', () => {
+  assert.match(deploy, /expected_collector_scope="\$\{expected_collector_scope:-bid_only\}"/);
+  assert.doesNotMatch(deploy, /expected_collector_scope\}" == "bid_only"/);
   assert.match(
     deploy,
     /SELECT value FROM live_monitor_state WHERE key='collector_scope'/
   );
   assert.match(
     deploy,
-    /completed a poll without recording the required BID-only scope/
+    /recorded_collector_scope\}" != "\$\{expected_collector_scope\}"/
+  );
+  assert.match(
+    deploy,
+    /rollback_scope\}" != "\$\{expected_collector_scope\}"/
+  );
+  assert.match(
+    deploy,
+    /recorded '\$\{recorded_collector_scope:-missing\}' scope; expected '\$\{expected_collector_scope\}'/
   );
   assert.equal(
     (deploy.match(/for _(?:rollback_)?attempt in \$\(seq 1 300\)/g) || []).length,

@@ -117,8 +117,11 @@ openssl rand -hex 32
 ```
 
 Fill the blank values in `.env`. `SITE_ADDRESS` is only the DNS name, without
-`https://`. Do not put AWS keys, S3 keys, or a SQLite path in this file. Verify
-that Compose can resolve the configuration without printing the resolved secrets:
+`https://`. The legacy PostgreSQL worker also requires the explicit value
+`COLLECTOR_SCOPE=citywide`; it never chooses citywide implicitly and does not
+support BID-only collection. Do not put AWS keys, S3 keys, or a SQLite path in
+this file. Verify that Compose can resolve the configuration without printing
+the resolved secrets:
 
 ```bash
 docker compose config --quiet
@@ -362,7 +365,9 @@ data with PostGIS on RDS](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide
 2. Create separate Fargate task definitions using the same image:
    `node cloud/server.js`, `node cloud/worker.js`, and one-off migration/import
    commands. Inject database and dashboard secrets from Secrets Manager; never
-   bake them into the image or task definition text.
+   bake them into the image or task definition text. Set the worker environment
+   to `COLLECTOR_SCOPE=citywide` explicitly; use the SQLite/Lightsail stack for
+   BID-only collection.
 3. Put the web service behind an HTTPS ALB with `/api/health` as the initial target
    check. Put web and worker tasks in private subnets with outbound HTTPS access
    to the NYC311 Portal.

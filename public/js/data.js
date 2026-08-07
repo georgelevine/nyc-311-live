@@ -3,8 +3,9 @@
  */
 const Data = (() => {
   const BID_PARCELS_URL = 'https://data.cityofnewyork.us/resource/7jdm-inj8.geojson?$limit=100';
-  const BID_BOUNDARIES_URL = 'https://services6.arcgis.com/yG5s3afENB5iO9fj/arcgis/rest/services/BusinessImprovementDistrict_view/FeatureServer/0/query?where=1%3D1&outFields=*&returnGeometry=true&outSR=4326&f=geojson';
-  const BID_CACHE_KEY = 'nyc_bid_geojson_arcgis_v1';
+  const BID_BOUNDARIES_URL = '/data/nyc-bid-boundaries-2026-04-28.geojson';
+  const BID_BOUNDARIES_FALLBACK_URL = 'https://services6.arcgis.com/yG5s3afENB5iO9fj/arcgis/rest/services/BusinessImprovementDistrict_view/FeatureServer/0/query?where=1%3D1&outFields=*&returnGeometry=true&outSR=4326&f=geojson';
+  const BID_CACHE_KEY = 'nyc_bid_geojson_2026_04_28_v1';
   const BID_CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
   const portalDetailCache = new Map();
 
@@ -51,7 +52,7 @@ const Data = (() => {
   }
 
   /**
-   * Join Open Data parcel detail to the official ArcGIS district polygons.
+   * Join Open Data parcel detail to the pinned official district polygons.
    * Spatial matching avoids brittle name aliases (for example NoHo BID/NoHo NY).
    */
   function mergeBIDSources(parcelData, boundaryData) {
@@ -87,17 +88,20 @@ const Data = (() => {
       features: boundaries.map(({ feature }, index) => {
         const parcelFeature = parcelMatches.get(index);
         const parcelProperties = parcelFeature ? parcelFeature.properties || {} : {};
-        const arcProperties = feature.properties || {};
+        const boundaryProperties = feature.properties || {};
+        const boundaryName = boundaryProperties.name || boundaryProperties.BID;
+        const boroughCode = boundaryProperties.borough_code || boundaryProperties.BOROUGH;
 
         return {
           type: 'Feature',
           geometry: feature.geometry,
           parcelGeometry: parcelFeature ? parcelFeature.geometry : null,
           properties: {
-            ...arcProperties,
+            ...boundaryProperties,
             ...parcelProperties,
-            f_all_bi_2: parcelProperties.f_all_bi_2 || cleanBoundaryName(arcProperties.BID),
-            f_all_bi_1: parcelProperties.f_all_bi_1 || BOROUGH_NAMES[arcProperties.BOROUGH] || 'Unknown',
+            f_all_bi_2: parcelProperties.f_all_bi_2 || cleanBoundaryName(boundaryName),
+            f_all_bi_1: parcelProperties.f_all_bi_1 || boundaryProperties.borough ||
+              BOROUGH_NAMES[boroughCode] || 'Unknown',
             f_all_bi_4: parcelProperties.f_all_bi_4 || null,
             year_found: parcelProperties.year_found || null,
             __boundary_source: 'arcgis'
@@ -105,6 +109,17 @@ const Data = (() => {
         };
       })
     };
+  }
+
+  async function fetchBoundaryResponse() {
+    try {
+      const snapshotResp = await fetch(BID_BOUNDARIES_URL);
+      if (snapshotResp.ok) return snapshotResp;
+      console.warn(`Pinned BID boundary fetch failed: ${snapshotResp.status}`);
+    } catch (err) {
+      console.warn('Pinned BID boundary fetch failed:', err.message);
+    }
+    return fetch(BID_BOUNDARIES_FALLBACK_URL);
   }
 
   /**
@@ -125,7 +140,7 @@ const Data = (() => {
 
     const [parcelResult, boundaryResult] = await Promise.allSettled([
       fetch(BID_PARCELS_URL),
-      fetch(BID_BOUNDARIES_URL)
+      fetchBoundaryResponse()
     ]);
     const parcelResp = parcelResult.status === 'fulfilled' ? parcelResult.value : null;
     const boundaryResp = boundaryResult.status === 'fulfilled' ? boundaryResult.value : null;
@@ -171,6 +186,10 @@ const Data = (() => {
       fromdate: fromDate,
       todate: toDate
     });
+    if (opts.bidId != null) params.append('bid_id', String(opts.bidId));
+    if (opts.bidBoundaryVersion) {
+      params.append('bid_boundary_version', String(opts.bidBoundaryVersion));
+    }
     if (opts.refresh) params.append('refresh', '1');
 
     try {

@@ -8,7 +8,11 @@ const cheerio = require('cheerio');
 const { DatabaseSync } = require('node:sqlite');
 
 process.env.NYC311_SERVER_NO_LISTEN = '1';
-const { compactLiveDashboardStats } = require('../server');
+const {
+  collectorScopePolicy,
+  compactLiveDashboardStats,
+  filterPortalPinsToFeature
+} = require('../server');
 
 const ROOT = path.join(__dirname, '..');
 const HTML = fs.readFileSync(path.join(ROOT, 'public', 'live.html'), 'utf8');
@@ -17,6 +21,16 @@ const DASHBOARD = fs.readFileSync(
   'utf8'
 );
 const CSS = fs.readFileSync(path.join(ROOT, 'public', 'css', 'live-ui.css'), 'utf8');
+const EXPLORER_DATA = fs.readFileSync(
+  path.join(ROOT, 'public', 'js', 'data.js'),
+  'utf8'
+);
+const EXPLORER_APP = fs.readFileSync(
+  path.join(ROOT, 'public', 'js', 'app.js'),
+  'utf8'
+);
+const ELECTRON_MAIN = fs.readFileSync(path.join(ROOT, 'electron-main.js'), 'utf8');
+const PACKAGE = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 const $ = cheerio.load(HTML);
 
 function functionSource(name, nextName) {
@@ -80,7 +94,10 @@ function monitorDatabase(states, zones = []) {
 test('BID-only mode has one dedicated, accessible collection-scope summary', () => {
   assert.equal($('#collector-scope-banner').length, 1);
   assert.equal($('#collector-scope-banner').attr('aria-live'), 'polite');
-  assert.notEqual($('#collector-scope-banner').attr('hidden'), undefined);
+  assert.equal($('#collector-scope-banner').attr('hidden'), undefined);
+  assert.equal($('main.app-shell').attr('data-collector-scope'), 'bid_only');
+  assert.match($('title').text(), /NYC BID 311 Live/);
+  assert.equal($('#collector-scope-badge').attr('hidden'), undefined);
   assert.equal($('#collector-scope-title').length, 1);
   assert.equal($('#collector-scope-detail').length, 1);
   assert.equal($('#collector-zone-health').length, 1);
@@ -95,6 +112,12 @@ test('BID-only mode has one dedicated, accessible collection-scope summary', () 
   assert.match(renderScope, /failed_zones/);
   assert.match(renderScope, /poll_interval_seconds/);
   assert.doesNotMatch(renderScope, /audit|reconcil/i);
+  assert.match(renderScope, /Citywide rollback mode/);
+  assert.match(CSS, /data-collector-scope="bid_only"[^}]*\.monitor-strip/);
+  assert.doesNotMatch(
+    CSS,
+    /data-collector-scope="bid_only"\]\s+\.overview-operations\s*\{\s*display:\s*none/
+  );
 });
 
 test('BID-only live UI does not link to the unpublished metrics page', () => {
@@ -105,6 +128,45 @@ test('BID-only live UI does not link to the unpublished metrics page', () => {
   assert.equal(localLinks.includes('/bid-metrics.html'), false);
   assert.equal(HTML.includes('/bid-metrics.html'), false);
   assert.equal(CSS.includes('.bid-metrics-link'), false);
+});
+
+test('the BID explorer identifies its selected boundary to the scoped Portal endpoint', () => {
+  assert.match(EXPLORER_DATA, /params\.append\('bid_id'/);
+  assert.match(EXPLORER_DATA, /params\.append\('bid_boundary_version'/);
+  assert.match(EXPLORER_APP, /bidProperties\.bid_id\s*\?\?\s*bidProperties\.BIDID/);
+  assert.match(EXPLORER_APP, /bidBoundaryVersion:\s*bidProperties\.boundary_version/);
+});
+
+test('desktop startup is BID-first and surfaces a fatal fail-closed bootstrap', () => {
+  assert.match(
+    ELECTRON_MAIN,
+    /process\.env\.COLLECTOR_SCOPE\s*=\s*process\.env\.COLLECTOR_SCOPE\s*\|\|\s*'bid_only'/
+  );
+  assert.match(ELECTRON_MAIN, /initialPoll\s*&&\s*initialPoll\.fatal/);
+  assert.match(ELECTRON_MAIN, /dialog\.showErrorBox/);
+  assert.match(PACKAGE.scripts['desktop:package'], /NYC BID 311 Live/);
+  assert.doesNotMatch(PACKAGE.scripts['desktop:package'], /ignore=.*exports/);
+});
+
+test('the scoped Portal response drops rectangle-only and coordinate-less pins', () => {
+  const feature = {
+    type: 'Feature',
+    properties: { bid_id: 1 },
+    geometry: {
+      type: 'Polygon',
+      coordinates: [[
+        [-74.01, 40.70],
+        [-74.00, 40.70],
+        [-74.00, 40.71],
+        [-74.01, 40.71],
+        [-74.01, 40.70]
+      ]]
+    }
+  };
+  const inside = { srnumber: '311-00000001', latitude: 40.705, longitude: -74.005 };
+  const outside = { srnumber: '311-00000002', latitude: 40.715, longitude: -74.005 };
+  const missing = { srnumber: '311-00000003', latitude: null, longitude: -74.005 };
+  assert.deepEqual(filterPortalPinsToFeature([outside, missing, inside], feature), [inside]);
 });
 
 test('BID-only summaries describe exact BID capture without operator audit language', () => {
@@ -198,6 +260,29 @@ test('compact BID-only stats expose zone health and omit unrelated citywide stat
     failed_zones: 1,
     saturated_zones: 1
   });
+});
+
+test('web scope policy defaults to BID-only and requires durable agreement', t => {
+  const database = monitorDatabase({ collector_scope: 'bid_only' });
+  t.after(() => database.close());
+
+  assert.deepEqual(collectorScopePolicy(database, {}), {
+    ready: true,
+    scope: 'bid_only',
+    configuredScope: 'bid_only',
+    durableScope: 'bid_only',
+    disposition: 'in_scope'
+  });
+  assert.equal(
+    collectorScopePolicy(database, { COLLECTOR_SCOPE: 'citywide' }).disposition,
+    'scope_mismatch'
+  );
+  assert.equal(
+    collectorScopePolicy(database, { COLLECTOR_SCOPE: 'invalid' }).disposition,
+    'scope_env_invalid'
+  );
+  database.prepare(`DELETE FROM live_monitor_state WHERE key='collector_scope'`).run();
+  assert.equal(collectorScopePolicy(database, {}).disposition, 'scope_state_missing');
 });
 
 test('compact citywide stats retain frontier, reconciliation, and editable cadence semantics', t => {

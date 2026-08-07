@@ -526,7 +526,7 @@ test('BID-only inbound intake stores non-BID mail without changing status or for
   `).get(alias.id).last_received_at, null);
 });
 
-test('inbound scope policy requires explicit environment and durable state agreement', t => {
+test('inbound scope policy defaults missing environment to BID-only and requires durable agreement', t => {
   const { database } = createDatabase(t);
   t.after(() => database.close());
 
@@ -538,24 +538,27 @@ test('inbound scope policy requires explicit environment and durable state agree
     mode: 'citywide',
     disposition: 'in_scope'
   });
-  assert.equal(resolveInboundScopePolicy(database, {}).disposition, 'scope_env_missing');
-  assert.equal(resolveInboundScopePolicy(database, {
-    COLLECTOR_SCOPE: 'bid_only'
-  }).disposition, 'scope_mismatch');
+  assert.deepEqual(resolveInboundScopePolicy(database, {}), {
+    actionAllowed: false,
+    requireBidMembership: true,
+    mode: 'citywide',
+    disposition: 'scope_mismatch'
+  });
 
   setCollectorScope(database, 'bid_only');
-  assert.deepEqual(resolveInboundScopePolicy(database, {
-    COLLECTOR_SCOPE: 'bid_only'
-  }), {
+  assert.deepEqual(resolveInboundScopePolicy(database, {}), {
     actionAllowed: true,
     requireBidMembership: true,
     mode: 'bid_only',
     disposition: 'in_scope'
   });
   database.prepare(`DELETE FROM live_monitor_state WHERE key='collector_scope'`).run();
-  assert.equal(resolveInboundScopePolicy(database, {
-    COLLECTOR_SCOPE: 'bid_only'
-  }).disposition, 'scope_state_missing');
+  assert.deepEqual(resolveInboundScopePolicy(database, {}), {
+    actionAllowed: false,
+    requireBidMembership: true,
+    mode: 'bid_only',
+    disposition: 'scope_state_missing'
+  });
 });
 
 test('scope mismatch keeps authenticated inbound MIME as audit-only evidence', async t => {

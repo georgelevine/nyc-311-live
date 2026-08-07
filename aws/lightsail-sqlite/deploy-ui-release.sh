@@ -77,7 +77,7 @@ if ! expected_collector_scope="$(read_protected_env_value COLLECTOR_SCOPE "${cur
   echo "The protected environment has duplicate COLLECTOR_SCOPE entries." >&2
   exit 1
 fi
-expected_collector_scope="${expected_collector_scope:-citywide}"
+expected_collector_scope="${expected_collector_scope:-bid_only}"
 if [[ "${expected_collector_scope}" != "citywide"
     && "${expected_collector_scope}" != "bid_only" ]]; then
   echo "COLLECTOR_SCOPE must be citywide or bid_only." >&2
@@ -354,13 +354,11 @@ rollback() {
             sleep 2
             continue
           fi
-          if [[ "${expected_collector_scope}" == "bid_only" ]]; then
-            rollback_scope="$(sqlite3 "${database_host_path}" \
-              "SELECT value FROM live_monitor_state WHERE key='collector_scope';" 2>/dev/null || true)"
-            if [[ "${rollback_scope}" != "bid_only" ]]; then
-              sleep 2
-              continue
-            fi
+          rollback_scope="$(sqlite3 "${database_host_path}" \
+            "SELECT value FROM live_monitor_state WHERE key='collector_scope';" 2>/dev/null || true)"
+          if [[ "${rollback_scope}" != "${expected_collector_scope}" ]]; then
+            sleep 2
+            continue
           fi
         fi
         rollback_runtime_ready=1
@@ -531,13 +529,11 @@ if [[ "${deployment_scope}" == "service" ]]; then
     echo "The updated collector did not complete a fresh Portal poll." >&2
     false
   fi
-  if [[ "${expected_collector_scope}" == "bid_only" ]]; then
-    recorded_collector_scope="$(sqlite3 "${database_host_path}" \
-      "SELECT value FROM live_monitor_state WHERE key='collector_scope';")"
-    if [[ "${recorded_collector_scope}" != "bid_only" ]]; then
-      echo "The updated collector completed a poll without recording the required BID-only scope." >&2
-      false
-    fi
+  recorded_collector_scope="$(sqlite3 "${database_host_path}" \
+    "SELECT value FROM live_monitor_state WHERE key='collector_scope';")"
+  if [[ "${recorded_collector_scope}" != "${expected_collector_scope}" ]]; then
+    echo "The updated collector recorded '${recorded_collector_scope:-missing}' scope; expected '${expected_collector_scope}'." >&2
+    false
   fi
   curl --fail --silent --show-error --connect-timeout 3 --max-time 5 \
     http://127.0.0.1:10000/api/health/collector >/dev/null
@@ -567,7 +563,7 @@ for _attempt in $(seq 1 30); do
       "${public_css_url}" 2>/dev/null | sha256sum | cut -d' ' -f1 || true)"
     public_vendor_sha="$(curl --fail --silent --show-error --connect-timeout 3 --max-time 5 \
       "${public_vendor_url}" 2>/dev/null | sha256sum | cut -d' ' -f1 || true)"
-    if [[ "${public_shell}" == *"<title>NYC 311 Live</title>"*
+    if [[ "${public_shell}" == *"<title>NYC BID 311 Live</title>"*
         && "${public_shell}" == *"/_ui/${release_sha}/js/live-dashboard.js"*
         && "${public_shell}" == *"/_ui/${release_sha}/css/live-ui.css"*
         && "$(printf '%s' "${public_manifest}" | tr -d '[:space:]')" \

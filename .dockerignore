@@ -4,5 +4,7 @@
 !*.js
 !cloud/
 !cloud/**
+!exports/
+!exports/nyc-bid-boundaries-2026-04-28.geojson
 !public/
 !public/**

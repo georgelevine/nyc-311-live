@@ -3,6 +3,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { DEFAULT_COLLECTOR_SCOPE } = require('./bid-collector-scope');
 
 function requiredEnvironment(name) {
   const value = String(process.env[name] || '').trim();
@@ -61,7 +62,7 @@ function statusMonitoringMode(databasePath) {
 }
 
 function collectorScope(databasePath) {
-  const scope = monitorStateValue(databasePath, 'collector_scope', 'citywide')
+  const scope = monitorStateValue(databasePath, 'collector_scope', DEFAULT_COLLECTOR_SCOPE)
     .trim().toLowerCase();
   return ['citywide', 'bid_only'].includes(scope) ? scope : 'unknown';
 }

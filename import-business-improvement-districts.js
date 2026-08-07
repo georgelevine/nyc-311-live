@@ -7,6 +7,7 @@ const fetch = require('node-fetch');
 const { DatabaseSync } = require('node:sqlite');
 const { resolveSynchronousMode } = require('./sqlite-runtime');
 const { applyMigrations } = require('./sqlite-finalization');
+const { ensureLiveCollectorBaseSchema } = require('./live-collector-schema');
 const {
   BusinessImprovementDistrictMatcher,
   ensureSqliteBusinessImprovementDistrictSchema,
@@ -351,13 +352,12 @@ function backfill(database, options, matcher, importedAt) {
   return { ...counts, remaining, completedAt };
 }
 
-async function main() {
-  const options = parseArgs(process.argv.slice(2));
-  if (options.help) {
-    console.log(usage());
-    return;
-  }
-  const bytes = await sourceBytes(options);
+function importBusinessImprovementDistrictBoundaryBytes(
+  database,
+  options,
+  bytes,
+  importedAt = new Date().toISOString()
+) {
   const sha256 = crypto.createHash('sha256').update(bytes).digest('hex');
   const acceptedDigests = options.sha256Explicit
     ? [options.sha256]
@@ -368,7 +368,42 @@ async function main() {
     );
   }
   const collection = parseBoundarySource(bytes);
-  const districts = normalizeBusinessImprovementDistrictCollection(collection, { expectedCount: 78 });
+  const districts = normalizeBusinessImprovementDistrictCollection(collection, {
+    expectedCount: 78
+  });
+  installBoundaries(database, options, { sha256 }, districts, importedAt);
+  const matcher = new BusinessImprovementDistrictMatcher(
+    options.version,
+    districts.map(district => ({
+      bid_id: district.bidId,
+      name: district.name,
+      borough_code: district.boroughCode,
+      borough_name: district.boroughName,
+      geometry: district.geometry,
+      min_longitude: district.minLongitude,
+      min_latitude: district.minLatitude,
+      max_longitude: district.maxLongitude,
+      max_latitude: district.maxLatitude
+    }))
+  );
+  const result = backfill(database, options, matcher, importedAt);
+  activateBoundaries(database, options.version, result.completedAt);
+  return {
+    version: options.version,
+    sourceDate: options.sourceDate,
+    sha256,
+    districtCount: districts.length,
+    ...result
+  };
+}
+
+async function main() {
+  const options = parseArgs(process.argv.slice(2));
+  if (options.help) {
+    console.log(usage());
+    return;
+  }
+  const bytes = await sourceBytes(options);
   const database = new DatabaseSync(options.databasePath);
   try {
     database.exec(`
@@ -377,34 +412,25 @@ async function main() {
       PRAGMA busy_timeout=10000;
       PRAGMA foreign_keys=ON;
     `);
-    const importedAt = new Date().toISOString();
-    applyMigrations(database, importedAt);
+    ensureLiveCollectorBaseSchema(database);
+    applyMigrations(database);
     ensureSqliteBusinessImprovementDistrictSchema(database);
-    installBoundaries(database, options, { sha256 }, districts, importedAt);
-    const matcher = new BusinessImprovementDistrictMatcher(
-      options.version,
-      districts.map(district => ({
-        bid_id: district.bidId,
-        name: district.name,
-        borough_code: district.boroughCode,
-        borough_name: district.boroughName,
-        geometry: district.geometry,
-        min_longitude: district.minLongitude,
-        min_latitude: district.minLatitude,
-        max_longitude: district.maxLongitude,
-        max_latitude: district.maxLatitude
-      }))
-    );
-    const result = backfill(database, options, matcher, importedAt);
-    activateBoundaries(database, options.version, result.completedAt);
+    const result = importBusinessImprovementDistrictBoundaryBytes(database, options, bytes);
+    const {
+      version,
+      sourceDate,
+      sha256,
+      districtCount,
+      ...counts
+    } = result;
     console.log(JSON.stringify({
       database: options.databasePath,
-      version: options.version,
-      source_date: options.sourceDate,
+      version,
+      source_date: sourceDate,
       source_sha256: sha256,
-      business_improvement_districts: districts.length,
+      business_improvement_districts: districtCount,
       active: true,
-      ...result
+      ...counts
     }));
   } finally {
     database.close();
@@ -426,6 +452,7 @@ module.exports = {
   OFFICIAL_GEOJSON_URL,
   activateBoundaries,
   backfill,
+  importBusinessImprovementDistrictBoundaryBytes,
   installBoundaries,
   parseArgs,
   parseBoundarySource,

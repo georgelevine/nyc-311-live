@@ -88,7 +88,16 @@ const App = (() => {
     }
 
     try {
-      const portalPins = await Data.fetch311Portal(processed.paddedBbox, fromDate, toDate);
+      const bidProperties = selectedBID.feature && selectedBID.feature.properties || {};
+      const portalPins = await Data.fetch311Portal(
+        processed.paddedBbox,
+        fromDate,
+        toDate,
+        {
+          bidId: bidProperties.bid_id ?? bidProperties.BIDID,
+          bidBoundaryVersion: bidProperties.boundary_version
+        }
+      );
 
       showLoading('Filtering to BID boundary...');
 

@@ -1,11 +1,11 @@
-# NYC 311 Live
+# NYC BID 311 Live
 
-NYC 311 Live is a local-first collector and monitoring dashboard for public
-NYC311 service requests. Its default citywide scope captures the Portal's live
-map feed and audits missing request numbers. An opt-in BID-only scope instead
-captures only exact Business Improvement District polygon matches. Both scopes
-store public request details in SQLite, follow admitted requests until closure,
-and display the archive in a dashboard with a live map.
+NYC BID 311 Live is a local-first collector and monitoring dashboard for public
+NYC311 service requests. Its default BID-only scope captures only exact Business
+Improvement District polygon matches. An explicit citywide rollback scope keeps
+the Portal's live map feed and missing-request-number audit available. Both
+scopes store public request details in SQLite, follow admitted requests until
+closure, and display the archive in a dashboard with a live map.
 
 ## What it stores
 
@@ -36,6 +36,11 @@ npm test
 npm run desktop
 ```
 
+The desktop entry point defaults to BID-only. On a new archive, the collector
+installs the tracked, checksummed 78-feature boundary bundle before its first
+Portal poll. A missing, modified, or incomplete release fails closed. Set
+`COLLECTOR_SCOPE=citywide` only for an explicit rollback launch.
+
 Build the standalone Mac application with:
 
 ```bash
@@ -62,11 +67,8 @@ npm run desktop:package
 
 ## Collector scopes
 
-`COLLECTOR_SCOPE=citywide` is the backward-compatible default. It keeps the
-citywide Portal map poll, SR-number frontier, and delayed suffix-gap audit.
-
-`COLLECTOR_SCOPE=bid_only` is supported by the SQLite collector used locally and
-by the current Lightsail deployment. In this mode:
+`COLLECTOR_SCOPE=bid_only` is the default for the SQLite collector used locally
+and by the current Lightsail deployment. In this mode:
 
 - The collector queries 12 deterministic rectangular zones with bounded
   concurrency. Those rectangles are retrieval tools only.
@@ -84,12 +86,17 @@ by the current Lightsail deployment. In this mode:
 - Startup fails closed if the active BID release is missing or incomplete. It
   never falls back to citywide collection.
 
+`COLLECTOR_SCOPE=citywide` is an explicit rollback mode. It restores the
+citywide Portal map poll, SR-number frontier, and delayed suffix-gap audit; it
+is never selected implicitly by the SQLite/Lightsail configuration.
+
 Use a dedicated database for a clean BID-only archive. A mixed database is also
 safe: background work and unfiltered dashboard, map, and summary reads are
 automatically restricted to requests with an active BID membership, while old
 citywide rows remain intact.
 
-Install the pinned boundary release into the exact collector database first:
+New BID-only archives bootstrap the pinned release automatically. To install or
+repair it explicitly while the collector is stopped, target the exact database:
 
 ```bash
 npm run bids:import -- \
@@ -100,7 +107,6 @@ npm run bids:import -- \
 Then run a finite smoke test:
 
 ```bash
-COLLECTOR_SCOPE=bid_only \
 DATABASE_PATH=/absolute/path/to/bid-only-portal-archive.sqlite \
 LIVE_DURATION_SECONDS=75 \
 BID_POLL_INTERVAL_SECONDS=60 \
@@ -109,9 +115,17 @@ BID_QUERY_ZONE_TARGET=12 \
 npm run live:monitor
 ```
 
-The legacy PostgreSQL `cloud/worker.js` path deliberately rejects `bid_only`
-instead of silently collecting citywide data. No production scope is changed
-until its environment is explicitly updated and the service is deployed.
+To roll a stopped collector back to citywide behavior explicitly:
+
+```bash
+COLLECTOR_SCOPE=citywide \
+DATABASE_PATH=/absolute/path/to/portal-archive.sqlite \
+npm run live:monitor
+```
+
+The legacy PostgreSQL `cloud/worker.js` path deliberately rejects `bid_only`;
+it requires an explicit `COLLECTOR_SCOPE=citywide`. Use the SQLite collector for
+the default BID-only product behavior.
 
 ## Cloud deployment
 
@@ -145,10 +159,11 @@ On Lightsail, `DATABASE_PATH` must name a plain `.sqlite` file directly inside
 nightly verified backup all resolve that same configured file. Leaving it at
 `/data/portal-archive.sqlite` is the supported mixed-archive BID-only switch:
 historic citywide rows remain recoverable while BID-only reads and background
-work stay scoped. A BID-only service release is accepted only after the
-collector records a fresh poll with `collector_scope=bid_only`; a failed release
-does not report a successful rollback until the previous runtime completes a
-new poll and becomes healthy again.
+work stay scoped. A service release is accepted only after the collector records
+a fresh poll with the exact configured `collector_scope`, including an explicit
+citywide rollback; a failed release does not report a successful rollback until
+the previous runtime records that expected scope in a new poll and becomes
+healthy again.
 
 ## Read-only live statistics
 

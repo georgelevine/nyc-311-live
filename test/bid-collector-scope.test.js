@@ -9,6 +9,7 @@ const {
 } = require('../business-improvement-districts');
 const {
   buildBidQueryZones,
+  collectBidZonePins,
   collectorInteger,
   deduplicatePortalPins,
   filterPinsToBids,
@@ -96,8 +97,9 @@ function portalPin(srnumber, latitude, longitude, overrides = {}) {
   };
 }
 
-test('collector scope is citywide by default and BID-only is explicit', () => {
-  assert.equal(parseCollectorScope({}), 'citywide');
+test('collector scope is BID-only by default and citywide remains explicit', () => {
+  assert.equal(parseCollectorScope({}), 'bid_only');
+  assert.equal(parseCollectorScope({ COLLECTOR_SCOPE: '  ' }), 'bid_only');
   assert.equal(parseCollectorScope({ COLLECTOR_SCOPE: '  BID_ONLY ' }), 'bid_only');
   assert.equal(parseCollectorScope('citywide'), 'citywide');
   assert.throws(
@@ -305,4 +307,159 @@ test('zone saturation triggers catch-up only when the cap may hide unseen pins',
     ]
   }, { successWatermark: watermark }), false);
   assert.equal(zoneNeedsCatchup({ pins: [newer(1)], capped: true }), true);
+});
+
+test('a failed undated zone query falls back to bounded recovery', async () => {
+  const recoveredPin = portalPin('311-00000401', 40.707, -74.003);
+  const attemptedAt = new Date('2026-08-06T12:05:00.000Z');
+  const priorState = { last_successful_poll_at: '2026-08-06T12:00:00.000Z' };
+  const queryBbox = {
+    minlongitude: -74.02,
+    minlatitude: 40.70,
+    maxlongitude: -74.00,
+    maxlatitude: 40.72
+  };
+  let recoveryRangeCalls = 0;
+
+  const result = await collectBidZonePins({
+    portalClient: {
+      async query(parameters) {
+        assert.deepEqual(parameters, { bbox: queryBbox });
+        throw new Error('undated query unavailable');
+      },
+      async collectRange(parameters) {
+        assert.deepEqual(parameters, {
+          bbox: queryBbox,
+          from: '2026-08-06',
+          to: '2026-08-06'
+        });
+        return [recoveredPin];
+      }
+    },
+    bbox: queryBbox,
+    priorState,
+    attemptedAt,
+    resolveRecoveryRange(state, now) {
+      recoveryRangeCalls += 1;
+      assert.equal(state, priorState);
+      assert.equal(now, attemptedAt);
+      return { from: '2026-08-06', to: '2026-08-06' };
+    }
+  });
+
+  assert.deepEqual(result, {
+    pins: [recoveredPin],
+    initialCount: null,
+    saturated: false,
+    offlineGap: false,
+    recovered: true,
+    recoveryReason: 'initial_query_failed',
+    initialQueryError: 'undated query unavailable'
+  });
+  assert.equal(recoveryRangeCalls, 1);
+});
+
+test('a failed undated query reports both it and bounded recovery failing', async () => {
+  await assert.rejects(
+    collectBidZonePins({
+      portalClient: {
+        async query() {
+          throw new Error('undated query unavailable');
+        },
+        async collectRange() {
+          throw new Error('dated recovery unavailable');
+        }
+      },
+      bbox: {
+        minlongitude: -74.02,
+        minlatitude: 40.70,
+        maxlongitude: -74.00,
+        maxlatitude: 40.72
+      },
+      resolveRecoveryRange() {
+        return { from: '2026-08-06', to: '2026-08-06' };
+      }
+    }),
+    error => {
+      assert.match(error.message, /Undated zone query failed \(undated query unavailable\)/);
+      assert.match(error.message, /bounded date recovery failed \(dated recovery unavailable\)/);
+      assert.equal(error.cause.message, 'dated recovery unavailable');
+      return true;
+    }
+  );
+});
+
+test('an offline zone gap recovers the bounded range even when the latest query is not capped', async () => {
+  const latestPin = portalPin('311-00000402', 40.707, -74.003);
+  const recoveredPin = portalPin('311-00000403', 40.707, -74.003);
+  const priorState = { last_successful_poll_at: '2026-08-06T12:00:00.000Z' };
+  let collected = 0;
+
+  const result = await collectBidZonePins({
+    portalClient: {
+      async query() {
+        return [latestPin];
+      },
+      async collectRange(parameters) {
+        collected += 1;
+        assert.deepEqual(parameters, {
+          bbox: { zone: 'offline' },
+          from: '2026-08-06',
+          to: '2026-08-06'
+        });
+        return [recoveredPin];
+      }
+    },
+    bbox: { zone: 'offline' },
+    priorState,
+    attemptedAt: '2026-08-06T12:02:01.000Z',
+    pollIntervalSeconds: 60,
+    resolveRecoveryRange() {
+      return { from: '2026-08-06', to: '2026-08-06' };
+    }
+  });
+
+  assert.deepEqual(result.pins, [recoveredPin]);
+  assert.equal(result.initialCount, 1);
+  assert.equal(result.saturated, false);
+  assert.equal(result.offlineGap, true);
+  assert.equal(result.recovered, true);
+  assert.equal(result.recoveryReason, 'offline_gap');
+  assert.equal(collected, 1);
+});
+
+test('a saturated zone replaces the capped latest response with bounded recovery', async () => {
+  const cappedPins = Array.from({ length: 100 }, (_, index) => portalPin(
+    `311-${String(index + 500).padStart(8, '0')}`,
+    40.707,
+    -74.003,
+    { updateddate: '2026-08-06T12:00:30.000Z' }
+  ));
+  const recoveredPin = portalPin('311-00000601', 40.707, -74.003);
+
+  const result = await collectBidZonePins({
+    portalClient: {
+      async query() {
+        return cappedPins;
+      },
+      async collectRange() {
+        return [recoveredPin];
+      }
+    },
+    bbox: { zone: 'saturated' },
+    priorState: { last_successful_poll_at: '2026-08-06T12:00:00.000Z' },
+    attemptedAt: '2026-08-06T12:01:00.000Z',
+    pollIntervalSeconds: 60,
+    resolveRecoveryRange() {
+      return { from: '2026-08-06', to: '2026-08-06' };
+    }
+  });
+
+  assert.deepEqual(result.pins, [recoveredPin]);
+  assert.equal(result.initialCount, 100);
+  assert.equal(result.saturated, true);
+  assert.equal(result.offlineGap, false);
+  assert.equal(result.recovered, true);
+  assert.equal(result.recoveryReason, 'saturated');
+  assert.equal(result.initialQueryError, null);
 });

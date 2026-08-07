@@ -337,7 +337,7 @@
     <!-- ============================================ -->
     <h2>1. Why This Tool Exists</h2>
     <p>
-      NYC's 76 Business Improvement Districts (BIDs) manage streetscape, sanitation, and public safety
+      The pinned release contains 78 Business Improvement Districts (BIDs) that manage streetscape, sanitation, and public safety
       in commercial corridors across all five boroughs. To understand quality-of-life issues in their
       district, BID managers need to see 311 complaint patterns — what types of complaints are filed,
       where they cluster, how quickly they're resolved, and how trends change over time.
@@ -472,8 +472,8 @@
     <p>
       Instead of one request for the full date range, the server splits it into <strong>one request per
       day</strong>. Most BIDs receive 20-50 complaints per day — well under the 100 cap. For a 30-day
-      query, this means 30 parallel requests (running 8 at a time) instead of 1, capturing nearly 100%
-      of records.
+      query, this means 30 parallel requests (running 8 at a time) instead of 1. Any capped day
+      enters the recovery path below.
     </p>
     <div class="callout success">
       <strong>Real-world result:</strong> Times Square Alliance, 28-day range — <strong>936 portal records</strong>
@@ -483,10 +483,10 @@
     <h3>Phase 2: Spatial Subdivision (Fallback)</h3>
     <p>
       If any single day returns exactly 100 records (meaning it hit the cap), that day is automatically
-      re-fetched using <strong>spatial tiling</strong>. The BID's bounding box is divided into a 2&times;2
-      grid of smaller sub-boxes, and each tile is queried separately for that day. This works because the
-      portal's date filter only accepts whole dates — you can't split by time-of-day, so space is the
-      only remaining axis to subdivide.
+      re-fetched using <strong>recursive spatial tiling</strong>. The BID's bounding box is divided into a
+      2&times;2 grid; any tile that still returns 100 is quartered again, to a bounded depth of seven.
+      Pathological same-coordinate caps fall back to Portal problem-area and problem filters. If those
+      partitions remain capped, the request fails instead of presenting a truncated result as complete.
     </p>
     <p>
       In practice, Phase 2 rarely triggers. Even Times Square — one of NYC's busiest BIDs — stayed under
@@ -523,15 +523,15 @@
     <h3>Phase 3: Deduplication &amp; Caching</h3>
     <p>
       After spatial tiling, records near tile boundaries may appear in multiple tiles. The server deduplicates
-      by SR number before returning results. The complete result set is then cached in memory for 10 minutes,
-      so repeat queries are instant.
+      by SR number, applies the exact active BID polygon, and only then returns results. The result set is
+      cached in memory for 10 minutes, so repeat queries are instant.
     </p>
 
     <table class="data-table">
       <tr><th>Phase</th><th>What It Does</th><th>When It Runs</th><th>Calls</th></tr>
       <tr><td>1</td><td>Split date range into daily windows, fetch in parallel (8 concurrent)</td><td>Always</td><td>1 per day</td></tr>
-      <tr><td>2</td><td>Re-split capped days into 2&times;2 spatial tiles</td><td>Only if a day hits 100</td><td>4 per capped day</td></tr>
-      <tr><td>3</td><td>Deduplicate by SR number + cache 10 min</td><td>Always</td><td>0</td></tr>
+      <tr><td>2</td><td>Recursively quarter capped tiles, then use problem filters if needed</td><td>Only while a partition remains at 100</td><td>Bounded and adaptive</td></tr>
+      <tr><td>3</td><td>Deduplicate, exact-polygon filter, and cache 10 min</td><td>Always</td><td>0</td></tr>
     </table>
 
     <table class="data-table">
@@ -555,7 +555,7 @@
     </ul>
     <p>
       The Portal limits each response to 100 records and does not paginate. The server therefore
-      queries one day at a time and subdivides capped days into smaller map areas. When a case popup
+      queries one day at a time and recursively subdivides capped days into smaller map areas. When a case popup
       opens, the server fetches that case's Portal detail page for problem details, update timing,
       closure timing, and the expected next update when those values are available. The tool does not
       infer unavailable agency, channel, or resolution fields from another dataset.
@@ -587,18 +587,20 @@
 
     <h3>The Solution: Two Complementary Sources</h3>
     <p>
-      The application uses NYC's
-      <a href="https://services6.arcgis.com/yG5s3afENB5iO9fj/arcgis/rest/services/BusinessImprovementDistrict_view/FeatureServer/0" target="_blank" rel="noopener"><strong>Business Improvement District ArcGIS feature layer</strong></a>
-      as the authoritative district boundary. These continuous polygons include streets inside each
-      BID and follow the official outer edge. The Open Data parcel dataset remains useful for parcel
-      detail, district websites, founding years, and display names.
+      The application uses a pinned
+      <a href="data/nyc-bid-boundaries-2026-04-28.geojson"><strong>April 28, 2026 boundary snapshot</strong></a>
+      from NYC's
+      <a href="https://services6.arcgis.com/yG5s3afENB5iO9fj/arcgis/rest/services/BusinessImprovementDistrict_view/FeatureServer/0" target="_blank" rel="noopener">Business Improvement District ArcGIS feature layer</a>.
+      These continuous polygons include streets inside each BID and follow the official outer edge.
+      The Open Data parcel dataset remains useful for parcel detail, district websites, founding years,
+      and display names.
     </p>
 
     <table class="data-table">
       <tr><th>Source</th><th>Geometry</th><th>Purpose</th></tr>
-      <tr><td>NYC ArcGIS</td><td>Official district polygons</td><td>Selection, request filtering, map framing, and the yellow boundary</td></tr>
+      <tr><td>NYC ArcGIS snapshot</td><td>Official district polygons</td><td>Selection, request filtering, map framing, and the yellow boundary</td></tr>
       <tr><td>NYC Open Data</td><td>Tax lot parcel polygons</td><td>Blue parcel detail and BID descriptive metadata</td></tr>
-      <tr><td>Fallback</td><td>Gap-closed parcel geometry</td><td>Used only if the ArcGIS boundary service is temporarily unavailable</td></tr>
+      <tr><td>Fallback</td><td>Gap-closed parcel geometry</td><td>Used only if both the bundled snapshot and ArcGIS fallback are unavailable</td></tr>
     </table>
 
     <p>
@@ -610,10 +612,11 @@
     <!-- ============================================ -->
     <h2>6. Coordinate Handling</h2>
     <p>
-      Map pins use the coordinates returned by the 311 Portal. After the server fetches pins within
-      the selected BID's bounding box, the browser applies a point-in-polygon test against the official
-      BID boundary. This removes nearby requests that fall inside the rectangular query area but outside
-      the district. If two boundaries genuinely overlap, a point is assigned only to
+      Map pins use the coordinates returned by the 311 Portal. The browser sends the selected BID ID and
+      boundary version; the server derives the official bounding box and applies the exact active polygon.
+      The browser repeats point-in-polygon filtering against its selected snapshot as a display safeguard.
+      This removes nearby requests that fall inside the rectangular query area but outside the district.
+      If two boundaries genuinely overlap, the Explorer assigns the point to
       the BID whose original tax parcels are closest, preventing cross-BID double counting.
     </p>
 
@@ -623,10 +626,10 @@
     <ol>
       <li>User selects a BID from the dropdown</li>
       <li>The corresponding official ArcGIS district polygon is selected</li>
-      <li>A bounding box (with 50m query padding) is computed around the official boundary</li>
-      <li>The server proxy queries the 311 Portal by date and bounding box, splitting the range into daily windows</li>
-      <li>Days that reach the Portal's 100-record cap are queried again in a 2x2 spatial grid</li>
-      <li>Returned points are filtered client-side against the official boundary and assigned to the nearest original BID parcels if boundaries overlap</li>
+      <li>The browser sends the selected BID ID and pinned boundary version</li>
+      <li>The server derives the active official bounding box and queries daily Portal windows</li>
+      <li>Partitions that reach the 100-record cap are recursively split in space, with bounded problem-filter fallback</li>
+      <li>The server exact-filters the result to the active BID polygon; the browser repeats that check and assigns overlaps for display</li>
       <li>Pins are plotted and color-coded by complaint type</li>
     </ol>
 
@@ -700,11 +703,11 @@
       <tr><td>Date Picker</td><td>Flatpickr</td><td>Tiny, range-mode support, dark theme</td></tr>
       <tr><td>Heatmap</td><td>Leaflet.heat</td><td>Density visualization layer</td></tr>
       <tr><td>311 Request API</td><td>NYC 311 Portal (proxied)</td><td>Live request pins, statuses, and detail links</td></tr>
-      <tr><td>Boundary APIs</td><td>NYC ArcGIS + NYC Open Data</td><td>Official BID boundaries plus parcel geometry and district metadata</td></tr>
+      <tr><td>Boundary sources</td><td>Pinned NYC ArcGIS snapshot + NYC Open Data</td><td>Official BID boundaries plus parcel geometry and district metadata</td></tr>
     </table>
 
     <p style="margin-top: 40px; color: var(--text-muted); font-size: 12px; text-align: center;">
-      311 requests: live NYC 311 Portal only &middot; BID geography: NYC ArcGIS and NYC Open Data
+      311 requests: live NYC 311 Portal only &middot; BID geography: pinned NYC ArcGIS snapshot and NYC Open Data
     </p>
   </div>
 

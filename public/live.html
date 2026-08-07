@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: https://*.basemaps.cartocdn.com https://tile.openstreetmap.org; connect-src 'self'; font-src 'self' data:;">
-  <title>NYC 311 Live</title>
+  <title>NYC BID 311 Live</title>
   <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
   <link rel="stylesheet" href="/vendor/leaflet-markercluster/MarkerCluster.css">
   <link rel="stylesheet" href="/vendor/leaflet-markercluster/MarkerCluster.Default.css">
@@ -12,14 +12,14 @@
   <link rel="stylesheet" href="/css/live-ui.css">
 </head>
 <body>
-  <main class="app-shell" data-mobile-view="feed">
+  <main class="app-shell" data-mobile-view="feed" data-collector-scope="bid_only">
     <aside class="sidebar">
       <header class="app-header">
         <div class="brand-mark">311</div>
         <div class="brand-copy">
           <div class="brand-title-row">
-            <h1 id="app-title">NYC 311 Live</h1>
-            <span id="collector-scope-badge" class="collector-scope-badge" hidden>BID network</span>
+            <h1 id="app-title">NYC BID 311 Live</h1>
+            <span id="collector-scope-badge" class="collector-scope-badge">BID network</span>
           </div>
           <div class="live-state"><span class="live-dot"></span><span id="connection-label">Connecting</span></div>
         </div>
@@ -40,7 +40,7 @@
         </button>
       </nav>
 
-      <section id="bid-feed-scope" class="bid-feed-scope" aria-live="polite" hidden>
+      <section id="bid-feed-scope" class="bid-feed-scope" aria-live="polite">
         <div>
           <span>Exact-boundary feed</span>
           <strong id="bid-feed-scope-label">All active BIDs</strong>
@@ -57,10 +57,10 @@
         <header class="view-heading overview-heading">
           <div>
             <span class="eyebrow">At a glance</span>
-            <h2 id="overview-title">Overview</h2>
+            <h2 id="overview-title">BID network overview</h2>
           </div>
           <div class="overview-heading-actions">
-            <p id="overview-description">What NYC is reporting, what has been saved, and how quickly requests change.</p>
+            <p id="overview-description">Live activity, coverage, and response timing inside New York City business districts.</p>
           </div>
         </header>
         <section
@@ -68,7 +68,7 @@
           class="collector-scope-banner bid-network-overview"
           aria-labelledby="collector-scope-title"
           aria-live="polite"
-          hidden
+          data-scope="bid_only"
         >
           <header class="bid-network-header">
             <div>
@@ -178,7 +178,7 @@
         <section id="city-summary" class="city-summary" aria-labelledby="city-summary-title" aria-busy="true">
           <header class="city-summary-header">
             <div>
-              <span id="city-summary-eyebrow" class="eyebrow">NYC right now</span>
+              <span id="city-summary-eyebrow" class="eyebrow">NYC BIDs right now</span>
               <h2 id="city-summary-title">Last 15 minutes</h2>
             </div>
             <time id="city-summary-updated">Updating…</time>
@@ -367,12 +367,12 @@
               </div>
               <label>
                 <span>Check every</span>
-                <select id="poll-interval">
+                <select id="poll-interval" disabled title="BID-only cadence is set by BID_POLL_INTERVAL_SECONDS">
                   <option value="5">5 seconds</option>
                   <option value="10">10 seconds</option>
-                  <option value="15" selected>15 seconds</option>
+                  <option value="15">15 seconds</option>
                   <option value="30">30 seconds</option>
-                  <option value="60">60 seconds</option>
+                  <option value="60" selected>60 seconds</option>
                 </select>
               </label>
               <div class="clock-block">
@@ -410,8 +410,8 @@
       <div class="requests-view">
         <header class="view-heading requests-view-heading">
           <div>
-            <span id="requests-view-eyebrow" class="eyebrow">Live request stream</span>
-            <h2 id="requests-view-title">Incoming requests <i class="continuous-spinner" aria-hidden="true"></i></h2>
+            <span id="requests-view-eyebrow" class="eyebrow">BID-only live stream</span>
+            <h2 id="requests-view-title">Latest BID requests <i class="continuous-spinner" aria-hidden="true"></i></h2>
             <small id="feed-coverage" class="feed-coverage" aria-live="polite">Loading request archive…</small>
           </div>
           <time id="last-updated">Waiting for data</time>
@@ -461,7 +461,7 @@
         </section>
 
         <section id="request-feed" class="request-feed" aria-live="polite">
-          <div class="empty-state"><span class="radar"></span><p>Waiting for the live Portal feed…</p></div>
+          <div class="empty-state"><span class="radar"></span><p>Waiting for exact BID boundary matches…</p></div>
         </section>
       </div>
     </aside>
@@ -471,12 +471,12 @@
       <div class="map-overlay top-left map-controls">
         <div class="map-summary-heading">
           <div>
-            <span id="frontier-label" class="eyebrow">Latest frontier</span>
+            <span id="frontier-label" class="eyebrow">BID map scope</span>
             <strong id="frontier-number">—</strong>
           </div>
           <span class="eyebrow">Map scope</span>
         </div>
-        <p id="map-collector-scope" class="map-collector-scope" hidden>Exact BID boundary matches</p>
+        <p id="map-collector-scope" class="map-collector-scope">Exact BID boundary matches</p>
         <div id="map-boundary-key" class="map-boundary-key" aria-live="polite" hidden></div>
         <div id="map-scope" class="map-scope" role="group" aria-label="Choose which requests appear on the map">
           <button type="button" data-map-scope="24h" aria-pressed="true">24 hours</button>

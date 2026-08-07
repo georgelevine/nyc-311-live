@@ -72,6 +72,11 @@ function seedFreshCollector(database) {
     INSERT INTO live_monitor_state(key,value,updated_at) VALUES (?,?,?)
   `);
   insert.run(
+    'collector_scope',
+    'citywide',
+    '2026-07-29T11:59:45.000Z'
+  );
+  insert.run(
     'last_successful_poll_at',
     '2026-07-29T11:59:45.000Z',
     '2026-07-29T11:59:45.000Z'
@@ -222,11 +227,32 @@ test('BID-only health ignores retained citywide email and subscription rows', ()
   assert.notEqual(result.components.subscriptions.reason, 'work_failed');
 });
 
+test('missing collector scope state reports the BID-only default', () => {
+  const { database, databasePath } = createHealthDatabase();
+  database.prepare(`
+    INSERT INTO live_monitor_state(key,value,updated_at) VALUES (?,?,?)
+  `).run(
+    'last_successful_poll_at',
+    '2026-07-29T11:59:45.000Z',
+    '2026-07-29T11:59:45.000Z'
+  );
+  database.close();
+
+  const result = loadOperationalHealth(databasePath, { now: NOW });
+  assert.equal(result.components.map_discovery.collector_scope, 'bid_only');
+  assert.equal(result.components.map_discovery.reason, 'poll_fresh');
+});
+
 test('classifies overdue work and a stale collector without scanning queue totals', () => {
   const { database, databasePath } = createHealthDatabase();
   const insertState = database.prepare(`
     INSERT INTO live_monitor_state(key,value,updated_at) VALUES (?,?,?)
   `);
+  insertState.run(
+    'collector_scope',
+    'citywide',
+    '2026-07-29T11:57:30.000Z'
+  );
   insertState.run(
     'last_successful_poll_at',
     '2026-07-29T11:57:30.000Z',

@@ -47,15 +47,22 @@ function hasIndex(database, name, table) {
 function readRequestEmailUpdates(databasePath, srnumber, {
   existsSync = fs.existsSync,
   openDatabase = (filename, options) => new DatabaseSync(filename, options),
+  database: suppliedDatabase = null,
   limit = DEFAULT_LIMIT
 } = {}) {
   const normalizedSrnumber = textOrNull(srnumber);
   const result = emptyResult(normalizedSrnumber);
-  if (!databasePath || !normalizedSrnumber || !existsSync(databasePath)) return result;
+  if (!normalizedSrnumber) return result;
+  if (!suppliedDatabase
+      && (!databasePath || !existsSync(databasePath))) return result;
 
-  let database;
+  let database = suppliedDatabase;
+  let ownsDatabase = false;
   try {
-    database = openDatabase(databasePath, { readOnly: true });
+    if (!database) {
+      database = openDatabase(databasePath, { readOnly: true });
+      ownsDatabase = true;
+    }
     const tables = tableNames(database);
 
     if (tables.has('nyc311_email_aliases')) {
@@ -119,7 +126,7 @@ function readRequestEmailUpdates(databasePath, srnumber, {
 
     return result;
   } finally {
-    if (database) database.close();
+    if (ownsDatabase && database) database.close();
   }
 }
 

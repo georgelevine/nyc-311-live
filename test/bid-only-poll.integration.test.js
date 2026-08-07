@@ -64,6 +64,81 @@ function pin(srnumber, latitude, longitude) {
   };
 }
 
+test('the pinned BID importer initializes a genuinely fresh SQLite archive', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-bid-import-'));
+  const databasePath = path.join(directory, 'fresh.sqlite');
+  try {
+    const arguments_ = [
+      'import-business-improvement-districts.js',
+      '--db', databasePath,
+      '--file', BOUNDARIES
+    ];
+    runNode(arguments_, {});
+    runNode(arguments_, {});
+    const database = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      assert.equal(database.prepare(`
+        SELECT COUNT(*) AS count FROM live_portal_requests
+      `).get().count, 0);
+      assert.deepEqual({ ...database.prepare(`
+        SELECT version,source_sha256,feature_count
+        FROM business_improvement_district_boundary_versions WHERE active=1
+      `).get() }, {
+        version: '2026-04-28',
+        source_sha256: 'c8c06c9ecb8b733aa829c9907e918e153c9a4230fa796d228ad3f27042208a9f',
+        feature_count: 78
+      });
+      assert.equal(database.prepare(`
+        SELECT COUNT(*) AS count FROM business_improvement_districts
+      `).get().count, 78);
+      assert.equal(database.prepare(`
+        SELECT COUNT(*) AS count FROM schema_migrations
+      `).get().count > 0, true);
+    } finally {
+      database.close();
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('fresh BID startup fails closed when the bundled boundary digest is wrong', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-bid-bootstrap-'));
+  const databasePath = path.join(directory, 'fresh.sqlite');
+  const tamperedBoundaries = path.join(directory, 'tampered.geojson');
+  fs.writeFileSync(tamperedBoundaries, '{"type":"FeatureCollection","features":[]}');
+  try {
+    assert.throws(
+      () => runNode(['live-311.js'], {
+        DATABASE_PATH: databasePath,
+        BID_BOUNDARY_BOOTSTRAP_FILE: tamperedBoundaries,
+        LIVE_DURATION_SECONDS: '0.05',
+        NYC311_TEST_PORTAL_PINS: '[]'
+      }),
+      error => /Boundary SHA-256 mismatch/.test(
+        String(error && error.stderr || error && error.message)
+      )
+    );
+    const database = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      assert.equal(database.prepare(`
+        SELECT value FROM live_monitor_state WHERE key='collector_scope'
+      `).get().value, 'bid_only');
+      assert.equal(database.prepare(`
+        SELECT COUNT(*) AS count FROM live_number_queue
+      `).get().count, 0);
+      assert.equal(database.prepare(`
+        SELECT COUNT(*) AS count
+        FROM business_improvement_district_boundary_versions WHERE active=1
+      `).get().count, 0);
+    } finally {
+      database.close();
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test('one BID-only poll admits exact matches and leaves citywide audit state untouched', {
   timeout: 45_000
 }, () => {
@@ -81,21 +156,33 @@ test('one BID-only poll admits exact matches and leaves citywide audit state unt
   };
 
   try {
-    // Initialize the ordinary SQLite schema without making a real Portal call.
-    runNode(['live-311.js'], { ...baseEnvironment, COLLECTOR_SCOPE: 'citywide' });
-    assert.throws(
-      () => runNode(['live-311.js'], {
-        ...baseEnvironment,
-        COLLECTOR_SCOPE: 'bid_only'
-      }),
-      error => /requires a complete active business improvement district boundary release/
-        .test(String(error && error.stderr || error && error.message))
-    );
-    runNode([
-      'import-business-improvement-districts.js',
-      '--db', databasePath,
-      '--file', BOUNDARIES
-    ], baseEnvironment);
+    // A genuinely fresh database defaults to BID-only and installs only the
+    // tracked, checksummed boundary bundle before making its first Portal poll.
+    const bootstrapOutput = runNode(['live-311.js'], baseEnvironment);
+    const bootstrappedDatabase = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      const active = bootstrappedDatabase.prepare(`
+        SELECT version,source_sha256,feature_count
+        FROM business_improvement_district_boundary_versions WHERE active=1
+      `).get();
+      assert.deepEqual({ ...active }, {
+        version: '2026-04-28',
+        source_sha256: 'c8c06c9ecb8b733aa829c9907e918e153c9a4230fa796d228ad3f27042208a9f',
+        feature_count: 78
+      }, bootstrapOutput);
+      assert.equal(bootstrappedDatabase.prepare(`
+        SELECT COUNT(*) AS count FROM business_improvement_districts
+        WHERE boundary_version='2026-04-28'
+      `).get().count, 78);
+      assert.equal(bootstrappedDatabase.prepare(`
+        SELECT value FROM live_monitor_state WHERE key='collector_scope'
+      `).get().value, 'bid_only');
+      assert.equal(bootstrappedDatabase.prepare(`
+        SELECT COUNT(*) AS count FROM live_number_queue
+      `).get().count, 0);
+    } finally {
+      bootstrappedDatabase.close();
+    }
 
     // Even internally self-consistent metadata must not make a partial
     // release eligible for BID-only collection.
@@ -135,11 +222,7 @@ test('one BID-only poll admits exact matches and leaves citywide audit state unt
     } finally {
       resetPartialDatabase.close();
     }
-    runNode([
-      'import-business-improvement-districts.js',
-      '--db', databasePath,
-      '--file', BOUNDARIES
-    ], baseEnvironment);
+    runNode(['live-311.js'], baseEnvironment);
 
     const collection = JSON.parse(fs.readFileSync(BOUNDARIES, 'utf8'));
     const point = interiorPoint(collection.features[0]);

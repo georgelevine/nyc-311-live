@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const { DatabaseSync } = require('node:sqlite');
+const { DEFAULT_COLLECTOR_SCOPE } = require('./bid-collector-scope');
 
 const CONTRACT_VERSION = 1;
 const STATUS_VALUES = Object.freeze([
@@ -29,6 +30,7 @@ function textOrNull(value) {
 }
 
 function safeInteger(value, fallback = 0) {
+  if (value == null || String(value).trim() === '') return fallback;
   const numeric = Number(value);
   return Number.isSafeInteger(numeric) && numeric >= 0 ? numeric : fallback;
 }
@@ -151,6 +153,11 @@ function readState(database, key) {
   `).get(key) || null;
 }
 
+function activeCollectorScope(database) {
+  const scope = readState(database, 'collector_scope');
+  return scope && scope.value === 'citywide' ? 'citywide' : DEFAULT_COLLECTOR_SCOPE;
+}
+
 function readQueueState(database, {
   table,
   stateColumn,
@@ -187,10 +194,7 @@ function unavailableComponent(reason = 'database_unavailable') {
 
 function mapDiscoveryComponent(database, nowMs, thresholds) {
   const lastPollRow = readState(database, 'last_successful_poll_at');
-  const scopeRow = readState(database, 'collector_scope');
-  const collectorScope = scopeRow && scopeRow.value === 'bid_only'
-    ? 'bid_only'
-    : 'citywide';
+  const collectorScope = activeCollectorScope(database);
   const intervalRow = readState(
     database,
     collectorScope === 'bid_only' ? 'bid_poll_interval_seconds' : 'poll_interval_seconds'
@@ -198,7 +202,7 @@ function mapDiscoveryComponent(database, nowMs, thresholds) {
   const lastPollAt = isoTimestamp(lastPollRow && lastPollRow.value);
   const pollIntervalSeconds = Math.max(
     5,
-    safeInteger(intervalRow && intervalRow.value, 15)
+    safeInteger(intervalRow && intervalRow.value, collectorScope === 'bid_only' ? 60 : 15)
   );
   const pollAgeSeconds = ageSeconds(lastPollAt, nowMs);
   const healthyWindow = Math.max(
@@ -295,8 +299,7 @@ function detailsComponent(database, nowMs, thresholds) {
 }
 
 function emailIntakeComponent(database, nowMs, thresholds) {
-  const scope = readState(database, 'collector_scope');
-  const bidOnly = scope && scope.value === 'bid_only';
+  const bidOnly = activeCollectorScope(database) === 'bid_only';
   const row = database.prepare(`
     SELECT id,received_at,created_at,parse_outcome,alias_match_status
     FROM nyc311_email_events AS email
@@ -348,8 +351,7 @@ function emailIntakeComponent(database, nowMs, thresholds) {
 }
 
 function subscriptionsComponent(database, nowMs, thresholds) {
-  const scope = readState(database, 'collector_scope');
-  const bidOnly = scope && scope.value === 'bid_only';
+  const bidOnly = activeCollectorScope(database) === 'bid_only';
   const bidWhere = bidOnly ? `AND EXISTS (
     SELECT 1
     FROM live_request_bid_memberships AS membership

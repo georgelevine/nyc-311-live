@@ -12,6 +12,7 @@ const {
   DEFAULT_INBOUND_EMAIL_DOMAIN,
   normalizeInboundEmailDomain
 } = require('./nyc311-email-aliases');
+const { DEFAULT_COLLECTOR_SCOPE } = require('./bid-collector-scope');
 
 const MAX_RAW_EMAIL_BYTES = 2 * 1024 * 1024;
 const MAX_DELIVERY_AGE_SECONDS = 5 * 60;
@@ -39,6 +40,14 @@ function normalizedCollectorScope(value) {
   return COLLECTOR_SCOPES.has(scope) ? scope : null;
 }
 
+function configuredCollectorScope(env) {
+  const rawValue = env && env.COLLECTOR_SCOPE;
+  if (rawValue == null || String(rawValue).trim() === '') {
+    return DEFAULT_COLLECTOR_SCOPE;
+  }
+  return normalizedCollectorScope(rawValue);
+}
+
 function tableExists(database, name) {
   return Boolean(database.prepare(`
     SELECT 1 FROM sqlite_master WHERE type='table' AND name=?
@@ -53,11 +62,11 @@ function durableCollectorScope(database) {
   return normalizedCollectorScope(row && row.value);
 }
 
-// Inbound email runs in its own process. Requiring its explicit configuration
-// to agree with the collector's durable state prevents a stale container from
+// Inbound email runs in its own process. Requiring its configured scope
+// (BID-only by default) to agree with the collector's durable state prevents a stale container from
 // mutating requests or forwarding mail after a collection-scope switch.
 function resolveInboundScopePolicy(database, env = process.env) {
-  const configuredScope = normalizedCollectorScope(env && env.COLLECTOR_SCOPE);
+  const configuredScope = configuredCollectorScope(env);
   const durableScope = durableCollectorScope(database);
   if (!configuredScope) {
     return {

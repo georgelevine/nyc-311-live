@@ -108,6 +108,32 @@ function nycCalendarDay(value = new Date()) {
   return `${byType.year}-${byType.month}-${byType.day}`;
 }
 
+function bidRecoveryRange(zoneState, now = new Date(), { maxDays = 2 } = {}) {
+  if (!Number.isSafeInteger(maxDays) || maxDays < 1 || maxDays > 31) {
+    throw new TypeError('maxDays must be an integer from 1 through 31');
+  }
+  const current = now instanceof Date ? now : new Date(now);
+  if (!Number.isFinite(current.getTime())) throw new TypeError('now must be a valid date');
+  const prior = zoneState && zoneState.last_successful_poll_at
+    ? new Date(zoneState.last_successful_poll_at)
+    : null;
+  if (prior && Number.isFinite(prior.getTime())) {
+    const gapDays = (current.getTime() - prior.getTime()) / 86_400_000;
+    if (gapDays > maxDays) {
+      throw new Error(
+        `Zone has been offline for ${gapDays.toFixed(2)} days; `
+        + `automatic catch-up is limited to ${maxDays} days`
+      );
+    }
+  }
+  return {
+    from: prior && Number.isFinite(prior.getTime())
+      ? nycCalendarDay(prior)
+      : nycCalendarDay(current),
+    to: nycCalendarDay(current)
+  };
+}
+
 function portalMapUrl({ bbox = null, from = null, to = null, filters = {} } = {}) {
   const url = new URL(PORTAL_URL);
   const parameters = { ...(bbox || {}) };
@@ -229,7 +255,13 @@ function createBidPortalClient({
     if (parts.some(part => part.length >= PORTAL_CAP)) {
       throw new Error(`Portal problem filter remained capped on ${day}`);
     }
-    return uniquePins(parts.flat());
+    const recovered = uniquePins(parts.flat());
+    if (recovered.length < PORTAL_CAP) {
+      throw new Error(
+        `Portal problem filters recovered only ${recovered.length} capped records on ${day}`
+      );
+    }
+    return recovered;
   }
 
   async function collectByProblemArea(bbox, day) {
@@ -273,6 +305,7 @@ module.exports = {
   PORTAL_CAP,
   PORTAL_URL,
   addDays,
+  bidRecoveryRange,
   createBidPortalClient,
   nycCalendarDay,
   parsePortalArray,

@@ -152,7 +152,7 @@ if [[ ! "${SCHEDULED_OPEN_FOLLOWUPS_ENABLED:-1}" =~ ^(0|1)$ ]]; then
   echo "SCHEDULED_OPEN_FOLLOWUPS_ENABLED must be 0 or 1." >&2
   exit 1
 fi
-COLLECTOR_SCOPE="${COLLECTOR_SCOPE:-citywide}"
+COLLECTOR_SCOPE="${COLLECTOR_SCOPE:-bid_only}"
 if [[ "${COLLECTOR_SCOPE}" != "citywide" && "${COLLECTOR_SCOPE}" != "bid_only" ]]; then
   echo "COLLECTOR_SCOPE must be citywide or bid_only." >&2
   exit 1
@@ -507,7 +507,10 @@ if [[ ${activate} -eq 1 ]]; then
   collector_lock_held=0
   docker compose up -d collector
   fresh_poll=""
-  for _ in $(seq 1 60); do
+  # Match the service-deployment retry envelope. A single Portal request may
+  # legitimately consume four 30-second attempts plus backoff, and the BID
+  # query plan runs several waves of zones before completing its first poll.
+  for _ in $(seq 1 300); do
     current_poll="$(sqlite3 "${target}" "SELECT value FROM live_monitor_state WHERE key='last_successful_poll_at';")"
     current_epoch="$(date --date "${current_poll}" +%s 2>/dev/null || true)"
     now_epoch="$(date +%s)"

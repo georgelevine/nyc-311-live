@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#1a1d23">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data: https://*.basemaps.cartocdn.com; connect-src 'self'; font-src 'self' data:;">
+  <title>NYC BID 311 Timeline</title>
+  <link rel="stylesheet" href="/vendor/leaflet/leaflet.css">
+  <link rel="stylesheet" href="/css/timeline.css?v=1">
+</head>
+<body>
+  <header class="timeline-header">
+    <a class="timeline-back" href="/" aria-label="Back to NYC BID 311" title="Back to explorer">
+      <span aria-hidden="true"></span>
+    </a>
+    <div class="timeline-brand">
+      <h1>NYC BID 311 Timeline</h1>
+      <p id="coverage-label">Loading Portal history</p>
+    </div>
+  </header>
+
+  <main class="timeline-main">
+    <div id="timeline-map" aria-label="Map of 311 requests within New York City Business Improvement Districts"></div>
+
+    <div id="timeline-loading" class="timeline-loading" role="status" aria-live="polite">
+      <span class="timeline-spinner" aria-hidden="true"></span>
+      <span id="timeline-loading-text">Loading timeline</span>
+    </div>
+
+    <section class="timeline-key" aria-label="Map legend">
+      <div><span class="key-boundary" aria-hidden="true"></span><span>BID activity</span></div>
+      <div><span class="key-dot key-dot-open" aria-hidden="true"></span><span>In progress</span></div>
+      <div><span class="key-dot key-dot-closed" aria-hidden="true"></span><span>Closed</span></div>
+    </section>
+
+    <section id="bid-selection" class="bid-selection" aria-live="polite" hidden>
+      <button id="clear-bid-selection" type="button" aria-label="Clear selected BID" title="Clear selection">&times;</button>
+      <strong id="selected-bid-name"></strong>
+      <span id="selected-bid-count"></span>
+    </section>
+
+    <section class="timeline-controls" aria-label="Timeline controls">
+      <div class="timeline-summary">
+        <time id="selected-date" datetime="2026-08-04">August 4, 2026</time>
+        <span id="selected-total">0 requests</span>
+      </div>
+      <div class="timeline-slider-row">
+        <button id="timeline-play" type="button" aria-label="Play timeline" title="Play">
+          <span class="play-symbol" aria-hidden="true"></span>
+        </button>
+        <input id="timeline-slider" type="range" min="0" max="0" value="0" step="1" aria-label="Select date">
+      </div>
+      <div class="timeline-range-labels" aria-hidden="true">
+        <span id="timeline-start-label"></span>
+        <span id="timeline-end-label"></span>
+      </div>
+    </section>
+
+    <p id="timeline-live-status" class="visually-hidden" aria-live="polite"></p>
+  </main>
+
+  <script src="/vendor/leaflet/leaflet.js"></script>
+  <script src="/js/timeline.js?v=1"></script>
+</body>
+</html>

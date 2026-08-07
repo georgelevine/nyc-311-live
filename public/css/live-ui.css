@@ -2044,7 +2044,12 @@ a:focus-visible {
   display: none;
 }
 
-.app-shell[data-collector-scope="bid_only"] .overview-operations {
+.app-shell[data-collector-scope="bid_only"] .overview-operations .monitor-strip {
+  display: none;
+}
+
+.collector-scope-banner[data-scope="citywide"] .bid-network-stats,
+.collector-scope-banner[data-scope="citywide"] .bid-network-footer button {
   display: none;
 }
 

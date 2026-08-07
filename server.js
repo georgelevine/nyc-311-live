@@ -25,6 +25,9 @@ const { inspectSqliteHealth } = require('./sqlite-health');
 const { resolveBusyTimeoutMs } = require('./sqlite-runtime');
 const { originMatchesHost } = require('./request-security');
 const { normalizePortalTimestamp } = require('./portal-timestamp');
+const { DEFAULT_COLLECTOR_SCOPE } = require('./bid-collector-scope');
+const { createBidPortalClient } = require('./bid-portal-recovery');
+const { geometryCovers } = require('./police-precincts');
 const { attachPortalAgencyResponse } = require('./portal-agency-response');
 const { loadSqliteLiveSummary } = require('./sqlite-live-summary');
 const { createEmailMetricsBackground } = require('./email-metrics-background');
@@ -158,17 +161,11 @@ function businessImprovementDistrictFilter(req, database) {
 }
 
 function requestGeographyScope(req, database) {
-  const collectorScopeRow = tableExists(database, 'live_monitor_state')
-    ? database.prepare(`
-      SELECT value FROM live_monitor_state WHERE key='collector_scope'
-    `).get()
-    : null;
+  const collectorScope = requireCollectorScope(database);
   return {
     precinct: policePrecinctFilter(req, database),
     bid: businessImprovementDistrictFilter(req, database),
-    collectorBidOnly: (collectorScopeRow && collectorScopeRow.value === 'bid_only')
-      || (!collectorScopeRow && String(process.env.COLLECTOR_SCOPE || '')
-        .trim().toLowerCase() === 'bid_only')
+    collectorBidOnly: collectorScope === 'bid_only'
   };
 }
 
@@ -177,50 +174,144 @@ function normalizedCollectorScope(value) {
   return ['citywide', 'bid_only'].includes(scope) ? scope : null;
 }
 
+function effectiveCollectorScope(value) {
+  return normalizedCollectorScope(value) || DEFAULT_COLLECTOR_SCOPE;
+}
+
+function configuredCollectorScope(environment = process.env) {
+  const rawValue = environment && environment.COLLECTOR_SCOPE;
+  if (rawValue == null || String(rawValue).trim() === '') {
+    return DEFAULT_COLLECTOR_SCOPE;
+  }
+  return normalizedCollectorScope(rawValue);
+}
+
+function durableCollectorScope(database) {
+  if (!tableExists(database, 'live_monitor_state')) return null;
+  const row = database.prepare(`
+    SELECT value FROM live_monitor_state WHERE key='collector_scope' LIMIT 1
+  `).get();
+  return normalizedCollectorScope(row && row.value);
+}
+
+function collectorScopePolicy(database, environment = process.env) {
+  const configuredScope = configuredCollectorScope(environment);
+  const durableScope = durableCollectorScope(database);
+  if (!configuredScope) {
+    return {
+      ready: false,
+      scope: DEFAULT_COLLECTOR_SCOPE,
+      configuredScope: null,
+      durableScope,
+      disposition: 'scope_env_invalid'
+    };
+  }
+  if (!durableScope) {
+    return {
+      ready: false,
+      scope: configuredScope,
+      configuredScope,
+      durableScope: null,
+      disposition: 'scope_state_missing'
+    };
+  }
+  if (configuredScope !== durableScope) {
+    return {
+      ready: false,
+      scope: configuredScope === 'bid_only' || durableScope === 'bid_only'
+        ? 'bid_only'
+        : configuredScope,
+      configuredScope,
+      durableScope,
+      disposition: 'scope_mismatch'
+    };
+  }
+  return {
+    ready: true,
+    scope: durableScope,
+    configuredScope,
+    durableScope,
+    disposition: 'in_scope'
+  };
+}
+
+function requireCollectorScope(database, environment = process.env) {
+  const policy = collectorScopePolicy(database, environment);
+  if (policy.ready) return policy.scope;
+  const error = new Error('Collector scope is temporarily unavailable');
+  error.statusCode = 503;
+  error.collectorScopeDisposition = policy.disposition;
+  throw error;
+}
+
+function requestHasActiveBidMembership(database, srnumber) {
+  if (!tableExists(database, 'live_portal_requests')
+      || !tableExists(database, 'live_request_bid_memberships')
+      || !tableExists(database, 'business_improvement_district_boundary_versions')) {
+    const error = new Error('BID collection scope is temporarily unavailable');
+    error.statusCode = 503;
+    throw error;
+  }
+  return Boolean(database.prepare(`
+    SELECT 1
+    FROM live_portal_requests AS live
+    JOIN live_request_bid_memberships AS membership
+      ON membership.srnumber=live.srnumber
+    JOIN business_improvement_district_boundary_versions AS boundary
+      ON boundary.version=membership.boundary_version AND boundary.active=1
+    WHERE live.srnumber=?
+    LIMIT 1
+  `).get(srnumber));
+}
+
+function requireRequestCollectorAccess(database, srnumber) {
+  const scope = requireCollectorScope(database);
+  if (scope === 'citywide' || requestHasActiveBidMembership(database, srnumber)) {
+    return scope;
+  }
+  const error = new Error('Request is outside the active BID collection scope');
+  error.statusCode = 404;
+  throw error;
+}
+
+function verifyArchiveCollectorScope(databasePath) {
+  if (!require('fs').existsSync(databasePath)) {
+    const error = new Error('Live archive is not available yet');
+    error.statusCode = 503;
+    throw error;
+  }
+  const { DatabaseSync } = require('node:sqlite');
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    return requireCollectorScope(database);
+  } finally {
+    database.close();
+  }
+}
+
 function portalDetailAccess(portalId) {
-  const configuredScope = normalizedCollectorScope(process.env.COLLECTOR_SCOPE);
   const databasePath = process.env.DATABASE_PATH
     || path.join(__dirname, 'data', 'portal-archive.sqlite');
   if (!require('fs').existsSync(databasePath)) {
-    return configuredScope === 'bid_only'
-      ? { allowed: false, unavailable: true }
-      : { allowed: true };
+    return { allowed: false, unavailable: true };
   }
 
   let database;
   try {
     const { DatabaseSync } = require('node:sqlite');
     database = new DatabaseSync(databasePath, { readOnly: true });
-    const stateRow = tableExists(database, 'live_monitor_state')
-      ? database.prepare(`
-          SELECT value FROM live_monitor_state WHERE key='collector_scope' LIMIT 1
-        `).get()
-      : null;
-    const durableScope = normalizedCollectorScope(stateRow && stateRow.value);
-    const bidOnlyExpected = configuredScope === 'bid_only' || durableScope === 'bid_only';
-    if (!bidOnlyExpected) return { allowed: true };
-
-    // The web and collector containers must agree before the detail proxy can
-    // contact NYC311. This prevents a stale web process from reintroducing a
-    // citywide record while the durable collector is BID-only.
-    if (configuredScope !== 'bid_only' || durableScope !== 'bid_only') {
+    const policy = collectorScopePolicy(database);
+    if (!policy.ready) {
       return { allowed: false, unavailable: true };
     }
-    if (!tableExists(database, 'live_portal_requests')
-        || !tableExists(database, 'live_request_bid_memberships')
-        || !tableExists(database, 'business_improvement_district_boundary_versions')) {
+    if (policy.scope === 'citywide') return { allowed: true };
+    if (!tableExists(database, 'live_portal_requests')) {
       return { allowed: false, unavailable: true };
     }
-    const member = database.prepare(`
-      SELECT 1
-      FROM live_portal_requests AS live
-      JOIN live_request_bid_memberships AS membership
-        ON membership.srnumber=live.srnumber
-      JOIN business_improvement_district_boundary_versions AS boundary
-        ON boundary.version=membership.boundary_version AND boundary.active=1
-      WHERE live.portal_id=?
-      LIMIT 1
+    const request = database.prepare(`
+      SELECT srnumber FROM live_portal_requests WHERE portal_id=? LIMIT 1
     `).get(portalId);
+    const member = request && requestHasActiveBidMembership(database, request.srnumber);
     return member
       ? { allowed: true }
       : { allowed: false, unavailable: false };
@@ -271,25 +362,28 @@ function scopePredicates(alias, scope, bidAlias = null) {
           AND bid_membership.bid_id=@bid_id
       )`);
     }
+  } else if (scope && scope.collectorBidOnly) {
+    // Keep newest-record pages suffix ordered. Materializing every active
+    // membership before applying ORDER BY/LIMIT made a ten-row first paint
+    // scale with the full BID archive. This indexed membership lookup lets
+    // SQLite stop as soon as the requested page is full.
+    predicates.push(`EXISTS (
+      SELECT 1
+      FROM live_request_bid_memberships AS collector_bid_membership
+      JOIN business_improvement_district_boundary_versions AS collector_bid_boundary
+        ON collector_bid_boundary.version=collector_bid_membership.boundary_version
+       AND collector_bid_boundary.active=1
+      WHERE collector_bid_membership.srnumber=${alias}.srnumber
+    )`);
   }
   return predicates;
 }
 
 function scopedLiveRequestSource(alias, scope, bidAlias = `${alias}_scope_bid`) {
-  if (!scope || (!scope.bid && !scope.collectorBidOnly)) {
+  if (!scope || !scope.bid) {
+    // Unfiltered BID-only reads are constrained by scopePredicates(). Starting
+    // from the request table preserves its suffix-ordered LIMIT fast path.
     return `live_portal_requests AS ${alias}`;
-  }
-  if (!scope.bid) {
-    // A mixed database can retain historical citywide rows. In BID-only mode,
-    // start every unfiltered dashboard read from the distinct active-BID
-    // membership set so overlapping districts do not duplicate requests.
-    return `(SELECT DISTINCT membership.srnumber
-      FROM live_request_bid_memberships AS membership
-      JOIN business_improvement_district_boundary_versions AS boundary
-        ON boundary.version=membership.boundary_version AND boundary.active=1
-    ) AS ${bidAlias}
-      JOIN live_portal_requests AS ${alias}
-        ON ${alias}.srnumber=${bidAlias}.srnumber`;
   }
   // Start BID-scoped reads at the small, indexed membership set. The former
   // correlated EXISTS predicate scanned the large request table in suffix
@@ -698,9 +792,9 @@ function emptyCompactDashboardStats() {
     frontier: null,
     last_successful_poll_at: null,
     last_seen_at: null,
-    poll_interval_seconds: 15,
-    collector_scope: 'citywide',
-    number_audit_mode: 'citywide_suffix_gap',
+    poll_interval_seconds: 60,
+    collector_scope: DEFAULT_COLLECTOR_SCOPE,
+    number_audit_mode: 'not_applicable_bid_only',
     bid_collector: null,
     legacy_reconciliation: null
   };
@@ -730,9 +824,7 @@ function compactLiveDashboardStats(database) {
   const bidZoneCountRow = stateByKey.get('bid_query_zone_count');
   const reconciliationRow = stateByKey.get('legacy_reconciliation');
 
-  stats.collector_scope = collectorScopeRow && collectorScopeRow.value === 'bid_only'
-    ? 'bid_only'
-    : 'citywide';
+  stats.collector_scope = effectiveCollectorScope(collectorScopeRow && collectorScopeRow.value);
   stats.number_audit_mode = numberAuditModeRow && numberAuditModeRow.value
     || (stats.collector_scope === 'bid_only'
       ? 'not_applicable_bid_only'
@@ -927,9 +1019,10 @@ async function fetchPortalWindow(bbox, fromdate, todate) {
     }
   }
 
-  const pins = Array.isArray(data) ? data.map(normalizePortalPin) : [];
+  const rawPins = Array.isArray(data) ? data : [];
+  const pins = rawPins.map(normalizePortalPin);
 
-  return { pins, hitCap: pins.length >= PORTAL_CAP };
+  return { pins, rawPins, hitCap: pins.length >= PORTAL_CAP };
 }
 
 /**
@@ -973,33 +1066,86 @@ function dailyWindows(fromDate, toDate) {
   return windows;
 }
 
-/**
- * Split a single day into sub-windows (6-hour chunks).
- * Portal accepts YYYY-MM-DD format, but we can use the same date
- * with different time ranges. Since the portal only takes date (not time),
- * we can't actually split within a day using the portal's fromdate/todate.
- *
- * WORKAROUND: We accept that within a single day, we can only get 100.
- * But we log which days hit the cap so the frontend can display it.
- *
- * ALTERNATIVE: We could try spatial subdivision for capped days.
- */
-function spatialSubdivide(bbox, divisions) {
-  const latStep = (parseFloat(bbox.maxlatitude) - parseFloat(bbox.minlatitude)) / divisions;
-  const lngStep = (parseFloat(bbox.maxlongitude) - parseFloat(bbox.minlongitude)) / divisions;
-  const tiles = [];
-
-  for (let i = 0; i < divisions; i++) {
-    for (let j = 0; j < divisions; j++) {
-      tiles.push({
-        minlatitude: (parseFloat(bbox.minlatitude) + latStep * i).toFixed(8),
-        maxlatitude: (parseFloat(bbox.minlatitude) + latStep * (i + 1)).toFixed(8),
-        minlongitude: (parseFloat(bbox.minlongitude) + lngStep * j).toFixed(8),
-        maxlongitude: (parseFloat(bbox.minlongitude) + lngStep * (j + 1)).toFixed(8),
-      });
-    }
+function portalQueryScope(req) {
+  const databasePath = process.env.DATABASE_PATH
+    || path.join(__dirname, 'data', 'portal-archive.sqlite');
+  if (!require('fs').existsSync(databasePath)) {
+    const error = new Error('BID collection scope is temporarily unavailable');
+    error.statusCode = 503;
+    throw error;
   }
-  return tiles;
+  const { DatabaseSync } = require('node:sqlite');
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    const scope = requireCollectorScope(database);
+    if (scope === 'citywide') {
+      return {
+        scope,
+        bbox: {
+          minlatitude: req.query.minlatitude,
+          minlongitude: req.query.minlongitude,
+          maxlatitude: req.query.maxlatitude,
+          maxlongitude: req.query.maxlongitude
+        },
+        bidFeature: null
+      };
+    }
+    if (req.query.bid_id == null || String(req.query.bid_id).trim() === '') {
+      const error = new Error('bid_id is required for BID-scoped Portal retrieval');
+      error.statusCode = 400;
+      throw error;
+    }
+    const bidFeature = loadActiveBusinessImprovementDistrictFeature(
+      database,
+      req.query.bid_id
+    );
+    const expectedBoundaryVersion = requestedBoundaryVersion(
+      req,
+      'bid_boundary_version'
+    );
+    if (expectedBoundaryVersion
+        && expectedBoundaryVersion !== bidFeature.properties.boundary_version) {
+      const error = new Error('Business improvement district boundary release changed; reload the BID');
+      error.statusCode = 409;
+      throw error;
+    }
+    return {
+      scope,
+      bbox: {
+        minlongitude: bidFeature.bbox[0],
+        minlatitude: bidFeature.bbox[1],
+        maxlongitude: bidFeature.bbox[2],
+        maxlatitude: bidFeature.bbox[3]
+      },
+      bidFeature
+    };
+  } finally {
+    database.close();
+  }
+}
+
+function filterPortalPinsToFeature(pins, feature) {
+  if (!feature) return pins;
+  return pins.filter(pin => {
+    if (pin == null || pin.latitude == null || pin.longitude == null
+        || String(pin.latitude).trim() === '' || String(pin.longitude).trim() === '') {
+      return false;
+    }
+    const latitude = Number(pin && pin.latitude);
+    const longitude = Number(pin && pin.longitude);
+    return Number.isFinite(latitude) && Number.isFinite(longitude)
+      && geometryCovers(feature.geometry, longitude, latitude);
+  });
+}
+
+function requireCitywidePortalProxy() {
+  const databasePath = process.env.DATABASE_PATH
+    || path.join(__dirname, 'data', 'portal-archive.sqlite');
+  const scope = verifyArchiveCollectorScope(databasePath);
+  if (scope === 'citywide') return;
+  const error = new Error('Use the BID-scoped Portal endpoint with an explicit bid_id');
+  error.statusCode = 404;
+  throw error;
 }
 
 // ============================================================
@@ -1007,16 +1153,33 @@ function spatialSubdivide(bbox, divisions) {
 // ============================================================
 
 app.get('/api/portal-pins-adaptive', async (req, res) => {
-  const { minlatitude, minlongitude, maxlatitude, maxlongitude, fromdate, todate, refresh } = req.query;
+  const { fromdate, todate, refresh } = req.query;
 
   if (!fromdate || !todate) {
     return res.status(400).json({ error: 'fromdate and todate required' });
   }
 
-  const bbox = { minlatitude, minlongitude, maxlatitude, maxlongitude };
+  let queryScope;
+  try {
+    queryScope = portalQueryScope(req);
+  } catch (error) {
+    return res.status(error.statusCode || 503).json({
+      error: error.message,
+      pins: [],
+      stats: {}
+    });
+  }
+  const { bbox, bidFeature } = queryScope;
 
   // Check cache — skip entirely if the client requested a fresh pull
-  const ck = cacheKey({ bbox, fromdate, todate, endpoint: 'adaptive' });
+  const ck = cacheKey({
+    bbox,
+    fromdate,
+    todate,
+    endpoint: 'adaptive',
+    bid_id: bidFeature && bidFeature.properties.bid_id,
+    bid_boundary_version: bidFeature && bidFeature.properties.boundary_version
+  });
   if (!refresh) {
     const cached = getCached(ck);
     if (cached) return res.json(cached);
@@ -1047,21 +1210,39 @@ app.get('/api/portal-pins-adaptive', async (req, res) => {
     const phase1Count = allPins.length;
     const phase1Calls = days.length;
 
-    // Phase 2: For capped days, retry with spatial subdivision (2x2 grid = 4 tiles)
+    // Phase 2: Recover capped days recursively. The shared BID recovery client
+    // quarters saturated boxes to depth seven and falls back to Portal problem
+    // filters for pathological same-coordinate caps. It throws rather than
+    // returning a silently truncated result if those filters remain capped.
     let phase2Calls = 0;
+    let phase2Diagnostics = {
+      retries: 0,
+      cappedQueries: 0,
+      spatialSplits: 0,
+      problemSplits: 0
+    };
     if (cappedDays.length > 0) {
-      console.log(`[adaptive] Phase 2: ${cappedDays.length} capped days, subdividing spatially (2x2)`);
-
-      const tileTasks = [];
-      for (const day of cappedDays) {
-        const tiles = spatialSubdivide(bbox, 2); // 2x2 = 4 tiles
-        for (const tile of tiles) {
-          tileTasks.push(() => fetchPortalWindow(tile, day.from, day.to));
-        }
-      }
-
-      const tileResults = await parallelLimit(tileTasks, CONCURRENCY);
-      phase2Calls = tileTasks.length;
+      console.log(`[adaptive] Phase 2: ${cappedDays.length} capped days, entering recursive recovery`);
+      const recoveryClient = createBidPortalClient({
+        fetchImpl: fetch,
+        headers: PORTAL_HEADERS,
+        concurrency: CONCURRENCY
+      });
+      const cappedIndexes = cappedDays.map(day => days.findIndex(candidate =>
+        candidate.from === day.from && candidate.to === day.to));
+      const recoveryTasks = cappedDays.map((day, index) => async () => {
+        const original = dayResults[cappedIndexes[index]];
+        const rawPins = await recoveryClient.collectRange({
+          bbox,
+          from: day.from,
+          to: day.to,
+          initialPins: original && original.rawPins
+        });
+        return rawPins.map(normalizePortalPin);
+      });
+      const recoveredDays = await parallelLimit(recoveryTasks, CONCURRENCY);
+      phase2Diagnostics = { ...recoveryClient.diagnostics };
+      phase2Calls = phase2Diagnostics.portalCalls;
 
       // Remove the capped-day pins (we're replacing them with tile results)
       const cappedDateSet = new Set(cappedDays.map(d => d.from));
@@ -1073,15 +1254,15 @@ app.get('/api/portal-pins-adaptive', async (req, res) => {
         return !cappedDateSet.has(dayStr);
       });
 
-      // Add tile results
-      for (const { pins } of tileResults) {
+      // Add the complete recursively recovered days.
+      for (const pins of recoveredDays) {
         allPins = allPins.concat(pins);
       }
     }
 
     // Phase 3: Deduplicate by srnumber (tiles may overlap at edges)
     const seen = new Set();
-    const deduped = [];
+    let deduped = [];
     for (const pin of allPins) {
       const key = pin.srnumber || pin.id || `${pin.latitude}-${pin.longitude}-${pin.submitteddate}`;
       if (!seen.has(key)) {
@@ -1089,20 +1270,33 @@ app.get('/api/portal-pins-adaptive', async (req, res) => {
         deduped.push(pin);
       }
     }
+    deduped = filterPortalPinsToFeature(deduped, bidFeature);
 
     const result = {
       pins: deduped,
       count: deduped.length,
+      scope: queryScope.scope,
+      bid_id: bidFeature ? bidFeature.properties.bid_id : null,
+      bid_boundary_version: bidFeature
+        ? bidFeature.properties.boundary_version
+        : null,
       stats: {
         phase1_days: days.length,
         phase1_calls: phase1Calls,
-        phase1_pins: phase1Count,
         phase2_capped_days: cappedDays.length,
         phase2_calls: phase2Calls,
-        phase2_pins_after_dedup: deduped.length - (phase1Count - cappedDays.length * PORTAL_CAP),
         total_calls: phase1Calls + phase2Calls,
         total_pins: deduped.length,
-        capped_days: cappedDays.map(d => d.from)
+        capped_days: cappedDays.map(d => d.from),
+        recovery_retries: phase2Diagnostics.retries,
+        recursive_spatial_splits: phase2Diagnostics.spatialSplits,
+        problem_filter_splits: phase2Diagnostics.problemSplits,
+        unresolved_caps: 0,
+        ...(bidFeature ? {} : {
+          phase1_pins: phase1Count,
+          phase2_pins_after_dedup:
+            deduped.length - (phase1Count - cappedDays.length * PORTAL_CAP)
+        })
       }
     };
 
@@ -1124,6 +1318,7 @@ app.get('/api/portal-pins-adaptive', async (req, res) => {
 
 app.get('/api/portal-pins', async (req, res) => {
   try {
+    requireCitywidePortalProxy();
     const params = new URLSearchParams();
     if (req.query.borough) params.append('borough', req.query.borough);
     if (req.query.fromdate) params.append('fromdate', req.query.fromdate);
@@ -1156,15 +1351,29 @@ app.get('/api/portal-pins', async (req, res) => {
     res.json({ pins, count: pins.length, raw_count: Array.isArray(data) ? data.length : 0 });
   } catch (err) {
     console.error('Portal proxy error:', err.message);
-    res.status(500).json({ error: err.message, pins: [] });
+    res.status(err.statusCode || 500).json({ error: err.message, pins: [] });
   }
 });
 
 // Proxy: 311 Portal SR number lookup
 app.get('/api/portal-sr', async (req, res) => {
   try {
-    const number = req.query.number;
-    if (!number) return res.status(400).json({ error: 'number parameter required' });
+    const number = String(req.query.number || '').trim().toUpperCase();
+    if (!/^311-\d{8}$/.test(number)) {
+      return res.status(400).json({ error: 'valid number parameter required' });
+    }
+    const databasePath = process.env.DATABASE_PATH
+      || path.join(__dirname, 'data', 'portal-archive.sqlite');
+    if (!require('fs').existsSync(databasePath)) {
+      return res.status(503).json({ error: 'Live archive is not available yet' });
+    }
+    const { DatabaseSync } = require('node:sqlite');
+    const database = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      requireRequestCollectorAccess(database, number);
+    } finally {
+      database.close();
+    }
 
     const url = `https://portal.311.nyc.gov/check-status/?number=${encodeURIComponent(number)}`;
     const response = await fetch(url, {
@@ -1191,7 +1400,7 @@ app.get('/api/portal-sr', async (req, res) => {
     res.json(data);
   } catch (err) {
     console.error('SR lookup proxy error:', err.message);
-    res.status(500).json({ error: err.message });
+    res.status(err.statusCode || 500).json({ error: err.message });
   }
 });
 
@@ -1615,14 +1824,24 @@ app.get('/api/live-map', (req, res) => {
       };
       return payload;
     };
-    if (!require('fs').existsSync(databasePath)) return res.json(emptyPayload());
+    if (!require('fs').existsSync(databasePath)) {
+      return res.status(503).json({
+        ...emptyPayload(),
+        error: 'Live archive is not available yet'
+      });
+    }
     const { DatabaseSync } = require('node:sqlite');
     database = new DatabaseSync(databasePath, { readOnly: true });
     registerEffectiveRecordSqlFunctions(database);
     const tables = new Set(database.prepare(`
       SELECT name FROM sqlite_master WHERE type='table'
     `).all().map(row => row.name));
-    if (!tables.has('live_portal_requests')) return res.json(emptyPayload());
+    if (!tables.has('live_portal_requests')) {
+      return res.status(503).json({
+        ...emptyPayload(),
+        error: 'Live archive is not initialized yet'
+      });
+    }
     database.exec('BEGIN');
     readTransaction = true;
     const scope = requestGeographyScope(req, database);
@@ -1740,7 +1959,7 @@ app.get('/api/live-map', (req, res) => {
     const liveIndexClause = liveMapRequestIndexClause(database, scope, {
       exactSrnumber: exactQuery
     });
-    const liveRecordSource = scope && (scope.bid || scope.collectorBidOnly)
+    const liveRecordSource = scope && scope.bid
       ? liveSource
       : `${liveSource} ${liveIndexClause}`;
     const commonParameters = {
@@ -1877,6 +2096,7 @@ app.get('/api/email-metrics', (req, res) => {
     || path.join(__dirname, 'data', 'portal-archive.sqlite');
   res.setHeader('Cache-Control', 'no-store');
   try {
+    verifyArchiveCollectorScope(databasePath);
     const result = emailMetricsBackground.get(databasePath);
     if (result.payload.retry_after_seconds) {
       res.setHeader('Retry-After', String(result.payload.retry_after_seconds));
@@ -1896,6 +2116,7 @@ app.get('/api/operational-health', (req, res) => {
   const now = Date.now();
   res.setHeader('Cache-Control', 'no-store');
   try {
+    verifyArchiveCollectorScope(databasePath);
     if (
       operationalHealthCache
       && operationalHealthCache.databasePath === databasePath
@@ -2037,7 +2258,8 @@ app.get('/api/live-dashboard', (req, res) => {
   let readTransaction = false;
   try {
     if (!require('fs').existsSync(databasePath)) {
-      return res.json({
+      return res.status(503).json({
+        error: 'Live archive is not available yet',
         records: [],
         stats: compact
           ? emptyCompactDashboardStats()
@@ -2121,6 +2343,12 @@ app.get('/api/live-dashboard', (req, res) => {
       : '';
     const bidScopeAlias = 'dashboard_scope_bid';
     const liveSource = scopedLiveRequestSource('live', scope, bidScopeAlias);
+    const liveIndexClause = liveMapRequestIndexClause(database, scope, {
+      exactSrnumber: Boolean(requestedSrnumber || exactQuery)
+    });
+    const liveRecordSource = scope && scope.bid
+      ? liveSource
+      : `${liveSource} ${liveIndexClause}`;
     const livePredicates = [
       ...scopePredicates('live', scope, bidScopeAlias),
       ...recordFilterPredicates('live', filters, {
@@ -2164,7 +2392,7 @@ app.get('/api/live-dashboard', (req, res) => {
              live.latitude, live.longitude, live.submitted_at, live.status,
              live.portal_url, live.first_seen_at, live.last_seen_at,
              ${detailColumns}, ${followUpColumns}, ${currentClosureColumns}
-      FROM ${liveSource}
+      FROM ${liveRecordSource}
       ${detailJoin}
       ${followUpJoin}
       ${currentClosureJoin}
@@ -2335,7 +2563,9 @@ app.get('/api/live-dashboard', (req, res) => {
           ])}) AS unmapped_total,
         (SELECT COUNT(*) FROM live_number_queue WHERE audit_outcome = 'pending') AS pending,
         (SELECT MAX(suffix) FROM live_number_queue) AS frontier,
-        (SELECT MAX(last_seen_at) FROM live_portal_requests) AS last_seen_at,
+        (SELECT MAX(captured.last_seen_at) FROM ${capturedSource}
+          ${capturedFilterJoins}
+          ${capturedWhere}) AS last_seen_at,
         COALESCE(
           (SELECT CAST(value AS INTEGER) FROM live_monitor_state WHERE key = 'poll_interval_seconds'),
           15
@@ -2347,9 +2577,7 @@ app.get('/api/live-dashboard', (req, res) => {
     const collectorScopeRow = database.prepare(`
       SELECT value FROM live_monitor_state WHERE key='collector_scope'
     `).get();
-    totals.collector_scope = collectorScopeRow && collectorScopeRow.value === 'bid_only'
-      ? 'bid_only'
-      : 'citywide';
+    totals.collector_scope = effectiveCollectorScope(collectorScopeRow && collectorScopeRow.value);
     totals.number_audit_mode = totals.collector_scope === 'bid_only'
       ? 'not_applicable_bid_only'
       : 'citywide_suffix_gap';
@@ -2452,10 +2680,12 @@ app.get('/api/status-history/:srnumber', (req, res) => {
   let database;
   try {
     if (!require('fs').existsSync(databasePath)) {
-      return res.json({ srnumber, history: [], closure_snapshots: [], followup: null });
+      return res.status(503).json({ error: 'Live archive is not available yet' });
     }
     const { DatabaseSync } = require('node:sqlite');
     database = new DatabaseSync(databasePath, { readOnly: true });
+    database.exec('BEGIN');
+    requireRequestCollectorAccess(database, srnumber);
     const tableNames = new Set(database.prepare(`
       SELECT name FROM sqlite_master WHERE type = 'table'
     `).all().map(row => row.name));
@@ -2487,9 +2717,16 @@ app.get('/api/status-history/:srnumber', (req, res) => {
           FROM request_followup_queue WHERE srnumber = ?
         `).get(srnumber) || null
       : null;
-    res.json({ srnumber, history, closure_snapshots: closureSnapshots, followup });
+    const payload = { srnumber, history, closure_snapshots: closureSnapshots, followup };
+    database.exec('COMMIT');
+    return res.json(payload);
   } catch (error) {
-    res.status(503).json({ error: error.message });
+    if (database) {
+      try {
+        database.exec('ROLLBACK');
+      } catch (_) {}
+    }
+    res.status(error.statusCode || 503).json({ error: error.message });
   } finally {
     if (database) database.close();
   }
@@ -2502,11 +2739,32 @@ app.get('/api/email-updates/:srnumber', (req, res) => {
     return res.status(400).json({ error: 'valid 311 request number required' });
   }
   const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
+  let database;
   try {
-    return res.json(readRequestEmailUpdates(databasePath, srnumber));
+    if (!require('fs').existsSync(databasePath)) {
+      return res.status(503).json({ error: 'Live archive is not available yet' });
+    }
+    const { DatabaseSync } = require('node:sqlite');
+    database = new DatabaseSync(databasePath, { readOnly: true });
+    database.exec('BEGIN');
+    requireRequestCollectorAccess(database, srnumber);
+    const payload = readRequestEmailUpdates(databasePath, srnumber, { database });
+    database.exec('COMMIT');
+    return res.json(payload);
   } catch (error) {
+    if (database) {
+      try {
+        database.exec('ROLLBACK');
+      } catch (_) {}
+    }
     console.error('NYC311 email updates read error:', error.message);
-    return res.status(503).json({ error: 'Email updates are temporarily unavailable' });
+    return res.status(error.statusCode || 503).json({
+      error: error.statusCode
+        ? error.message
+        : 'Email updates are temporarily unavailable'
+    });
+  } finally {
+    if (database) database.close();
   }
 });
 
@@ -2528,10 +2786,7 @@ app.post('/api/live-settings', dashboardSettingsAuth, (req, res) => {
     const { DatabaseSync } = require('node:sqlite');
     database = new DatabaseSync(databasePath);
     database.exec(`PRAGMA busy_timeout = ${SQLITE_BUSY_TIMEOUT_MS}`);
-    const scope = database.prepare(`
-      SELECT value FROM live_monitor_state WHERE key='collector_scope'
-    `).get();
-    if (scope && scope.value === 'bid_only') {
+    if (requireCollectorScope(database) === 'bid_only') {
       return res.status(409).json({
         error: 'BID-only polling is fixed by BID_POLL_INTERVAL_SECONDS to protect Portal capacity'
       });
@@ -2553,9 +2808,21 @@ function currentHealth() {
   const now = new Date();
   const databasePath = process.env.DATABASE_PATH || path.join(__dirname, 'data', 'portal-archive.sqlite');
   const health = inspectSqliteHealth(databasePath, { now });
+  const configuredScope = configuredCollectorScope(process.env);
+  const collectorScopeReady = Boolean(
+    configuredScope
+    && health.collector_scope_recorded
+    && health.collector_scope === configuredScope
+    && health.collector_scope_integrity === 'ready'
+  );
   if (health.error) console.error('Health check failed:', health.error);
-  const { error: _privateError, ...publicHealth } = health;
-  return { now, health, publicHealth };
+  const { error: _privateError, ...publicHealthFields } = health;
+  const publicHealth = {
+    ...publicHealthFields,
+    expected_collector_scope: configuredScope || DEFAULT_COLLECTOR_SCOPE,
+    collector_scope_ready: collectorScopeReady
+  };
+  return { now, health, publicHealth, collectorScopeReady };
 }
 
 // Web/database liveness stays available during a Portal outage so the archive
@@ -2569,8 +2836,8 @@ app.get('/api/health', (req, res) => {
 });
 
 app.get('/api/health/collector', (req, res) => {
-  const { now, health, publicHealth } = currentHealth();
-  const ready = health.ok && health.collector === 'fresh';
+  const { now, health, publicHealth, collectorScopeReady } = currentHealth();
+  const ready = health.ok && health.collector === 'fresh' && collectorScopeReady;
   res.status(ready ? 200 : 503).json({
     ...publicHealth,
     ready,
@@ -2589,9 +2856,14 @@ if (process.env.NYC311_SERVER_NO_LISTEN !== '1') {
 
 module.exports = {
   app,
+  collectorScopePolicy,
   compactLiveDashboardStats,
+  configuredCollectorScope,
+  filterPortalPinsToFeature,
   liveDashboardCompactMode,
   liveMapIncludeTotals,
   liveMapRequestIndexClause,
+  scopePredicates,
+  scopedLiveRequestSource,
   sanitizeLegacyReconciliation
 };
