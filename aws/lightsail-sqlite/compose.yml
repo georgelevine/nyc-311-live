@@ -207,10 +207,12 @@ services:
     blkio_config:
       device_read_bps:
         - path: /dev/nvme0n1
-          rate: 8mb
+          # Keep routine backups well below the Lightsail disk's practical
+          # throughput so live dashboard reads remain interactive.
+          rate: 1mb
       device_write_bps:
         - path: /dev/nvme0n1
-          rate: 8mb
+          rate: 1mb
     network_mode: none
     logging: *default-logging
 

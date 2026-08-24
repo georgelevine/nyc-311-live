@@ -407,7 +407,7 @@ node verify-sqlite-snapshot.js \
 On the small instance, the backup process runs at idle disk priority and the
 lowest CPU priority inside its container. Because the verified
 Lightsail root partition `/dev/nvme0n1p1` uses the `none` scheduler and therefore
-does not honor `ionice`, Compose also applies cgroup-v2 ceilings of 8 MB/s for
+does not honor `ionice`, Compose also applies cgroup-v2 ceilings of 1 MB/s for
 both reads and writes to its parent block device, `/dev/nvme0n1`, on the backup
 container only. The parent is required because this host's cgroup v2 controller
 rejects limits on the partition itself. SQLite copies 64 pages per step by
