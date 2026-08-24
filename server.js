@@ -651,7 +651,9 @@ function optionalRecordFilters(req) {
   }
   return {
     status: read('status', 100),
-    query: read('q', 200)
+    query: read('q', 200),
+    requestType: read('request_type', 200),
+    requestSubtype: read('request_subtype', 300)
   };
 }
 
@@ -712,6 +714,16 @@ function recordFilterPredicates(alias, filters, {
       `${effectiveStatus}=@filter_status COLLATE NOCASE`
     );
   }
+  if (filters.requestType) {
+    predicates.push(
+      `${effectiveTextSql(alias, 'problem', detailsAlias)}=@filter_request_type COLLATE NOCASE`
+    );
+  }
+  if (filters.requestSubtype) {
+    predicates.push(detailsAlias
+      ? `NULLIF(TRIM(${detailsAlias}.problem_details),'')=@filter_request_subtype COLLATE NOCASE`
+      : '0');
+  }
   if (filters.query) {
     const exactSrnumber = /^311-\d{8}$/i.test(filters.query);
     if (exactSrnumber) {
@@ -734,6 +746,8 @@ function recordFilterPredicates(alias, filters, {
 function recordFilterParameters(filters) {
   return {
     ...(filters.status ? { filter_status: filters.status } : {}),
+    ...(filters.requestType ? { filter_request_type: filters.requestType } : {}),
+    ...(filters.requestSubtype ? { filter_request_subtype: filters.requestSubtype } : {}),
     ...(filters.query && /^311-\d{8}$/i.test(filters.query)
       ? { filter_srnumber: filters.query.toUpperCase() }
       : {}),
@@ -791,6 +805,7 @@ function emptyCompactDashboardStats() {
     compact: true,
     frontier: null,
     last_successful_poll_at: null,
+    last_attempt_at: null,
     last_seen_at: null,
     poll_interval_seconds: 60,
     collector_scope: DEFAULT_COLLECTOR_SCOPE,
@@ -814,6 +829,7 @@ function compactLiveDashboardStats(database) {
   `);
   const frontierRow = stateByKey.get('live_frontier');
   const lastPollRow = stateByKey.get('last_successful_poll_at');
+  const lastAttemptRow = stateByKey.get('bid_collector_last_attempt_at');
   const pollIntervalRow = stateByKey.get('poll_interval_seconds');
   const collectorScopeRow = stateByKey.get('collector_scope');
   const numberAuditModeRow = stateByKey.get('number_audit_mode');
@@ -822,6 +838,7 @@ function compactLiveDashboardStats(database) {
   const bidBoundaryHashRow = stateByKey.get('bid_boundary_sha256');
   const bidPlanHashRow = stateByKey.get('bid_query_plan_hash');
   const bidZoneCountRow = stateByKey.get('bid_query_zone_count');
+  const bidCatchingUpRow = stateByKey.get('bid_collector_catching_up_zones');
   const reconciliationRow = stateByKey.get('legacy_reconciliation');
 
   stats.collector_scope = effectiveCollectorScope(collectorScopeRow && collectorScopeRow.value);
@@ -836,11 +853,15 @@ function compactLiveDashboardStats(database) {
     stats.frontier = frontier;
   }
   const lastSuccessfulPollAt = reconciliationTimestamp(lastPollRow && lastPollRow.value);
+  const lastAttemptAt = reconciliationTimestamp(lastAttemptRow && lastAttemptRow.value);
   stats.last_successful_poll_at = lastSuccessfulPollAt;
+  stats.last_attempt_at = stats.collector_scope === 'bid_only' ? lastAttemptAt : null;
   // Keep the existing dashboard field during the compact-mode transition.
   // A successful Portal poll is the lightweight freshness signal stored by
   // the collector; finding MAX(last_seen_at) would scan the request archive.
-  stats.last_seen_at = lastSuccessfulPollAt;
+  stats.last_seen_at = stats.collector_scope === 'bid_only'
+    ? lastAttemptAt || lastSuccessfulPollAt
+    : lastSuccessfulPollAt;
   const selectedIntervalRow = stats.collector_scope === 'bid_only'
     ? bidPollIntervalRow
     : pollIntervalRow;
@@ -860,14 +881,17 @@ function compactLiveDashboardStats(database) {
     const planHash = bidPlanHashRow && bidPlanHashRow.value;
     let failedZones = 0;
     let saturatedZones = 0;
+    let recordedZones = 0;
     if (planHash && tableExists(database, 'bid_collector_zone_state')) {
       const health = database.prepare(`
         SELECT
+          COUNT(*) AS recorded,
           SUM(CASE WHEN last_error IS NOT NULL THEN 1 ELSE 0 END) AS failed,
           SUM(CASE WHEN saturation_count>0 THEN 1 ELSE 0 END) AS saturated
         FROM bid_collector_zone_state
         WHERE plan_hash=?
       `).get(planHash);
+      recordedZones = Number(health && health.recorded || 0);
       failedZones = Number(health && health.failed || 0);
       saturatedZones = Number(health && health.saturated || 0);
     }
@@ -877,7 +901,12 @@ function compactLiveDashboardStats(database) {
       plan_hash: planHash || null,
       zone_count: Number(bidZoneCountRow && bidZoneCountRow.value || 0),
       failed_zones: failedZones,
-      saturated_zones: saturatedZones
+      saturated_zones: saturatedZones,
+      catching_up_zones: Math.max(
+        0,
+        Number(bidCatchingUpRow && bidCatchingUpRow.value || 0),
+        Number(bidZoneCountRow && bidZoneCountRow.value || 0) - recordedZones
+      )
     };
   }
   return stats;
@@ -1706,6 +1735,75 @@ app.get('/api/business-improvement-districts', (req, res) => {
   }
 });
 
+// The Portal owns this vocabulary and can introduce new combinations. Build
+// the filter catalog from observed records instead of hard-coding categories.
+app.get('/api/request-categories', (req, res) => {
+  const databasePath = process.env.DATABASE_PATH
+    || path.join(__dirname, 'data', 'portal-archive.sqlite');
+  let database;
+  res.setHeader('Cache-Control', 'private, max-age=300');
+  try {
+    if (!require('fs').existsSync(databasePath)) return res.json({ categories: [] });
+    const { DatabaseSync } = require('node:sqlite');
+    database = new DatabaseSync(databasePath, { readOnly: true });
+    if (!tableExists(database, 'live_portal_requests')) {
+      return res.json({ categories: [] });
+    }
+    const scope = requestGeographyScope(req, database);
+    const hasDetails = tableExists(database, 'portal_requests');
+    const bidAlias = 'category_scope_bid';
+    const source = scopedLiveRequestSource('live', scope, bidAlias);
+    const detailJoin = hasDetails
+      ? 'LEFT JOIN portal_requests AS details ON details.srnumber=live.srnumber'
+      : '';
+    const typeSql = effectiveTextSql('live', 'problem', hasDetails ? 'details' : null);
+    const subtypeSql = hasDetails ? "NULLIF(TRIM(details.problem_details),'')" : 'NULL';
+    const predicates = [
+      ...scopePredicates('live', scope, bidAlias),
+      `${typeSql} IS NOT NULL`
+    ];
+    const rows = database.prepare(`
+      SELECT ${typeSql} AS request_type,
+             ${subtypeSql} AS request_subtype,
+             COUNT(*) AS request_count
+      FROM ${source}
+      ${detailJoin}
+      ${sqlWhere(predicates)}
+      GROUP BY request_type COLLATE NOCASE,request_subtype COLLATE NOCASE
+      ORDER BY request_type COLLATE NOCASE,request_count DESC,
+               request_subtype COLLATE NOCASE
+    `).all(scopeParameters(scope));
+    const categoriesByName = new Map();
+    for (const row of rows) {
+      const name = String(row.request_type || '').trim();
+      if (!name) continue;
+      const key = name.toLocaleLowerCase('en-US');
+      let category = categoriesByName.get(key);
+      if (!category) {
+        category = { name, count: 0, subtypes: [] };
+        categoriesByName.set(key, category);
+      }
+      const count = Number(row.request_count || 0);
+      category.count += count;
+      const subtype = String(row.request_subtype || '').trim();
+      if (subtype) category.subtypes.push({ name: subtype, count });
+    }
+    return res.json({
+      categories: [...categoriesByName.values()],
+      generated_at: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error('Request category list error:', error.message);
+    return res.status(error.statusCode || 503).json({
+      error: error.statusCode && error.statusCode < 500
+        ? error.message
+        : 'Request categories are temporarily unavailable'
+    });
+  } finally {
+    if (database) database.close();
+  }
+});
+
 function serveBoundaryGeometry(req, res, {
   load,
   id,
@@ -1886,6 +1984,7 @@ app.get('/api/live-map', (req, res) => {
     const detailColumns = hasDetails
       ? `details.portal_id AS detail_portal_id,
          details.problem AS detail_problem,
+         details.problem_details,
          details.address AS detail_address,
          details.status AS detail_status,
          details.portal_url AS detail_portal_url,
@@ -1894,6 +1993,7 @@ app.get('/api/live-map', (req, res) => {
          details.archived_at AS details_fetched_at`
       : `NULL AS detail_portal_id,
          NULL AS detail_problem,
+         NULL AS problem_details,
          NULL AS detail_address,
          NULL AS detail_status,
          NULL AS detail_portal_url,
@@ -1914,7 +2014,10 @@ app.get('/api/live-map', (req, res) => {
       ? 'LEFT JOIN request_followup_queue AS followup ON followup.srnumber=live.srnumber'
       : '';
     const exactQuery = Boolean(filters.query && /^311-\d{8}$/i.test(filters.query));
-    const needsEffectiveFilters = Boolean(filters.status || (filters.query && !exactQuery));
+    const needsEffectiveFilters = Boolean(
+      filters.status || filters.requestType || filters.requestSubtype
+      || (filters.query && !exactQuery)
+    );
     const filterDetailJoin = hasDetails && (submittedSince != null || needsEffectiveFilters)
       ? detailJoin
       : '';
@@ -2319,7 +2422,10 @@ app.get('/api/live-dashboard', (req, res) => {
       ? 'LEFT JOIN request_followup_queue AS followup ON followup.srnumber = live.srnumber'
       : '';
     const exactQuery = Boolean(filters.query && /^311-\d{8}$/i.test(filters.query));
-    const needsEffectiveFilters = Boolean(filters.status || (filters.query && !exactQuery));
+    const needsEffectiveFilters = Boolean(
+      filters.status || filters.requestType || filters.requestSubtype
+      || (filters.query && !exactQuery)
+    );
     const filterDetailJoin = hasDetails && (submittedSince != null || needsEffectiveFilters)
       ? detailJoin
       : '';
@@ -2815,6 +2921,13 @@ function currentHealth() {
     && health.collector_scope === configuredScope
     && health.collector_scope_integrity === 'ready'
   );
+  const collectorScopeSafe = Boolean(
+    configuredScope
+    && health.collector_scope_recorded
+    && health.collector_scope === configuredScope
+    && ['ready', 'zone_catching_up', 'zone_plan_incomplete']
+      .includes(health.collector_scope_integrity)
+  );
   if (health.error) console.error('Health check failed:', health.error);
   const { error: _privateError, ...publicHealthFields } = health;
   const publicHealth = {
@@ -2822,7 +2935,7 @@ function currentHealth() {
     expected_collector_scope: configuredScope || DEFAULT_COLLECTOR_SCOPE,
     collector_scope_ready: collectorScopeReady
   };
-  return { now, health, publicHealth, collectorScopeReady };
+  return { now, health, publicHealth, collectorScopeReady, collectorScopeSafe };
 }
 
 // Web/database liveness stays available during a Portal outage so the archive
@@ -2836,10 +2949,14 @@ app.get('/api/health', (req, res) => {
 });
 
 app.get('/api/health/collector', (req, res) => {
-  const { now, health, publicHealth, collectorScopeReady } = currentHealth();
+  const {
+    now, health, publicHealth, collectorScopeReady, collectorScopeSafe
+  } = currentHealth();
   const ready = health.ok && health.collector === 'fresh' && collectorScopeReady;
-  res.status(ready ? 200 : 503).json({
+  const active = health.ok && health.collector === 'fresh' && collectorScopeSafe;
+  res.status(active ? 200 : 503).json({
     ...publicHealth,
+    active,
     ready,
     timestamp: now.toISOString()
   });

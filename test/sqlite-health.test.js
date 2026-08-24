@@ -154,6 +154,19 @@ test('BID collector readiness requires complete boundaries and a healthy current
   const failed = new DatabaseSync(databasePath);
   failed.prepare(`
     INSERT INTO live_monitor_state(key,value,updated_at) VALUES (?,?,?)
+  `).run('bid_collector_last_attempt_at', '2026-07-21T12:09:30.000Z', observedAt);
+  failed.prepare(`
+    INSERT INTO live_monitor_state(key,value,updated_at) VALUES (?,?,?)
+  `).run('bid_collector_catching_up_zones', '1', observedAt);
+  const recovering = inspectSqliteHealth(databasePath, {
+    now: new Date('2026-07-21T12:10:00.000Z')
+  });
+  assert.equal(recovering.collector, 'fresh');
+  assert.equal(recovering.last_successful_poll_at, observedAt);
+  assert.equal(recovering.last_attempt_at, '2026-07-21T12:09:30.000Z');
+  assert.equal(recovering.collector_scope_integrity, 'zone_catching_up');
+  failed.prepare(`
+    INSERT INTO live_monitor_state(key,value,updated_at) VALUES (?,?,?)
   `).run('bid_collector_startup_error', 'private failure detail', observedAt);
   failed.close();
   assert.equal(inspectSqliteHealth(databasePath, {

@@ -55,6 +55,9 @@ function bidCollectorIntegrity(database) {
     return 'zone_plan_incomplete';
   }
   if (Number(zones && zones.failed || 0) > 0) return 'zone_failed';
+  if (Number(stateValue(database, 'bid_collector_catching_up_zones') || 0) > 0) {
+    return 'zone_catching_up';
+  }
   return 'ready';
 }
 
@@ -71,7 +74,8 @@ function inspectSqliteHealth(databasePath, {
       collector_scope: DEFAULT_COLLECTOR_SCOPE,
       collector_scope_recorded: false,
       collector_scope_integrity: 'unavailable',
-      last_successful_poll_at: null
+      last_successful_poll_at: null,
+      last_attempt_at: null
     };
   }
 
@@ -84,18 +88,19 @@ function inspectSqliteHealth(databasePath, {
       SELECT 1 FROM sqlite_master
       WHERE type = 'table' AND name = 'live_monitor_state'
     `).get();
-    const row = hasState
-      ? database.prepare(`
-          SELECT value FROM live_monitor_state
-          WHERE key = 'last_successful_poll_at'
-        `).get()
-      : null;
+    const row = hasState ? database.prepare(`
+      SELECT value FROM live_monitor_state WHERE key='last_successful_poll_at'
+    `).get() : null;
+    const attemptRow = hasState ? database.prepare(`
+      SELECT value FROM live_monitor_state WHERE key='bid_collector_last_attempt_at'
+    `).get() : null;
     const scopeRow = hasState
       ? database.prepare(`
           SELECT value FROM live_monitor_state WHERE key='collector_scope'
         `).get()
       : null;
     const lastPoll = row && row.value ? String(row.value) : null;
+    const lastAttempt = attemptRow && attemptRow.value ? String(attemptRow.value) : null;
     const recordedCollectorScope = scopeRow
       && ['citywide', 'bid_only'].includes(String(scopeRow.value).trim().toLowerCase())
       ? String(scopeRow.value).trim().toLowerCase()
@@ -103,11 +108,17 @@ function inspectSqliteHealth(databasePath, {
     const collectorScopeIntegrity = recordedCollectorScope === 'bid_only'
       ? bidCollectorIntegrity(database)
       : recordedCollectorScope === 'citywide' ? 'ready' : 'unrecorded';
-    const lastPollMs = lastPoll ? Date.parse(lastPoll) : NaN;
-    const materiallyFuture = Number.isFinite(lastPollMs)
-      && lastPollMs > now.getTime() + MAX_FUTURE_SKEW_SECONDS * 1000;
-    const ageSeconds = Number.isFinite(lastPollMs) && !materiallyFuture
-      ? Math.max(0, (now.getTime() - lastPollMs) / 1000)
+    // A BID recovery cycle is healthy work even before every geographic zone
+    // has caught up. Use its latest attempt for process liveness while keeping
+    // the last complete scan as a separate, explicit field.
+    const activityAt = recordedCollectorScope === 'bid_only'
+      ? lastAttempt || lastPoll
+      : lastPoll;
+    const activityMs = activityAt ? Date.parse(activityAt) : NaN;
+    const materiallyFuture = Number.isFinite(activityMs)
+      && activityMs > now.getTime() + MAX_FUTURE_SKEW_SECONDS * 1000;
+    const ageSeconds = Number.isFinite(activityMs) && !materiallyFuture
+      ? Math.max(0, (now.getTime() - activityMs) / 1000)
       : null;
     const collector = materiallyFuture
       ? 'invalid'
@@ -123,6 +134,8 @@ function inspectSqliteHealth(databasePath, {
       collector_scope_recorded: Boolean(recordedCollectorScope),
       collector_scope_integrity: collectorScopeIntegrity,
       last_successful_poll_at: lastPoll,
+      last_attempt_at: lastAttempt,
+      collector_activity_at: activityAt,
       poll_age_seconds: ageSeconds == null ? null : Math.round(ageSeconds)
     };
   } catch (error) {
@@ -135,6 +148,7 @@ function inspectSqliteHealth(databasePath, {
       collector_scope_recorded: false,
       collector_scope_integrity: 'unavailable',
       last_successful_poll_at: null,
+      last_attempt_at: null,
       error: error.message
     };
   } finally {

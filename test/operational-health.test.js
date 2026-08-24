@@ -217,6 +217,22 @@ test('BID-only health ignores retained citywide email and subscription rows', ()
     '311-00000012', 'error', 9, '2026-07-29T11:00:00.000Z',
     'retained citywide failure', '2026-07-29T11:00:00.000Z', 0
   );
+  database.prepare(`INSERT INTO live_detail_queue VALUES (?,?,?,?,?,?)`).run(
+    '311-00000011', 'pending', 0, '2026-07-29T12:01:00.000Z',
+    null, '2026-07-29T11:59:00.000Z'
+  );
+  database.prepare(`INSERT INTO live_detail_queue VALUES (?,?,?,?,?,?)`).run(
+    '311-00000012', 'retry', 9, '2026-07-29T11:00:00.000Z',
+    'retained citywide failure', '2026-07-29T11:00:00.000Z'
+  );
+  database.prepare(`INSERT INTO request_followup_queue VALUES (?,?,?,?,?,?)`).run(
+    '311-00000011', 'closing', 0, '2026-07-29T12:01:00.000Z',
+    null, '2026-07-29T11:59:00.000Z'
+  );
+  database.prepare(`INSERT INTO request_followup_queue VALUES (?,?,?,?,?,?)`).run(
+    '311-00000012', 'closing', 9, '2026-07-29T11:00:00.000Z',
+    'retained citywide failure', '2026-07-29T11:00:00.000Z'
+  );
   database.close();
 
   const result = loadOperationalHealth(databasePath, { now: NOW });
@@ -225,6 +241,8 @@ test('BID-only health ignores retained citywide email and subscription rows', ()
   assert.equal(result.components.email_intake.status, 'healthy');
   assert.equal(result.components.subscriptions.next.state, 'pending');
   assert.notEqual(result.components.subscriptions.reason, 'work_failed');
+  assert.equal(result.components.details.next.due, 'scheduled');
+  assert.equal(result.components.closure_verification.next.due, 'scheduled');
 });
 
 test('missing collector scope state reports the BID-only default', () => {

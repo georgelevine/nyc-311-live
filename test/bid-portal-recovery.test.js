@@ -52,7 +52,12 @@ test('Portal map URLs keep bbox retrieval separate from exact BID membership', (
 test('BID recovery ranges use NYC calendar days and accept a gap at the maximum', () => {
   assert.deepEqual(
     bidRecoveryRange(null, '2026-08-06T02:00:00.000Z', { maxDays: 2 }),
-    { from: '2026-08-05', to: '2026-08-05' }
+    {
+      from: '2026-08-05',
+      to: '2026-08-05',
+      watermark_at: '2026-08-06T02:00:00.000Z',
+      caught_up: true
+    }
   );
   assert.deepEqual(
     bidRecoveryRange(
@@ -60,24 +65,34 @@ test('BID recovery ranges use NYC calendar days and accept a gap at the maximum'
       '2026-08-06T16:00:00.000Z',
       { maxDays: 2 }
     ),
-    { from: '2026-08-04', to: '2026-08-06' }
+    {
+      from: '2026-08-04',
+      to: '2026-08-06',
+      watermark_at: '2026-08-06T16:00:00.000Z',
+      caught_up: true
+    }
   );
 });
 
-test('BID recovery ranges reject unsafe limits and gaps beyond the limit', () => {
+test('BID recovery ranges reject unsafe limits and advance long gaps in bounded chunks', () => {
   for (const maxDays of [0, 32, 1.5, Number.NaN]) {
     assert.throws(
       () => bidRecoveryRange(null, '2026-08-06T16:00:00.000Z', { maxDays }),
       /maxDays must be an integer from 1 through 31/
     );
   }
-  assert.throws(
-    () => bidRecoveryRange(
+  assert.deepEqual(
+    bidRecoveryRange(
       { last_successful_poll_at: '2026-08-04T15:59:59.000Z' },
       '2026-08-06T16:00:00.000Z',
       { maxDays: 2 }
     ),
-    /automatic catch-up is limited to 2 days/
+    {
+      from: '2026-08-04',
+      to: '2026-08-06',
+      watermark_at: '2026-08-06T15:59:59.000Z',
+      caught_up: false
+    }
   );
 });
 

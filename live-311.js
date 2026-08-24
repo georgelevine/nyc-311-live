@@ -1083,16 +1083,28 @@ function refreshBidCollectorPlan() {
 async function fetchBidOnlyPoll() {
   const plan = refreshBidCollectorPlan();
   const attemptedAt = new Date();
+  const attemptedAtIso = attemptedAt.toISOString();
+  // Persist liveness before any potentially long bounded recovery. This lets
+  // operators and deployment checks distinguish active catch-up from a dead
+  // process without pretending that a complete network scan has finished.
+  setState.run('bid_collector_last_attempt_at', attemptedAtIso, attemptedAtIso);
+  const globalPollState = getState.get('last_successful_poll_at');
+  const fallbackPriorState = globalPollState && globalPollState.value
+    ? { last_successful_poll_at: globalPollState.value }
+    : null;
   const outcomes = await mapWithConcurrency(
     plan.zones,
     BID_QUERY_CONCURRENCY,
     async zone => {
       const queryStartedAt = new Date().toISOString();
-      const priorState = getBidZoneState.get(
+      const storedPriorState = getBidZoneState.get(
         plan.boundaryVersion,
         plan.planHash,
         zone.zoneId
       );
+      // A new query plan inherits the last complete BID-network watermark so
+      // changing the zone layout cannot silently skip an offline interval.
+      const priorState = storedPriorState || fallbackPriorState;
       try {
         const collected = await collectBidZonePins({
           portalClient: bidPortalClient,
@@ -1101,18 +1113,32 @@ async function fetchBidOnlyPoll() {
           attemptedAt,
           pollIntervalSeconds: BID_POLL_INTERVAL_SECONDS,
           cap: PORTAL_CAP,
+          // A zone that has already saturated should use the bounded endpoint
+          // directly. Retrying the known-bad undated request added minutes to
+          // every cycle before eventually using the same bounded fallback.
+          preferBounded: Boolean(
+            storedPriorState && (
+              Number(storedPriorState.saturation_count) > 0
+              || /aborted|timed out|timeout/i.test(storedPriorState.last_error || '')
+            )
+          ),
           resolveRecoveryRange: (state, now) => bidRecoveryRange(state, now, {
             maxDays: BID_CATCHUP_MAX_DAYS
           })
         });
+        const progressAt = new Date().toISOString();
+        setState.run('bid_collector_last_attempt_at', progressAt, progressAt);
         return {
           ok: true,
           zone,
           ...collected,
           resultCount: collected.pins.length,
-          watermarkAt: queryStartedAt
+          watermarkAt: collected.watermarkAt || queryStartedAt,
+          caughtUp: collected.caughtUp !== false
         };
       } catch (error) {
+        const progressAt = new Date().toISOString();
+        setState.run('bid_collector_last_attempt_at', progressAt, progressAt);
         const recovery = error && error.bidZoneRecovery || {};
         return {
           ok: false,
@@ -1124,6 +1150,7 @@ async function fetchBidOnlyPoll() {
           offlineGap: Boolean(recovery.offlineGap),
           recoveryReason: recovery.recoveryReason || null,
           watermarkAt: queryStartedAt,
+          caughtUp: false,
           error: error.message
         };
       }
@@ -1142,6 +1169,7 @@ async function fetchBidOnlyPoll() {
     zoneCount: plan.zones.length,
     successfulZones: successful.length,
     failedZones: outcomes.length - successful.length,
+    catchingUpZones: successful.filter(outcome => !outcome.caughtUp).length,
     zoneOutcomes: outcomes,
     attemptedAt: attemptedAt.toISOString()
   };
@@ -1378,6 +1406,19 @@ function savePoll(records) {
         }
       }
       setState.run('bid_collector_last_attempt_at', nowIso, nowIso);
+      setState.run(
+        'bid_collector_failed_zones',
+        String(zoneOutcomes.filter(outcome => !outcome.ok).length),
+        nowIso
+      );
+      setState.run(
+        'bid_collector_catching_up_zones',
+        String(zoneOutcomes.filter(outcome => outcome.ok && !outcome.caughtUp).length),
+        nowIso
+      );
+      if (zoneOutcomes.some(outcome => outcome.ok)) {
+        setState.run('bid_collector_last_progress_at', nowIso, nowIso);
+      }
     }
     db.exec('COMMIT');
     return {
@@ -1388,7 +1429,10 @@ function savePoll(records) {
       statusChanges,
       closureRefreshesQueued,
       successfulZones: BID_ONLY ? zoneOutcomes.filter(outcome => outcome.ok).length : null,
-      failedZones: BID_ONLY ? zoneOutcomes.filter(outcome => !outcome.ok).length : null
+      failedZones: BID_ONLY ? zoneOutcomes.filter(outcome => !outcome.ok).length : null,
+      catchingUpZones: BID_ONLY
+        ? zoneOutcomes.filter(outcome => outcome.ok && !outcome.caughtUp).length
+        : null
     };
   } catch (error) {
     db.exec('ROLLBACK');
@@ -1660,6 +1704,7 @@ async function main() {
 
   while (!stopRequested
       && (LIVE_DURATION_SECONDS === 0 || Date.now() - started < LIVE_DURATION_SECONDS * 1000)) {
+    const cycleStartedAt = Date.now();
     try {
       const bidPoll = BID_ONLY ? await fetchBidOnlyPoll() : null;
       const records = bidPoll ? bidPoll.records : await fetchLatest();
@@ -1669,7 +1714,8 @@ async function main() {
         planHash: bidPoll.planHash
       } : undefined);
       const observedAt = new Date().toISOString();
-      const completePoll = !bidPoll || bidPoll.failedZones === 0;
+      const completePoll = !bidPoll
+        || (bidPoll.failedZones === 0 && bidPoll.catchingUpZones === 0);
       if (completePoll) recordSuccessfulPoll(result, observedAt);
       polls += 1;
       settleFirstPoll({
@@ -1687,6 +1733,7 @@ async function main() {
         rejected_non_bid_records: bidPoll && bidPoll.rejectedCount,
         successful_zones: bidPoll && bidPoll.successfulZones,
         failed_zones: bidPoll && bidPoll.failedZones,
+        catching_up_zones: bidPoll && bidPoll.catchingUpZones,
         new_map_records: result.newMapRecords,
         previous_frontier: result.previousFrontier,
         latest_frontier: result.highest,
@@ -1705,7 +1752,9 @@ async function main() {
 
     if (stopRequested
         || (LIVE_DURATION_SECONDS > 0 && Date.now() - started >= LIVE_DURATION_SECONDS * 1000)) break;
-    await sleep(currentPollIntervalSeconds() * 1000);
+    const remainingDelay = currentPollIntervalSeconds() * 1000
+      - (Date.now() - cycleStartedAt);
+    await sleep(Math.max(1_000, remainingDelay));
   }
 
   detailHydrationStopping = true;

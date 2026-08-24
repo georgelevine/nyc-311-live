@@ -97,6 +97,61 @@ test('legacy page-rate input is accepted but explicitly ignored by routine backu
   assert.equal(DEFAULT_BACKUP_PAGE_RATE, 64);
 });
 
+test('BID-only backups allow captured suffixes beyond the retained citywide frontier', async t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-routine-bid-scope-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const unfinalizedSource = createArchiveFixture(directory, 'source.sqlite');
+  const finalized = await finalizeDatabase({
+    databasePath: unfinalizedSource,
+    backupPath: path.join(directory, 'portal-archive.sqlite')
+  });
+  const source = finalized.backup.path;
+  const database = openDatabase(source);
+  const observedAt = '2026-08-24T12:00:00.000Z';
+  try {
+    database.prepare(`
+      INSERT INTO live_monitor_state(key,value,updated_at)
+      VALUES ('collector_scope','bid_only',?)
+    `).run(observedAt);
+    database.prepare(`
+      INSERT INTO live_portal_requests(
+        srnumber,suffix,problem,address,latitude,longitude,submitted_at,status,
+        portal_url,first_seen_at,last_seen_at,raw_json
+      ) VALUES (
+        '311-00000002',2,'BID request','2 Test Plaza',40.75,-73.98,?,
+        'In Progress','https://portal.311.nyc.gov/sr-details/?srnum=311-00000002',
+        ?,?,'{"source":"bid_map"}'
+      )
+    `).run(observedAt, observedAt, observedAt);
+    database.prepare(`
+      INSERT INTO live_detail_queue(
+        srnumber,status,attempts,next_attempt_at,updated_at
+      ) VALUES ('311-00000002','pending',0,?,?)
+    `).run(observedAt, observedAt);
+    database.prepare(`
+      INSERT INTO request_followup_queue(
+        srnumber,state,attempts,closing_attempts,closure_cycle,updated_at
+      ) VALUES ('311-00000002','open',0,0,0,?)
+    `).run(observedAt);
+  } finally {
+    database.close();
+  }
+
+  const result = await createRoutineBackup({
+    databasePath: source,
+    directory: path.join(directory, 'backups'),
+    now: new Date('2026-08-24T12:05:00.000Z')
+  });
+  const verified = await verifySnapshot({
+    databasePath: result.path,
+    manifestPath: result.manifest_path
+  });
+  assert.equal(verified.ok, true);
+  assert.equal(verified.archive.collector_scope, 'bid_only');
+  assert.equal(verified.archive.frontier, 1);
+  assert.equal(verified.archive.latest_captured_suffix, 2);
+});
+
 test('capacity preflight sizes the snapshot from logical pages and reserves WAL headroom', () => {
   const result = calculateBackupCapacity({
     sourceDatabaseBytes: 4_096,

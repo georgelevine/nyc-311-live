@@ -97,6 +97,8 @@
   const requestsViewTitle = document.getElementById('requests-view-title');
   const search = document.getElementById('request-search');
   const statusFilter = document.getElementById('status-filter');
+  const requestTypeFilter = document.getElementById('request-type-filter');
+  const requestSubtypeFilter = document.getElementById('request-subtype-filter');
   const precinctFilter = document.getElementById('precinct-filter');
   const bidFilter = document.getElementById('bid-filter');
   const bidScopeFilter = document.getElementById('bid-scope-filter');
@@ -275,6 +277,7 @@
   const GEOGRAPHY_CATALOG_TIMEOUT_MS = 15_000;
   const GEOGRAPHY_CATALOG_RETRY_MAX_MS = 60_000;
   const GEOGRAPHY_CATALOG_REFRESH_MS = 5 * 60_000;
+  const CATEGORY_CATALOG_REFRESH_MS = 10 * 60_000;
   const EMAIL_UPDATES_REFRESH_MS = 15_000;
   const EMAIL_METRICS_REFRESH_MS = 60_000;
   const EMAIL_METRICS_REFRESHING_RETRY_MS = 2_500;
@@ -373,6 +376,10 @@
   let bidCatalogRetryTimer = null;
   let precinctCatalogLoading = false;
   let bidCatalogLoading = false;
+  let categoryCatalog = [];
+  let categoryCatalogLoading = false;
+  let categoryCatalogReloadRequested = false;
+  let categoryCatalogRetryTimer = null;
   const boundaryStates = {
     precinct: {
       requestedValue: '', layer: null, label: '', loading: false,
@@ -608,6 +615,8 @@
     const query = search.value.trim();
     if (query) filters.q = query;
     if (statusFilter.value) filters.status = statusFilter.value;
+    if (requestTypeFilter.value) filters.request_type = requestTypeFilter.value;
+    if (requestSubtypeFilter.value) filters.request_subtype = requestSubtypeFilter.value;
     return filters;
   }
 
@@ -615,6 +624,8 @@
     return JSON.stringify([
       search.value.trim(),
       statusFilter.value,
+      requestTypeFilter.value,
+      requestSubtypeFilter.value,
       precinctFilter.value,
       bidFilter.value
     ]);
@@ -789,9 +800,18 @@
     const query = search.value.trim().toLowerCase();
     const exact = exactSrnumberQuery();
     const status = statusFilter.value.trim().toLowerCase();
+    const requestType = requestTypeFilter.value.trim().toLowerCase();
+    const requestSubtype = requestSubtypeFilter.value.trim().toLowerCase();
     const precinct = precinctFilter.value;
     const bidId = bidFilter.value;
     if (status && String(record.status || '').trim().toLowerCase() !== status) return false;
+    if (requestType && String(record.problem || '').trim().toLowerCase() !== requestType) {
+      return false;
+    }
+    if (requestSubtype
+        && String(record.problem_details || '').trim().toLowerCase() !== requestSubtype) {
+      return false;
+    }
     if (precinct && Number(record.police_precinct) !== Number(precinct)) return false;
     if (bidId && !(Array.isArray(record.business_improvement_district_ids)
         && record.business_improvement_district_ids.some(id => Number(id) === Number(bidId)))) {
@@ -799,7 +819,9 @@
     }
     if (!query) return true;
     if (exact && record.srnumber === exact) return true;
-    return [record.srnumber, record.problem, record.address, record.status]
+    return [
+      record.srnumber, record.problem, record.problem_details, record.address, record.status
+    ]
       .some(value => String(value || '').toLowerCase().includes(query));
   }
 
@@ -1952,6 +1974,8 @@
   function updateActiveFilterState() {
     const label = activeFilterLabel([
       statusFilter.value,
+      requestTypeFilter.value,
+      requestSubtypeFilter.value,
       precinctFilter.value,
       bidFilter.value
     ]);
@@ -2396,6 +2420,84 @@
       GEOGRAPHY_CATALOG_RETRY_MAX_MS,
       1_000 * (2 ** Math.min(attempt, 6))
     );
+  }
+
+  function syncRequestSubtypeOptions(selected = requestSubtypeFilter.value) {
+    const selectedType = requestTypeFilter.value.trim().toLocaleLowerCase('en-US');
+    const category = categoryCatalog.find(item => (
+      String(item.name || '').trim().toLocaleLowerCase('en-US') === selectedType
+    ));
+    const subtypes = category && Array.isArray(category.subtypes)
+      ? category.subtypes.filter(item => String(item && item.name || '').trim())
+      : [];
+    requestSubtypeFilter.innerHTML = selectedType
+      ? '<option value="">All problem details</option>'
+        + subtypes.map(item => `<option value="${esc(item.name)}">${esc(item.name)}</option>`).join('')
+      : '<option value="">Choose a request type first</option>';
+    requestSubtypeFilter.disabled = !selectedType || subtypes.length === 0;
+    if (selected && subtypes.some(item => item.name === selected)) {
+      requestSubtypeFilter.value = selected;
+    }
+  }
+
+  async function loadRequestCategories({ attempt = 0 } = {}) {
+    if (categoryCatalogLoading) {
+      // Geography changes can arrive while the previous catalog request is
+      // still in flight. Remember that change so the dropdowns cannot retain
+      // categories from the old precinct/BID scope.
+      categoryCatalogReloadRequested = true;
+      return;
+    }
+    categoryCatalogLoading = true;
+    categoryCatalogReloadRequested = false;
+    if (categoryCatalogRetryTimer !== null) {
+      window.clearTimeout(categoryCatalogRetryTimer);
+      categoryCatalogRetryTimer = null;
+    }
+    const selectedType = requestTypeFilter.value;
+    const selectedSubtype = requestSubtypeFilter.value;
+    const controller = new AbortController();
+    const timeout = window.setTimeout(
+      () => controller.abort(),
+      GEOGRAPHY_CATALOG_TIMEOUT_MS
+    );
+    try {
+      const payload = await fetchJson(
+        scopedUrl('/api/request-categories'),
+        'Request category service',
+        { signal: controller.signal }
+      );
+      categoryCatalog = Array.isArray(payload.categories)
+        ? payload.categories.filter(item => String(item && item.name || '').trim())
+        : [];
+      requestTypeFilter.innerHTML = '<option value="">All request types</option>'
+        + categoryCatalog.map(item => `<option value="${esc(item.name)}">${esc(item.name)}</option>`).join('');
+      requestTypeFilter.disabled = categoryCatalog.length === 0;
+      if (selectedType && categoryCatalog.some(item => item.name === selectedType)) {
+        requestTypeFilter.value = selectedType;
+      }
+      syncRequestSubtypeOptions(selectedSubtype);
+      const selectionLost = Boolean(selectedType && requestTypeFilter.value !== selectedType)
+        || Boolean(selectedSubtype && requestSubtypeFilter.value !== selectedSubtype);
+      updateActiveFilterState();
+      if (selectionLost) scheduleFilterRefresh(0);
+    } catch (error) {
+      if (!categoryCatalog.length) {
+        requestTypeFilter.innerHTML = '<option value="">Request types unavailable · retrying</option>';
+        requestSubtypeFilter.innerHTML = '<option value="">Problem details unavailable</option>';
+        requestTypeFilter.disabled = true;
+        requestSubtypeFilter.disabled = true;
+      }
+      categoryCatalogRetryTimer = window.setTimeout(() => {
+        categoryCatalogRetryTimer = null;
+        loadRequestCategories({ attempt: attempt + 1 });
+      }, geographyCatalogRetryDelay(attempt));
+      console.warn(error);
+    } finally {
+      window.clearTimeout(timeout);
+      categoryCatalogLoading = false;
+      if (categoryCatalogReloadRequested) void loadRequestCategories();
+    }
   }
 
   async function loadPolicePrecincts({ attempt = 0 } = {}) {
@@ -3300,7 +3402,11 @@
       zoneCount,
       Math.max(0, Math.round(finiteStat(bidCollector.failed_zones)))
     );
-    const healthyZones = Math.max(0, zoneCount - failedZones);
+    const catchingUpZones = Math.min(
+      Math.max(0, zoneCount - failedZones),
+      Math.max(0, Math.round(finiteStat(bidCollector.catching_up_zones)))
+    );
+    const healthyZones = Math.max(0, zoneCount - failedZones - catchingUpZones);
     const cadenceSeconds = Math.max(
       1,
       Math.round(finiteStat(stats.poll_interval_seconds, currentPollSeconds || 60))
@@ -3311,7 +3417,8 @@
       : districtCount
         ? `All ${districtCount.toLocaleString()} active BIDs`
         : 'All active BIDs';
-    const lastCompleteScan = stats.last_successful_poll_at || stats.last_seen_at;
+    const lastCompleteScan = stats.last_successful_poll_at;
+    const lastAttempt = stats.last_attempt_at || stats.last_seen_at;
 
     collectorScopeBadge.hidden = false;
     collectorScopeBadge.textContent = 'BID network';
@@ -3323,7 +3430,7 @@
     requestsViewEyebrow.textContent = 'BID-only live stream';
     setRequestsViewHeading('Latest BID requests');
     summaryElements.geographyLabel.textContent = 'Borough coverage';
-    requestFiltersLabel.textContent = 'Status & precinct filters';
+    requestFiltersLabel.textContent = 'Type, status & geography';
     mapCollectorScope.textContent = selectedBid
       ? `Exact BID boundary matches · ${selectedBid.name}`
       : 'Exact BID boundary matches across the active network';
@@ -3344,17 +3451,23 @@
       ? `${healthyZones.toLocaleString()}/${zoneCount.toLocaleString()}`
       : '—';
     collectorScopeElements.cadence.textContent = `Fixed collection cadence · every ${cadenceSeconds.toLocaleString()} seconds`;
-    collectorScopeElements.lastCheck.textContent = lastCompleteScan
-      ? `Last complete scan ${timeLabel(lastCompleteScan)}`
-      : 'Waiting for the first complete BID scan';
+    collectorScopeElements.lastCheck.textContent = catchingUpZones > 0 && lastAttempt
+      ? `Collection active ${relativeTime(lastAttempt)} · catching up`
+      : lastCompleteScan
+        ? `Last complete scan ${timeLabel(lastCompleteScan)}`
+        : lastAttempt
+          ? `Collection active ${relativeTime(lastAttempt)} · first complete scan pending`
+          : 'Waiting for the first BID collection attempt';
     collectorScopeElements.feedLabel.textContent = selectedName;
     collectorScopeElements.zoneHealth.dataset.status = zoneCount === 0
       ? 'starting'
-      : failedZones > 0 ? 'attention' : 'healthy';
+      : failedZones > 0 ? 'attention' : catchingUpZones > 0 ? 'starting' : 'healthy';
     collectorScopeElements.zoneHealth.textContent = zoneCount === 0
       ? 'Preparing retrieval zones'
       : failedZones > 0
         ? `${failedZones.toLocaleString()} ${failedZones === 1 ? 'zone is' : 'zones are'} retrying`
+        : catchingUpZones > 0
+          ? `${catchingUpZones.toLocaleString()} ${catchingUpZones === 1 ? 'zone is' : 'zones are'} catching up`
         : `All ${zoneCount.toLocaleString()} zones healthy`;
   }
 
@@ -4088,6 +4201,16 @@
     updateActiveFilterState();
     scheduleFilterRefresh(0);
   });
+  requestTypeFilter.addEventListener('change', () => {
+    requestSubtypeFilter.value = '';
+    syncRequestSubtypeOptions('');
+    updateActiveFilterState();
+    scheduleFilterRefresh(0);
+  });
+  requestSubtypeFilter.addEventListener('change', () => {
+    updateActiveFilterState();
+    scheduleFilterRefresh(0);
+  });
   function handleGeographyFilterChange() {
     if (bidScopeFilter.value !== bidFilter.value) {
       bidScopeFilter.value = bidFilter.value;
@@ -4129,6 +4252,7 @@
     updateSelectedFeedCard(previousNumber, null);
     setDetailPanelVisible(false);
     updateActiveFilterState();
+    void loadRequestCategories();
     renderFeed({ resetScroll: true });
     renderMap();
     syncSelectedBoundaries();
@@ -4224,10 +4348,14 @@
 
   loadPolicePrecincts();
   loadBusinessImprovementDistricts();
+  loadRequestCategories();
   window.setInterval(() => {
     void loadPolicePrecincts();
     void loadBusinessImprovementDistricts();
   }, GEOGRAPHY_CATALOG_REFRESH_MS);
+  window.setInterval(() => {
+    void loadRequestCategories();
+  }, CATEGORY_CATALOG_REFRESH_MS);
   updateActiveFilterState();
   refreshNowAndReschedule();
   window.setInterval(() => {

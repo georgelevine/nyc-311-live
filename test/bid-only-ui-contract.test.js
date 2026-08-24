@@ -258,7 +258,8 @@ test('compact BID-only stats expose zone health and omit unrelated citywide stat
     plan_hash: planHash,
     zone_count: 12,
     failed_zones: 1,
-    saturated_zones: 1
+    saturated_zones: 1,
+    catching_up_zones: 0
   });
 });
 

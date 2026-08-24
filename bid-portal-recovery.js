@@ -117,20 +117,24 @@ function bidRecoveryRange(zoneState, now = new Date(), { maxDays = 2 } = {}) {
   const prior = zoneState && zoneState.last_successful_poll_at
     ? new Date(zoneState.last_successful_poll_at)
     : null;
-  if (prior && Number.isFinite(prior.getTime())) {
-    const gapDays = (current.getTime() - prior.getTime()) / 86_400_000;
-    if (gapDays > maxDays) {
-      throw new Error(
-        `Zone has been offline for ${gapDays.toFixed(2)} days; `
-        + `automatic catch-up is limited to ${maxDays} days`
-      );
-    }
-  }
+  const validPrior = prior && Number.isFinite(prior.getTime()) && prior <= current
+    ? prior
+    : null;
+  const maximumBatchMilliseconds = maxDays * 86_400_000;
+  const remainingMilliseconds = validPrior
+    ? current.getTime() - validPrior.getTime()
+    : 0;
+  const caughtUp = remainingMilliseconds <= maximumBatchMilliseconds;
+  const watermark = caughtUp
+    ? current
+    : new Date(validPrior.getTime() + maximumBatchMilliseconds);
   return {
-    from: prior && Number.isFinite(prior.getTime())
-      ? nycCalendarDay(prior)
+    from: validPrior
+      ? nycCalendarDay(validPrior)
       : nycCalendarDay(current),
-    to: nycCalendarDay(current)
+    to: nycCalendarDay(watermark),
+    watermark_at: watermark.toISOString(),
+    caught_up: caughtUp
   };
 }
 

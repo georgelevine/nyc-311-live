@@ -295,19 +295,19 @@ test('one BID-only poll admits exact matches and leaves citywide audit state unt
       database.close();
     }
 
-    const beforeFailure = new DatabaseSync(databasePath);
+    const beforeRecovery = new DatabaseSync(databasePath);
     const oldWatermark = new Date(Date.now() - 3 * 86_400_000).toISOString();
     let globalWatermark;
     try {
-      beforeFailure.prepare(`
+      beforeRecovery.prepare(`
         UPDATE bid_collector_zone_state
         SET last_successful_poll_at=?,last_error=NULL
       `).run(oldWatermark);
-      globalWatermark = beforeFailure.prepare(`
+      globalWatermark = beforeRecovery.prepare(`
         SELECT value FROM live_monitor_state WHERE key='last_successful_poll_at'
       `).get().value;
     } finally {
-      beforeFailure.close();
+      beforeRecovery.close();
     }
 
     runNode(['live-311.js'], {
@@ -316,22 +316,22 @@ test('one BID-only poll admits exact matches and leaves citywide audit state unt
       BID_CATCHUP_MAX_DAYS: '2',
       NYC311_TEST_PORTAL_PINS: JSON.stringify(pins)
     });
-    const afterFailure = new DatabaseSync(databasePath, { readOnly: true });
+    const afterRecovery = new DatabaseSync(databasePath, { readOnly: true });
     try {
-      const state = afterFailure.prepare(`
+      const state = afterRecovery.prepare(`
         SELECT COUNT(*) AS zones,
-          SUM(last_successful_poll_at=?) AS preserved,
+          SUM(julianday(last_successful_poll_at)>julianday(?)) AS advanced,
           SUM(last_error IS NOT NULL) AS failed
         FROM bid_collector_zone_state
       `).get(oldWatermark);
       assert.equal(state.zones, 12);
-      assert.equal(state.preserved, 12);
-      assert.equal(state.failed, 12);
-      assert.equal(afterFailure.prepare(`
+      assert.equal(state.advanced, 12);
+      assert.equal(state.failed, 0);
+      assert.equal(afterRecovery.prepare(`
         SELECT value FROM live_monitor_state WHERE key='last_successful_poll_at'
       `).get().value, globalWatermark);
     } finally {
-      afterFailure.close();
+      afterRecovery.close();
     }
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });

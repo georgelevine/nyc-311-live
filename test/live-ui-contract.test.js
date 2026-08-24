@@ -465,6 +465,15 @@ test('geography catalogs retain release identity and retry transient failures', 
   assert.match(dashboard, /if \(error\.status === 409\)/);
 });
 
+test('request type and problem-detail filters use the observed Portal catalog', () => {
+  assert.match(html, /id="request-type-filter"/);
+  assert.match(html, /id="request-subtype-filter"/);
+  assert.match(dashboard, /fetchJson\(\s*scopedUrl\('\/api\/request-categories'\)/);
+  assert.match(dashboard, /filters\.request_type = requestTypeFilter\.value/);
+  assert.match(dashboard, /filters\.request_subtype = requestSubtypeFilter\.value/);
+  assert.match(dashboard, /record\.problem_details/);
+});
+
 test('map and feed pagination reject stale, repeated, and non-progressing pages', () => {
   assert.match(dashboard, /validatePaginatedRecords\(pageRecords, \{/);
   assert.match(dashboard, /expectedSnapshot: snapshotAt/);

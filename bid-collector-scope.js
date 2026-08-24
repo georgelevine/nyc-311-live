@@ -504,6 +504,7 @@ async function collectBidZonePins({
   attemptedAt = new Date(),
   pollIntervalSeconds = 60,
   cap = DEFAULT_PORTAL_CAP,
+  preferBounded = false,
   resolveRecoveryRange
 }) {
   if (!portalClient || typeof portalClient.query !== 'function'
@@ -521,6 +522,53 @@ async function collectBidZonePins({
     throw new TypeError('pollIntervalSeconds must be positive');
   }
 
+  async function recoverBounded({
+    initialCount = null,
+    saturated = false,
+    offlineGap = false,
+    recoveryReason,
+    initialQueryError = null
+  }) {
+    const range = resolveRecoveryRange(priorState, attempted);
+    let recoveredPins;
+    try {
+      recoveredPins = await portalClient.collectRange({
+        bbox,
+        from: range.from,
+        to: range.to
+      });
+      if (!Array.isArray(recoveredPins)) {
+        throw new TypeError('Portal bounded recovery must return an array');
+      }
+    } catch (error) {
+      error.bidZoneRecovery = {
+        initialCount,
+        saturated,
+        offlineGap,
+        recoveryReason
+      };
+      throw error;
+    }
+    const watermark = parseTimestamp(range.watermark_at);
+    return {
+      pins: recoveredPins,
+      initialCount,
+      saturated,
+      offlineGap,
+      recovered: true,
+      recoveryReason,
+      initialQueryError,
+      ...(watermark == null ? {} : {
+        watermarkAt: new Date(watermark).toISOString(),
+        caughtUp: range.caught_up !== false
+      })
+    };
+  }
+
+  if (preferBounded) {
+    return recoverBounded({ recoveryReason: 'preferred_bounded' });
+  }
+
   let pins;
   let initialCount = null;
   let initialQueryError = null;
@@ -531,11 +579,11 @@ async function collectBidZonePins({
   } catch (error) {
     initialQueryError = error;
     try {
-      const range = resolveRecoveryRange(priorState, attempted);
-      pins = await portalClient.collectRange({ bbox, ...range });
-      if (!Array.isArray(pins)) {
-        throw new TypeError('Portal bounded recovery must return an array');
-      }
+      return await recoverBounded({
+        initialCount,
+        recoveryReason: 'initial_query_failed',
+        initialQueryError: errorMessage(initialQueryError)
+      });
     } catch (recoveryError) {
       const combinedError = new Error(
         `Undated zone query failed (${errorMessage(initialQueryError)}); `
@@ -550,15 +598,6 @@ async function collectBidZonePins({
       };
       throw combinedError;
     }
-    return {
-      pins,
-      initialCount,
-      saturated: false,
-      offlineGap: false,
-      recovered: true,
-      recoveryReason: 'initial_query_failed',
-      initialQueryError: errorMessage(initialQueryError)
-    };
   }
 
   const saturated = zoneNeedsCatchup(
@@ -569,21 +608,12 @@ async function collectBidZonePins({
   const offlineGap = Number.isFinite(priorSuccessMs)
     && attempted.getTime() - priorSuccessMs > pollIntervalSeconds * 2_000;
   if (saturated || offlineGap) {
-    const range = resolveRecoveryRange(priorState, attempted);
-    try {
-      pins = await portalClient.collectRange({ bbox, ...range });
-      if (!Array.isArray(pins)) {
-        throw new TypeError('Portal bounded recovery must return an array');
-      }
-    } catch (error) {
-      error.bidZoneRecovery = {
-        initialCount,
-        saturated,
-        offlineGap,
-        recoveryReason: saturated ? 'saturated' : 'offline_gap'
-      };
-      throw error;
-    }
+    return recoverBounded({
+      initialCount,
+      saturated,
+      offlineGap,
+      recoveryReason: saturated ? 'saturated' : 'offline_gap'
+    });
   }
   return {
     pins,
@@ -592,7 +622,9 @@ async function collectBidZonePins({
     offlineGap,
     recovered: saturated || offlineGap,
     recoveryReason: saturated ? 'saturated' : offlineGap ? 'offline_gap' : null,
-    initialQueryError: null
+    initialQueryError: null,
+    watermarkAt: attempted.toISOString(),
+    caughtUp: true
   };
 }
 

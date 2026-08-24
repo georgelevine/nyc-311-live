@@ -84,7 +84,7 @@ services:
         - CMD
         - node
         - -e
-        - "const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync(process.env.DATABASE_PATH,{readOnly:true});const r=d.prepare(\"SELECT value FROM live_monitor_state WHERE key='last_successful_poll_at'\").get();d.close();const a=Date.now()-Date.parse(r&&r.value);process.exit(Number.isFinite(a)&&a>=-60000&&a<=300000?0:1)"
+        - "const {DatabaseSync}=require('node:sqlite');const d=new DatabaseSync(process.env.DATABASE_PATH,{readOnly:true});const s=d.prepare(\"SELECT value FROM live_monitor_state WHERE key='collector_scope'\").get();const k=s&&s.value==='bid_only'?'bid_collector_last_attempt_at':'last_successful_poll_at';const r=d.prepare('SELECT value FROM live_monitor_state WHERE key=?').get(k);d.close();const a=Date.now()-Date.parse(r&&r.value);process.exit(Number.isFinite(a)&&a>=-60000&&a<=300000?0:1)"
       interval: 30s
       timeout: 10s
       retries: 3
@@ -109,6 +109,8 @@ services:
       DASHBOARD_PASSWORD: ${DASHBOARD_PASSWORD:?Set DASHBOARD_PASSWORD in aws/lightsail-sqlite/.env}
       INBOUND_EMAIL_DOMAIN: ${INBOUND_EMAIL_DOMAIN:-track.opendata.support}
       INBOUND_EMAIL_WEBHOOK_SECRET: ${INBOUND_EMAIL_WEBHOOK_SECRET:-}
+      EMAIL_METRICS_BACKGROUND_ENABLED: ${EMAIL_METRICS_BACKGROUND_ENABLED:-1}
+      EMAIL_METRICS_WORKER_TIMEOUT_MS: ${EMAIL_METRICS_WORKER_TIMEOUT_MS:-300000}
     volumes:
       - *data-volume
     expose:

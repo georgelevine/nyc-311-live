@@ -584,7 +584,8 @@ function loadResponseMetrics(
   earlySubscriptionSeconds,
   minimumGroupSample,
   maxGroups,
-  dataQuality
+  dataQuality,
+  bidOnly = false
 ) {
   const empty = {
     definitions: {
@@ -628,6 +629,7 @@ function loadResponseMetrics(
         ON live.srnumber=email.reconciled_srnumber
       ${portalJoinSql(hasPortalRequests)}
       WHERE ${usableEmailWhere()}
+        ${bidOnly ? `AND ${activeBidMembershipWhere('email.reconciled_srnumber')}` : ''}
         AND LOWER(TRIM(COALESCE(email.event_kind,''))) IN ('updated','closed')
         AND jobs.state='subscribed'
     ),
@@ -821,7 +823,8 @@ function computeSqliteEmailMetrics(database, {
     earlySeconds,
     minimumSample,
     groupLimit,
-    result.data_quality
+    result.data_quality,
+    bidOnly
   );
   return result;
 }

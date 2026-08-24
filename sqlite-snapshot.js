@@ -507,12 +507,18 @@ function validateArchiveContract(database, tables) {
 
   const state = database.prepare(`
     SELECT key, value FROM live_monitor_state
-    WHERE key IN ('live_frontier', 'last_successful_poll_at')
+    WHERE key IN ('live_frontier', 'last_successful_poll_at', 'collector_scope')
   `).all();
   const stateByKey = new Map(state.map(row => [row.key, row.value]));
-  const frontier = Number(stateByKey.get('live_frontier'));
+  const frontierValue = stateByKey.get('live_frontier');
+  const parsedFrontier = Number(frontierValue);
+  const frontier = Number.isInteger(parsedFrontier) && parsedFrontier >= 0
+    ? parsedFrontier
+    : null;
   const lastPoll = stateByKey.get('last_successful_poll_at');
-  if (!Number.isInteger(frontier) || frontier < 0) {
+  const collectorScope = String(stateByKey.get('collector_scope') || 'citywide')
+    .trim().toLowerCase();
+  if (collectorScope !== 'bid_only' && frontier == null) {
     throw new Error('Snapshot does not contain a valid live frontier');
   }
   if (!lastPoll || !Number.isFinite(Date.parse(lastPoll))) {
@@ -538,13 +544,22 @@ function validateArchiveContract(database, tables) {
       (SELECT COUNT(*) FROM portal_requests WHERE json_valid(fields_json) = 0) AS invalid_detail_json
   `).get();
   if (!Number(counts.live_requests)) throw new Error('Snapshot contains no captured requests');
-  if (Number(counts.max_live_suffix) !== frontier) {
+  const latestCapturedSuffix = Number(counts.max_live_suffix);
+  if (collectorScope !== 'bid_only' && latestCapturedSuffix !== frontier) {
     throw new Error(`Snapshot frontier ${frontier} does not match latest captured suffix ${counts.max_live_suffix}`);
+  }
+  if (collectorScope === 'bid_only' && frontier != null && latestCapturedSuffix < frontier) {
+    throw new Error(
+      `Snapshot latest captured suffix ${counts.max_live_suffix} is behind retained citywide frontier ${frontier}`
+    );
   }
   const parityFailures = [
     'missing_detail_queue',
     'missing_followup_queue',
-    'missing_found_ledger',
+    // BID-only requests are admitted by exact polygon membership and do not
+    // participate in the legacy citywide SR-number ledger. Requiring a ledger
+    // row for them made every BID-only backup fail after the scope cutover.
+    ...(collectorScope === 'bid_only' ? [] : ['missing_found_ledger']),
     'partial_coordinates',
     'invalid_live_json',
     'invalid_detail_json'
@@ -554,6 +569,8 @@ function validateArchiveContract(database, tables) {
   }
   return {
     frontier,
+    latest_captured_suffix: latestCapturedSuffix,
+    collector_scope: collectorScope,
     last_successful_poll_at: lastPoll,
     live_requests: Number(counts.live_requests)
   };

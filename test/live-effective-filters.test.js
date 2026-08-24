@@ -131,6 +131,7 @@ function addRequest({
   liveSubmittedAt,
   liveStatus = 'In Progress',
   detailProblem,
+  detailProblemDetails = null,
   detailAddress,
   detailDateReported,
   detailStatus = 'In Progress',
@@ -162,7 +163,7 @@ function addRequest({
     portalId,
     detailStatus,
     detailProblem,
-    null,
+    detailProblemDetails,
     null,
     detailAddress,
     null,
@@ -205,6 +206,7 @@ const detailOnlySr = addRequest({
   liveAddress: null,
   liveSubmittedAt: '2026-07-29T12:01:00.000Z',
   detailProblem: 'Hydrant Mystery',
+  detailProblemDetails: 'Leaking Hydrant',
   detailAddress: '99 HIDDEN PROMENADE, MANHATTAN, NY, 10007',
   detailDateReported: '2026-07-29T12:01:00.000Z'
 });
@@ -284,6 +286,23 @@ test('map and dashboard broad search use detail-only problem and address fallbac
     assert.deepEqual(dashboard.records.map(record => record.srnumber), [detailOnlySr], query);
     assert.equal(dashboard.page.matching_total, 1, query);
   }
+});
+
+test('observed request types and problem details drive exact map and feed filters', async () => {
+  const catalog = await payload('/api/request-categories');
+  const category = catalog.categories.find(item => item.name === 'Hydrant Mystery');
+  assert.ok(category);
+  assert.equal(category.count, 1);
+  assert.deepEqual(category.subtypes, [{ name: 'Leaking Hydrant', count: 1 }]);
+
+  const filters = '&request_type=Hydrant%20Mystery&request_subtype=Leaking%20Hydrant';
+  const [map, dashboard] = await Promise.all([
+    payload(`/api/live-map?paginate=1&limit=20&include_totals=1${filters}`),
+    payload(`/api/live-dashboard?compact=1&limit=20${filters}`)
+  ]);
+  assert.deepEqual(map.records.map(record => record.srnumber), [detailOnlySr]);
+  assert.equal(map.records[0].problem_details, 'Leaking Hydrant');
+  assert.deepEqual(dashboard.records.map(record => record.srnumber), [detailOnlySr]);
 });
 
 test('map and dashboard status filters use lifecycle-projected closure state', async () => {

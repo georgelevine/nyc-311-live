@@ -158,6 +158,20 @@ function activeCollectorScope(database) {
   return scope && scope.value === 'citywide' ? 'citywide' : DEFAULT_COLLECTOR_SCOPE;
 }
 
+function activeBidQueueWhere(database, srnumberSql) {
+  // Only enforce the join after BID-only scope has been durably recorded.
+  // Legacy/test databases without scope state retain their bounded queue read.
+  const scope = readState(database, 'collector_scope');
+  if (!scope || scope.value !== 'bid_only') return '';
+  return `AND EXISTS (
+    SELECT 1
+    FROM live_request_bid_memberships AS membership
+    JOIN business_improvement_district_boundary_versions AS boundary
+      ON boundary.version=membership.boundary_version AND boundary.active=1
+    WHERE membership.srnumber=${srnumberSql}
+  )`;
+}
+
 function readQueueState(database, {
   table,
   stateColumn,
@@ -195,16 +209,23 @@ function unavailableComponent(reason = 'database_unavailable') {
 function mapDiscoveryComponent(database, nowMs, thresholds) {
   const lastPollRow = readState(database, 'last_successful_poll_at');
   const collectorScope = activeCollectorScope(database);
+  const lastAttemptRow = collectorScope === 'bid_only'
+    ? readState(database, 'bid_collector_last_attempt_at')
+    : null;
   const intervalRow = readState(
     database,
     collectorScope === 'bid_only' ? 'bid_poll_interval_seconds' : 'poll_interval_seconds'
   );
   const lastPollAt = isoTimestamp(lastPollRow && lastPollRow.value);
+  const lastAttemptAt = isoTimestamp(lastAttemptRow && lastAttemptRow.value);
+  const activityAt = collectorScope === 'bid_only'
+    ? lastAttemptAt || lastPollAt
+    : lastPollAt;
   const pollIntervalSeconds = Math.max(
     5,
     safeInteger(intervalRow && intervalRow.value, collectorScope === 'bid_only' ? 60 : 15)
   );
-  const pollAgeSeconds = ageSeconds(lastPollAt, nowMs);
+  const pollAgeSeconds = ageSeconds(activityAt, nowMs);
   const healthyWindow = Math.max(
     thresholds.collectorHealthyFloorSeconds,
     pollIntervalSeconds * 4
@@ -221,29 +242,31 @@ function mapDiscoveryComponent(database, nowMs, thresholds) {
     const plan = readState(database, 'bid_query_plan_hash');
     if (plan && plan.value) {
       const configuredZones = readState(database, 'bid_query_zone_count');
-      const failed = database.prepare(`
-        SELECT zone_id FROM bid_collector_zone_state
-        WHERE plan_hash=? AND last_error IS NOT NULL LIMIT 1
+      const zoneCounts = database.prepare(`
+        SELECT
+          SUM(CASE WHEN last_error IS NOT NULL THEN 1 ELSE 0 END) AS failed,
+          SUM(CASE WHEN saturation_count>0 THEN 1 ELSE 0 END) AS saturated
+        FROM bid_collector_zone_state
+        WHERE plan_hash=?
       `).get(plan.value);
-      const saturated = database.prepare(`
-        SELECT zone_id FROM bid_collector_zone_state
-        WHERE plan_hash=? AND saturation_count>0 LIMIT 1
-      `).get(plan.value);
+      const catchingUp = readState(database, 'bid_collector_catching_up_zones');
       bidZoneHealth = {
         plan_hash: plan.value,
         zone_count: safeInteger(configuredZones && configuredZones.value),
-        failed_zones: failed ? 1 : 0,
-        saturated_zones: saturated ? 1 : 0
+        failed_zones: safeInteger(zoneCounts && zoneCounts.failed),
+        saturated_zones: safeInteger(zoneCounts && zoneCounts.saturated),
+        catching_up_zones: safeInteger(catchingUp && catchingUp.value)
       };
     }
   }
 
-  if (!lastPollRow || !lastPollAt) {
+  if (!activityAt) {
     return {
       status: 'attention',
       reason: bidStartupFailed ? 'bid_boundary_startup_failed' : 'poll_missing',
       available: true,
       last_successful_poll_at: null,
+      last_attempt_at: lastAttemptAt,
       poll_age_seconds: null,
       poll_interval_seconds: pollIntervalSeconds,
       collector_scope: collectorScope,
@@ -256,6 +279,7 @@ function mapDiscoveryComponent(database, nowMs, thresholds) {
       reason: bidStartupFailed ? 'bid_boundary_startup_failed' : 'poll_timestamp_invalid',
       available: true,
       last_successful_poll_at: lastPollAt,
+      last_attempt_at: lastAttemptAt,
       poll_age_seconds: null,
       poll_interval_seconds: pollIntervalSeconds,
       collector_scope: collectorScope,
@@ -264,19 +288,24 @@ function mapDiscoveryComponent(database, nowMs, thresholds) {
   }
   const failedBidZones = bidStartupFailed
     || (bidZoneHealth && bidZoneHealth.failed_zones > 0);
+  const catchingUpBidZones = !failedBidZones
+    && bidZoneHealth && bidZoneHealth.catching_up_zones > 0;
   return {
     status: failedBidZones
       ? 'attention'
+      : catchingUpBidZones ? 'delayed'
       : pollAgeSeconds <= healthyWindow
       ? 'healthy'
       : pollAgeSeconds <= attentionWindow ? 'delayed' : 'attention',
     reason: failedBidZones
       ? bidStartupFailed ? 'bid_boundary_startup_failed' : 'bid_zone_poll_failed'
+      : catchingUpBidZones ? 'bid_recovery_in_progress'
       : pollAgeSeconds <= healthyWindow
       ? 'poll_fresh'
       : pollAgeSeconds <= attentionWindow ? 'poll_delayed' : 'poll_stale',
     available: true,
     last_successful_poll_at: lastPollAt,
+    last_attempt_at: lastAttemptAt,
     poll_age_seconds: pollAgeSeconds,
     poll_interval_seconds: pollIntervalSeconds,
     collector_scope: collectorScope,
@@ -285,12 +314,14 @@ function mapDiscoveryComponent(database, nowMs, thresholds) {
 }
 
 function detailsComponent(database, nowMs, thresholds) {
+  const bidWhere = activeBidQueueWhere(database, 'live_detail_queue.srnumber');
   return queueComponent(['working', 'pending', 'retry'].map(state =>
     readQueueState(database, {
       table: 'live_detail_queue',
       stateColumn: 'status',
       state,
-      dueColumn: 'next_attempt_at'
+      dueColumn: 'next_attempt_at',
+      whereSql: bidWhere
     })
   ), nowMs, thresholds, {
     processingState: 'working',
@@ -373,11 +404,13 @@ function subscriptionsComponent(database, nowMs, thresholds) {
 }
 
 function closureVerificationComponent(database, nowMs, thresholds) {
+  const bidWhere = activeBidQueueWhere(database, 'request_followup_queue.srnumber');
   const row = readQueueState(database, {
     table: 'request_followup_queue',
     stateColumn: 'state',
     state: 'closing',
-    dueColumn: 'next_check_at'
+    dueColumn: 'next_check_at',
+    whereSql: bidWhere
   });
   return queueComponent([row], nowMs, thresholds, {
     processingState: null,

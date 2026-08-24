@@ -93,6 +93,13 @@ if [[ ! "${container_database_path}" =~ ^/data/[A-Za-z0-9][A-Za-z0-9._-]*\.sqlit
   exit 1
 fi
 database_host_path="/var/lib/nyc-311-live/${container_database_path#/data/}"
+if [[ ! -f "${database_host_path}" || -L "${database_host_path}" ]]; then
+  echo "The configured SQLite database is missing or is not a regular file." >&2
+  exit 1
+fi
+collector_activity_key="$(sqlite3 "${database_host_path}" \
+  "SELECT CASE value WHEN 'bid_only' THEN 'bid_collector_last_attempt_at' ELSE 'last_successful_poll_at' END FROM live_monitor_state WHERE key='collector_scope';")"
+collector_activity_key="${collector_activity_key:-last_successful_poll_at}"
 if [[ ! -f "${archive}" || -L "${archive}" ]]; then
   echo "The fixed release inbox does not contain ${release_sha}." >&2
   exit 1
@@ -237,7 +244,7 @@ inbound_email_fingerprint_before="$(container_fingerprint "${inbound_email_befor
 baseline_poll=""
 if [[ "${deployment_scope}" == "service" ]]; then
   baseline_poll="$(sqlite3 "${database_host_path}" \
-    "SELECT value FROM live_monitor_state WHERE key='last_successful_poll_at';")"
+    "SELECT value FROM live_monitor_state WHERE key='${collector_activity_key}';")"
 fi
 
 if [[ "${deployment_scope}" != "assets" ]]; then
@@ -310,7 +317,7 @@ rollback() {
     rollback_poll_before=""
     if [[ "${deployment_scope}" == "service" && -f "${database_host_path}" ]]; then
       rollback_poll_before="$(sqlite3 "${database_host_path}" \
-        "SELECT value FROM live_monitor_state WHERE key='last_successful_poll_at';" 2>/dev/null || true)"
+        "SELECT value FROM live_monitor_state WHERE key='${collector_activity_key}';" 2>/dev/null || true)"
     fi
     if [[ "${deployment_scope}" == "service" ]]; then
       rollback_services=(web collector proxy)
@@ -332,7 +339,7 @@ rollback() {
     fi
     if [[ ${rollback_failures} -eq 0 ]]; then
       rollback_runtime_ready=0
-      # The first BID-only poll can include bounded recovery for all 12 query
+      # The first BID-only poll can include bounded recovery for every query
       # zones. Give a restored compatible collector the same ten-minute gate
       # as a forward service activation.
       for _rollback_attempt in $(seq 1 300); do
@@ -349,7 +356,7 @@ rollback() {
             continue
           fi
           rollback_poll="$(sqlite3 "${database_host_path}" \
-            "SELECT value FROM live_monitor_state WHERE key='last_successful_poll_at';" 2>/dev/null || true)"
+            "SELECT value FROM live_monitor_state WHERE key='${collector_activity_key}';" 2>/dev/null || true)"
           if [[ -z "${rollback_poll}" || "${rollback_poll}" == "${rollback_poll_before}" ]]; then
             sleep 2
             continue
@@ -515,18 +522,21 @@ if [[ "${deployment_scope}" == "service" ]]; then
   # worst case of the Portal client's retries and timeouts.
   for _attempt in $(seq 1 300); do
     current_poll="$(sqlite3 "${database_host_path}" \
-      "SELECT value FROM live_monitor_state WHERE key='last_successful_poll_at';")"
+      "SELECT value FROM live_monitor_state WHERE key='${collector_activity_key}';")"
     current_poll_epoch="$(date --date "${current_poll}" +%s 2>/dev/null || true)"
     if [[ -n "${current_poll}" && "${current_poll}" != "${baseline_poll}"
         && -n "${current_poll_epoch}"
         && "${current_poll_epoch}" -ge "${collector_started_epoch}" ]]; then
-      fresh_poll="${current_poll}"
-      break
+      if curl --fail --silent --connect-timeout 3 --max-time 5 \
+          http://127.0.0.1:10000/api/health/collector >/dev/null; then
+        fresh_poll="${current_poll}"
+        break
+      fi
     fi
     sleep 2
   done
   if [[ -z "${fresh_poll}" ]]; then
-    echo "The updated collector did not complete a fresh Portal poll." >&2
+    echo "The updated collector did not record fresh Portal collection activity." >&2
     false
   fi
   recorded_collector_scope="$(sqlite3 "${database_host_path}" \
