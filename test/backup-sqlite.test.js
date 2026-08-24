@@ -18,7 +18,7 @@ const { createBackup, finalizeDatabase, openDatabase } = require('../sqlite-fina
 const { verifySnapshot } = require('../sqlite-snapshot');
 const { createArchiveFixture } = require('../test-support/archive-fixture');
 
-test('creates verified VACUUM snapshots and prunes only the managed oldest pair', async t => {
+test('creates verified online snapshots and prunes only the managed oldest pair', async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-routine-backup-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const unfinalizedSource = createArchiveFixture(directory, 'source.sqlite');
@@ -71,7 +71,7 @@ test('creates verified VACUUM snapshots and prunes only the managed oldest pair'
   assert.equal(fs.readdirSync(backups).some(name => name.endsWith('.partial')), false);
 });
 
-test('legacy page-rate input is accepted but explicitly ignored by routine backups', async t => {
+test('page-rate controls the online backup batch size', async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-routine-rate-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const unfinalizedSource = createArchiveFixture(directory, 'source.sqlite');
@@ -86,10 +86,8 @@ test('legacy page-rate input is accepted but explicitly ignored by routine backu
     now: new Date('2026-07-24T04:15:00.000Z')
   });
 
-  assert.equal(Object.hasOwn(result, 'backup_page_rate'), false);
-  assert.deepEqual(result.deprecated_options, [
-    'page_rate=7 ignored for vacuum_into'
-  ]);
+  assert.equal(result.backup_page_rate, 7);
+  assert.equal(Object.hasOwn(result, 'deprecated_options'), false);
   assert.equal((await verifySnapshot({
     databasePath: result.path,
     manifestPath: result.manifest_path
@@ -179,7 +177,7 @@ test('capacity preflight sizes the snapshot from logical pages and reserves WAL 
   assert.equal(insufficient.ok, false);
 });
 
-test('routine VACUUM snapshots include committed WAL pages while the writer remains open', async t => {
+test('routine online snapshots include committed WAL pages while the writer remains open', async t => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-routine-wal-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
   const unfinalizedSource = createArchiveFixture(directory, 'source.sqlite');
@@ -242,7 +240,7 @@ test('routine backup performs each expensive new-backup operation once', async t
   });
 
   assert.deepEqual(observed, [
-    'source_vacuum_snapshot',
+    'source_online_copy',
     'backup_integrity_check',
     'backup_foreign_key_check',
     'backup_table_manifest',
@@ -251,12 +249,12 @@ test('routine backup performs each expensive new-backup operation once', async t
   ]);
   assert.deepEqual(result.io_operations, observed);
   assert.deepEqual(result.full_file_passes, [
-    'source_vacuum_snapshot',
+    'source_online_copy',
     'backup_integrity_check',
     'backup_sha256'
   ]);
   assert.deepEqual(result.io_operation_counts, {
-    source_vacuum_snapshot: 1,
+    source_online_copy: 1,
     backup_integrity_check: 1,
     backup_foreign_key_check: 1,
     backup_table_manifest: 1,
@@ -265,8 +263,8 @@ test('routine backup performs each expensive new-backup operation once', async t
   });
   assert.equal(result.io_operations.includes('backup_quick_check'), false);
   assert.equal(result.manifest.health.quick_check, null);
-  assert.equal(result.copy_strategy, 'vacuum_into');
-  assert.equal(result.manifest.copy_strategy, 'vacuum_into');
+  assert.equal(result.copy_strategy, 'online_backup');
+  assert.equal(result.manifest.copy_strategy, 'online_backup');
   assert.equal(result.capacity_preflight.ok, true);
   assert.ok(result.capacity_preflight.source_logical_bytes > 0);
   assert.ok(
@@ -451,7 +449,7 @@ test('archive-contract failure removes the new partial backup safely', async t =
   assert.deepEqual(fs.readdirSync(backups), []);
 });
 
-test('backup CLI keeps deprecated page-rate validation and parses exclusive mode', () => {
+test('backup CLI validates page-rate and parses exclusive mode', () => {
   assert.equal(parseArguments(['--page-rate', '32']).pageRate, 32);
   assert.equal(parseArguments(['--exclusive']).exclusive, true);
   assert.throws(

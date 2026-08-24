@@ -1735,6 +1735,25 @@ app.get('/api/business-improvement-districts', (req, res) => {
   }
 });
 
+function categoryRows(rows) {
+  const categoriesByName = new Map();
+  for (const row of rows) {
+    const name = String(row.request_type || '').trim();
+    if (!name) continue;
+    const key = name.toLocaleLowerCase('en-US');
+    let category = categoriesByName.get(key);
+    if (!category) {
+      category = { name, count: 0, subtypes: [] };
+      categoriesByName.set(key, category);
+    }
+    const count = Number(row.request_count || 0);
+    category.count += count;
+    const subtype = String(row.request_subtype || '').trim();
+    if (subtype) category.subtypes.push({ name: subtype, count });
+  }
+  return [...categoriesByName.values()];
+}
+
 // The Portal owns this vocabulary and can introduce new combinations. Build
 // the filter catalog from observed records instead of hard-coding categories.
 app.get('/api/request-categories', (req, res) => {
@@ -1750,6 +1769,53 @@ app.get('/api/request-categories', (req, res) => {
       return res.json({ categories: [] });
     }
     const scope = requestGeographyScope(req, database);
+    const hasCategoryCache = tableExists(database, 'live_request_category_cache');
+    if (hasCategoryCache) {
+      const categoryAlias = 'category_cache';
+      let source;
+      const predicates = [`${categoryAlias}.request_type IS NOT NULL`];
+      if (scope.bid) {
+        source = `live_request_bid_memberships AS category_scope_bid
+          JOIN live_request_category_cache AS ${categoryAlias}
+            ON ${categoryAlias}.srnumber=category_scope_bid.srnumber`;
+        predicates.push(
+          'category_scope_bid.boundary_version=@bid_boundary_version',
+          'category_scope_bid.bid_id=@bid_id'
+        );
+      } else if (scope.collectorBidOnly) {
+        source = `(SELECT DISTINCT membership.srnumber
+          FROM live_request_bid_memberships AS membership
+          JOIN business_improvement_district_boundary_versions AS boundary
+            ON boundary.version=membership.boundary_version AND boundary.active=1
+        ) AS category_scope_bid
+          JOIN live_request_category_cache AS ${categoryAlias}
+            ON ${categoryAlias}.srnumber=category_scope_bid.srnumber`;
+      } else {
+        source = `live_request_category_cache AS ${categoryAlias}`;
+      }
+      if (scope.precinct) {
+        predicates.push(
+          `${categoryAlias}.police_precinct=@precinct`,
+          `${categoryAlias}.police_precinct_boundary_version=@precinct_boundary_version`
+        );
+      }
+      const rows = database.prepare(`
+        SELECT ${categoryAlias}.request_type,
+               ${categoryAlias}.request_subtype,
+               COUNT(*) AS request_count
+        FROM ${source}
+        ${sqlWhere(predicates)}
+        GROUP BY ${categoryAlias}.request_type COLLATE NOCASE,
+                 ${categoryAlias}.request_subtype COLLATE NOCASE
+        ORDER BY ${categoryAlias}.request_type COLLATE NOCASE,
+                 request_count DESC,
+                 ${categoryAlias}.request_subtype COLLATE NOCASE
+      `).all(scopeParameters(scope));
+      return res.json({
+        categories: categoryRows(rows),
+        generated_at: new Date().toISOString()
+      });
+    }
     const hasDetails = tableExists(database, 'portal_requests');
     const bidAlias = 'category_scope_bid';
     const source = scopedLiveRequestSource('live', scope, bidAlias);
@@ -1773,23 +1839,8 @@ app.get('/api/request-categories', (req, res) => {
       ORDER BY request_type COLLATE NOCASE,request_count DESC,
                request_subtype COLLATE NOCASE
     `).all(scopeParameters(scope));
-    const categoriesByName = new Map();
-    for (const row of rows) {
-      const name = String(row.request_type || '').trim();
-      if (!name) continue;
-      const key = name.toLocaleLowerCase('en-US');
-      let category = categoriesByName.get(key);
-      if (!category) {
-        category = { name, count: 0, subtypes: [] };
-        categoriesByName.set(key, category);
-      }
-      const count = Number(row.request_count || 0);
-      category.count += count;
-      const subtype = String(row.request_subtype || '').trim();
-      if (subtype) category.subtypes.push({ name: subtype, count });
-    }
     return res.json({
-      categories: [...categoriesByName.values()],
+      categories: categoryRows(rows),
       generated_at: new Date().toISOString()
     });
   } catch (error) {

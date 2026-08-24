@@ -337,6 +337,256 @@ const MIGRATIONS = Object.freeze([
 
     CREATE INDEX IF NOT EXISTS bid_collector_zone_state_health_idx
       ON bid_collector_zone_state(boundary_version,plan_hash,last_successful_poll_at);`
+  }),
+  Object.freeze({
+    version: 10,
+    name: 'add_live_request_category_cache',
+    sql: `CREATE TABLE IF NOT EXISTS portal_requests (
+      srnumber TEXT PRIMARY KEY,
+      suffix INTEGER NOT NULL UNIQUE,
+      portal_id TEXT UNIQUE,
+      status TEXT,
+      problem TEXT,
+      problem_details TEXT,
+      additional_details TEXT,
+      address TEXT,
+      next_update TEXT,
+      date_reported TEXT,
+      updated_on TEXT,
+      date_closed TEXT,
+      fields_json TEXT NOT NULL,
+      portal_url TEXT NOT NULL,
+      archived_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS live_request_category_cache (
+      srnumber TEXT PRIMARY KEY,
+      request_type TEXT COLLATE NOCASE,
+      request_subtype TEXT COLLATE NOCASE,
+      police_precinct INTEGER,
+      police_precinct_boundary_version TEXT,
+      refreshed_at TEXT NOT NULL,
+      FOREIGN KEY(srnumber)
+        REFERENCES live_portal_requests(srnumber) ON UPDATE CASCADE ON DELETE CASCADE
+    );
+
+    CREATE INDEX IF NOT EXISTS live_request_category_cache_type_idx
+      ON live_request_category_cache(request_type,request_subtype,srnumber);
+    CREATE INDEX IF NOT EXISTS live_request_category_cache_precinct_idx
+      ON live_request_category_cache(
+        police_precinct_boundary_version,police_precinct,
+        request_type,request_subtype,srnumber
+      );
+
+    INSERT OR REPLACE INTO live_request_category_cache(
+      srnumber,request_type,request_subtype,police_precinct,
+      police_precinct_boundary_version,refreshed_at
+    )
+    SELECT
+      live.srnumber,
+      COALESCE(NULLIF(TRIM(live.problem),''),NULLIF(TRIM(details.problem),'')),
+      NULLIF(TRIM(details.problem_details),''),
+      live.police_precinct,
+      live.police_precinct_boundary_version,
+      COALESCE(details.archived_at,live.last_seen_at,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    FROM live_portal_requests AS live
+    LEFT JOIN portal_requests AS details ON details.srnumber=live.srnumber
+    WHERE COALESCE(
+      NULLIF(TRIM(live.problem),''),
+      NULLIF(TRIM(details.problem),'')
+    ) IS NOT NULL;
+
+    CREATE TRIGGER IF NOT EXISTS live_request_category_cache_live_insert
+    AFTER INSERT ON live_portal_requests
+    BEGIN
+      UPDATE live_request_category_cache
+      SET request_type=COALESCE(
+            NULLIF(TRIM(NEW.problem),''),
+            (SELECT NULLIF(TRIM(problem),'') FROM portal_requests WHERE srnumber=NEW.srnumber)
+          ),
+          request_subtype=(
+            SELECT NULLIF(TRIM(problem_details),'')
+            FROM portal_requests WHERE srnumber=NEW.srnumber
+          ),
+          police_precinct=NEW.police_precinct,
+          police_precinct_boundary_version=NEW.police_precinct_boundary_version,
+          refreshed_at=COALESCE(NEW.last_seen_at,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      WHERE srnumber=NEW.srnumber;
+      INSERT INTO live_request_category_cache(
+        srnumber,request_type,request_subtype,police_precinct,
+        police_precinct_boundary_version,refreshed_at
+      ) SELECT
+        NEW.srnumber,
+        COALESCE(
+          NULLIF(TRIM(NEW.problem),''),
+          (SELECT NULLIF(TRIM(problem),'') FROM portal_requests WHERE srnumber=NEW.srnumber)
+        ),
+        (SELECT NULLIF(TRIM(problem_details),'') FROM portal_requests WHERE srnumber=NEW.srnumber),
+        NEW.police_precinct,
+        NEW.police_precinct_boundary_version,
+        COALESCE(NEW.last_seen_at,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      WHERE NOT EXISTS (
+        SELECT 1 FROM live_request_category_cache WHERE srnumber=NEW.srnumber
+      );
+      DELETE FROM live_request_category_cache
+      WHERE srnumber=NEW.srnumber AND request_type IS NULL;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS live_request_category_cache_live_update
+    AFTER UPDATE OF problem,police_precinct,police_precinct_boundary_version
+      ON live_portal_requests
+    BEGIN
+      UPDATE live_request_category_cache
+      SET request_type=COALESCE(
+            NULLIF(TRIM(NEW.problem),''),
+            (SELECT NULLIF(TRIM(problem),'') FROM portal_requests WHERE srnumber=NEW.srnumber)
+          ),
+          request_subtype=(
+            SELECT NULLIF(TRIM(problem_details),'')
+            FROM portal_requests WHERE srnumber=NEW.srnumber
+          ),
+          police_precinct=NEW.police_precinct,
+          police_precinct_boundary_version=NEW.police_precinct_boundary_version,
+          refreshed_at=COALESCE(NEW.last_seen_at,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      WHERE srnumber=NEW.srnumber;
+      INSERT INTO live_request_category_cache(
+        srnumber,request_type,request_subtype,police_precinct,
+        police_precinct_boundary_version,refreshed_at
+      ) SELECT
+        NEW.srnumber,
+        COALESCE(
+          NULLIF(TRIM(NEW.problem),''),
+          (SELECT NULLIF(TRIM(problem),'') FROM portal_requests WHERE srnumber=NEW.srnumber)
+        ),
+        (SELECT NULLIF(TRIM(problem_details),'') FROM portal_requests WHERE srnumber=NEW.srnumber),
+        NEW.police_precinct,
+        NEW.police_precinct_boundary_version,
+        COALESCE(NEW.last_seen_at,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      WHERE NOT EXISTS (
+        SELECT 1 FROM live_request_category_cache WHERE srnumber=NEW.srnumber
+      );
+      DELETE FROM live_request_category_cache
+      WHERE srnumber=NEW.srnumber AND request_type IS NULL;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS live_request_category_cache_detail_insert
+    AFTER INSERT ON portal_requests
+    BEGIN
+      UPDATE live_request_category_cache
+      SET request_type=COALESCE(
+            (SELECT NULLIF(TRIM(problem),'')
+             FROM live_portal_requests WHERE srnumber=NEW.srnumber),
+            NULLIF(TRIM(NEW.problem),'')
+          ),
+          request_subtype=NULLIF(TRIM(NEW.problem_details),''),
+          police_precinct=(
+            SELECT police_precinct FROM live_portal_requests WHERE srnumber=NEW.srnumber
+          ),
+          police_precinct_boundary_version=(
+            SELECT police_precinct_boundary_version
+            FROM live_portal_requests WHERE srnumber=NEW.srnumber
+          ),
+          refreshed_at=COALESCE(NEW.archived_at,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      WHERE srnumber=NEW.srnumber;
+      INSERT INTO live_request_category_cache(
+        srnumber,request_type,request_subtype,police_precinct,
+        police_precinct_boundary_version,refreshed_at
+      )
+      SELECT
+        live.srnumber,
+        COALESCE(NULLIF(TRIM(live.problem),''),NULLIF(TRIM(NEW.problem),'')),
+        NULLIF(TRIM(NEW.problem_details),''),
+        live.police_precinct,
+        live.police_precinct_boundary_version,
+        COALESCE(NEW.archived_at,live.last_seen_at,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      FROM live_portal_requests AS live
+      WHERE live.srnumber=NEW.srnumber
+        AND NOT EXISTS (
+          SELECT 1 FROM live_request_category_cache WHERE srnumber=NEW.srnumber
+        );
+      DELETE FROM live_request_category_cache
+      WHERE srnumber=NEW.srnumber AND request_type IS NULL;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS live_request_category_cache_detail_update
+    AFTER UPDATE OF problem,problem_details ON portal_requests
+    BEGIN
+      UPDATE live_request_category_cache
+      SET request_type=COALESCE(
+            (SELECT NULLIF(TRIM(problem),'')
+             FROM live_portal_requests WHERE srnumber=NEW.srnumber),
+            NULLIF(TRIM(NEW.problem),'')
+          ),
+          request_subtype=NULLIF(TRIM(NEW.problem_details),''),
+          police_precinct=(
+            SELECT police_precinct FROM live_portal_requests WHERE srnumber=NEW.srnumber
+          ),
+          police_precinct_boundary_version=(
+            SELECT police_precinct_boundary_version
+            FROM live_portal_requests WHERE srnumber=NEW.srnumber
+          ),
+          refreshed_at=COALESCE(NEW.archived_at,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      WHERE srnumber=NEW.srnumber;
+      INSERT INTO live_request_category_cache(
+        srnumber,request_type,request_subtype,police_precinct,
+        police_precinct_boundary_version,refreshed_at
+      )
+      SELECT
+        live.srnumber,
+        COALESCE(NULLIF(TRIM(live.problem),''),NULLIF(TRIM(NEW.problem),'')),
+        NULLIF(TRIM(NEW.problem_details),''),
+        live.police_precinct,
+        live.police_precinct_boundary_version,
+        COALESCE(NEW.archived_at,live.last_seen_at,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      FROM live_portal_requests AS live
+      WHERE live.srnumber=NEW.srnumber
+        AND NOT EXISTS (
+          SELECT 1 FROM live_request_category_cache WHERE srnumber=NEW.srnumber
+        );
+      DELETE FROM live_request_category_cache
+      WHERE srnumber=NEW.srnumber AND request_type IS NULL;
+    END;
+
+    CREATE TRIGGER IF NOT EXISTS live_request_category_cache_detail_delete
+    AFTER DELETE ON portal_requests
+    BEGIN
+      UPDATE live_request_category_cache
+      SET request_type=(
+            SELECT NULLIF(TRIM(problem),'')
+            FROM live_portal_requests WHERE srnumber=OLD.srnumber
+          ),
+          request_subtype=NULL,
+          police_precinct=(
+            SELECT police_precinct FROM live_portal_requests WHERE srnumber=OLD.srnumber
+          ),
+          police_precinct_boundary_version=(
+            SELECT police_precinct_boundary_version
+            FROM live_portal_requests WHERE srnumber=OLD.srnumber
+          ),
+          refreshed_at=COALESCE(
+            (SELECT last_seen_at FROM live_portal_requests WHERE srnumber=OLD.srnumber),
+            strftime('%Y-%m-%dT%H:%M:%fZ','now')
+          )
+      WHERE srnumber=OLD.srnumber;
+      INSERT INTO live_request_category_cache(
+        srnumber,request_type,request_subtype,police_precinct,
+        police_precinct_boundary_version,refreshed_at
+      )
+      SELECT
+        live.srnumber,
+        NULLIF(TRIM(live.problem),''),
+        NULL,
+        live.police_precinct,
+        live.police_precinct_boundary_version,
+        COALESCE(live.last_seen_at,strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      FROM live_portal_requests AS live
+      WHERE live.srnumber=OLD.srnumber
+        AND NOT EXISTS (
+          SELECT 1 FROM live_request_category_cache WHERE srnumber=OLD.srnumber
+        );
+      DELETE FROM live_request_category_cache
+      WHERE srnumber=OLD.srnumber AND request_type IS NULL;
+    END;`
   })
 ]);
 

@@ -44,6 +44,7 @@ function createDatabase(t) {
       srnumber TEXT PRIMARY KEY,
       suffix INTEGER UNIQUE,
       portal_id TEXT UNIQUE,
+      problem TEXT,
       status TEXT,
       first_seen_at TEXT NOT NULL,
       last_seen_at TEXT NOT NULL
@@ -249,13 +250,16 @@ function signedHeaders(raw, recipient, metadata = signedMetadata(recipient), {
 test('email migrations create durable event, alias, and subscription job tables', t => {
   const { database } = createDatabase(t);
   t.after(() => database.close());
-  assert.equal(database.prepare('PRAGMA user_version').get().user_version, 9);
+  assert.equal(
+    database.prepare('PRAGMA user_version').get().user_version,
+    MIGRATIONS.at(-1).version
+  );
   assert.equal(MIGRATIONS.some(item => item.name === 'add_nyc311_email_ingestion'), true);
   assert.equal(MIGRATIONS.some(
     item => item.name === 'add_nyc311_email_subscription_jobs'
   ), true);
   assert.equal(MIGRATIONS.some(item => item.name === 'add_nyc311_initial_email_jobs'), true);
-  assert.equal(MIGRATIONS.at(-1).name, 'add_bid_collector_zone_state');
+  assert.equal(MIGRATIONS.at(-1).name, 'add_live_request_category_cache');
   const tables = new Set(database.prepare(`
     SELECT name FROM sqlite_master WHERE type='table'
   `).all().map(row => row.name));
@@ -802,14 +806,19 @@ test('does not overwrite a later open observation even when archived detail reta
     now: NOW
   });
 
-  database.exec(`
-    CREATE TABLE portal_requests (
-      srnumber TEXT PRIMARY KEY,status TEXT,date_closed TEXT
-    )
-  `);
   database.prepare(`
-    INSERT INTO portal_requests(srnumber,status,date_closed) VALUES (?,?,?)
-  `).run('311-28327449', 'Closed', '2026-07-23T14:00:10.000Z');
+    INSERT INTO portal_requests(
+      srnumber,suffix,status,date_closed,fields_json,portal_url,archived_at
+    ) VALUES (?,?,?,?,?,?,?)
+  `).run(
+    '311-28327449',
+    28327449,
+    'Closed',
+    '2026-07-23T14:00:10.000Z',
+    '{}',
+    'https://portal.311.nyc.gov/sr-details/?id=portal-one',
+    NOW.toISOString()
+  );
   database.prepare(`
     UPDATE live_portal_requests SET status='In Progress' WHERE srnumber=?
   `).run('311-28327449');

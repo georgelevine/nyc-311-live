@@ -72,7 +72,7 @@ test('rejects a manifest whose digest was changed', async () => {
   );
 });
 
-test('rejects a matching manifest when a required table has the wrong schema', async () => {
+test('refuses to finalize a source whose required table has the wrong schema', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'nyc311-snapshot-schema-'));
   const source = createArchiveFixture(directory);
   const database = new DatabaseSync(source);
@@ -83,11 +83,11 @@ test('rejects a matching manifest when a required table has the wrong schema', a
   `);
   database.close();
   const backup = path.join(directory, 'transfer.sqlite');
-  const finalized = await finalizeDatabase({ databasePath: source, backupPath: backup });
   await assert.rejects(
-    verifySnapshot({ databasePath: backup, manifestPath: finalized.backup.manifest_path }),
-    /missing required archive column/
+    finalizeDatabase({ databasePath: source, backupPath: backup }),
+    /no such column: details\.problem/
   );
+  assert.equal(fs.existsSync(backup), false);
 });
 
 test('rejects a required table whose declared primary key is missing', async () => {

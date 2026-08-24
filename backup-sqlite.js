@@ -21,9 +21,8 @@ const {
 
 const STALE_PARTIAL_AGE_MS = 24 * 60 * 60 * 1000;
 const MINIMUM_BACKUP_FREE_BYTES = 256 * 1024 * 1024;
-// Retained for callers that still pass the former incremental-backup option.
-// Routine VACUUM snapshots are throttled by the backup container's I/O cgroup,
-// not by SQLite page batches.
+// Small online-backup batches release SQLite's source read lock frequently so
+// the collector and dashboard can keep using the live archive during a copy.
 const DEFAULT_BACKUP_PAGE_RATE = 64;
 
 function usage() {
@@ -34,7 +33,7 @@ Options:
   --directory PATH   Backup directory (default BACKUP_DIRECTORY or source/backups)
   --retain COUNT     Number of verified local backups to retain (default 3)
   --exclusive        Confirm an external lock excludes every other backup run
-  --page-rate COUNT  Deprecated compatibility option; ignored by routine backups
+  --page-rate COUNT  SQLite pages copied per online-backup step (default 64)
   --help             Show this help`;
 }
 
@@ -198,7 +197,7 @@ function calculateBackupCapacity({
   if (sourceLogicalBytes < 1) {
     throw new TypeError('sourceLogicalBytes must be positive');
   }
-  // The VACUUM output can be as large as the logical database even when most
+  // The backup output can be as large as the logical database even when most
   // committed pages still live only in the WAL. Keep two additional logical
   // database sizes plus the current WAL size available for writer growth,
   // validation I/O, and an interrupted partial awaiting cleanup.
@@ -474,7 +473,8 @@ async function createRoutineBackup({
       destination,
       now.toISOString(),
       {
-        copyStrategy: 'vacuum_into',
+        copyStrategy: 'online_backup',
+        rate: pageRate || DEFAULT_BACKUP_PAGE_RATE,
         healthCheckOptions: { runQuickCheck: false },
         tableManifestOptions: { includeRowCounts: false },
         onIoPass: observeIo,
@@ -511,10 +511,8 @@ async function createRoutineBackup({
   });
   return {
     ...created,
+    backup_page_rate: pageRate || DEFAULT_BACKUP_PAGE_RATE,
     capacity_preflight: capacityPreflight,
-    deprecated_options: pageRate == null
-      ? []
-      : [`page_rate=${pageRate} ignored for vacuum_into`],
     io_operations: ioOperations,
     io_operation_counts: Object.fromEntries(
       [...new Set(ioOperations)].map(operation => [
@@ -523,7 +521,7 @@ async function createRoutineBackup({
       ])
     ),
     full_file_passes: [
-      'source_vacuum_snapshot',
+      'source_online_copy',
       'backup_integrity_check',
       'backup_sha256'
     ],
@@ -552,12 +550,6 @@ async function main(argv = process.argv.slice(2), env = process.env) {
     pageRate: options.pageRate,
     exclusiveRun: options.exclusive
   });
-  if (options.pageRate != null) {
-    process.stderr.write(
-      'WARNING: --page-rate is deprecated and ignored; routine VACUUM backups '
-      + 'are throttled by the service I/O cgroup.\n'
-    );
-  }
   process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
 }
 

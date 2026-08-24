@@ -82,6 +82,13 @@ function createFixture(t) {
       audited_at TEXT
     );
 
+    CREATE TABLE portal_requests (
+      srnumber TEXT PRIMARY KEY,
+      problem TEXT,
+      problem_details TEXT,
+      archived_at TEXT
+    );
+
     CREATE TABLE number_ledger (
       suffix INTEGER PRIMARY KEY,
       srnumber TEXT NOT NULL UNIQUE,
@@ -585,6 +592,47 @@ test('BID migration tolerates collector-created columns and remains idempotent',
     assert.equal(second.user_version, MIGRATIONS.at(-1).version);
     assert.equal(second.pending.length, 0);
     assert.equal(second.applied.length, MIGRATIONS.length);
+  } finally {
+    database.close();
+  }
+});
+
+test('request category cache is backfilled and follows live and detail changes', t => {
+  const fixture = createFixture(t);
+  const database = new DatabaseSync(fixture.databasePath);
+  try {
+    applyMigrations(database, NOW.toISOString());
+    assert.equal(database.prepare(`
+      SELECT COUNT(*) AS count FROM live_request_category_cache
+    `).get().count, 3);
+
+    database.prepare(`
+      INSERT INTO portal_requests(srnumber,problem,problem_details,archived_at)
+      VALUES (?,?,?,?)
+    `).run(fixture.mapSrnumber, 'Portal Type', 'Blocked Driveway', NOW.toISOString());
+    const inserted = database.prepare(`
+      SELECT request_type,request_subtype
+      FROM live_request_category_cache WHERE srnumber=?
+    `).get(fixture.mapSrnumber);
+    assert.equal(inserted.request_type, 'Illegal Parking');
+    assert.equal(inserted.request_subtype, 'Blocked Driveway');
+
+    database.prepare(`
+      UPDATE live_portal_requests SET problem='' WHERE srnumber=?
+    `).run(fixture.mapSrnumber);
+    assert.equal(database.prepare(`
+      SELECT request_type FROM live_request_category_cache WHERE srnumber=?
+    `).get(fixture.mapSrnumber).request_type, 'Portal Type');
+
+    database.prepare(`
+      UPDATE portal_requests SET problem=?,problem_details=? WHERE srnumber=?
+    `).run('Updated Portal Type', 'Updated Detail', fixture.mapSrnumber);
+    const updated = database.prepare(`
+      SELECT request_type,request_subtype
+      FROM live_request_category_cache WHERE srnumber=?
+    `).get(fixture.mapSrnumber);
+    assert.equal(updated.request_type, 'Updated Portal Type');
+    assert.equal(updated.request_subtype, 'Updated Detail');
   } finally {
     database.close();
   }

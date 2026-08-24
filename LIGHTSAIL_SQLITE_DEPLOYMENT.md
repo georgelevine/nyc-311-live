@@ -71,8 +71,8 @@ stale.
   requests through closure.
 - `web`: serves the live dashboard and API from the same SQLite archive.
 - `proxy`: exposes the web service through Caddy on ports 80 and 443.
-- `backup`: uses one stable SQLite `VACUUM INTO` snapshot, validates the complete archive,
-  records a SHA-256 manifest, and retains three verified local copies.
+- `backup`: uses SQLite's cooperative online-backup API, validates the complete
+  archive, records a SHA-256 manifest, and retains three verified local copies.
 
 The Node services run as UID 10001 with a read-only container filesystem and
 dropped Linux capabilities. An operating-system lock prevents a second collector
@@ -370,16 +370,16 @@ Do not reopen the Mac collector. Preserve its original database unchanged.
 ## Backups, restore, and rollback
 
 The timer runs nightly and keeps three verified local backups. Each run uses
-SQLite `VACUUM INTO` to read one stable snapshot without restarting when the
-live WAL changes, then verifies the new copy with one full
+SQLite's online-backup API in small page batches so live readers and writers can
+continue between copy steps, then verifies the new copy with one full
 `integrity_check`, a foreign-key check, the migration and archive contracts, and
 one SHA-256 pass. `quick_check` is deliberately omitted because
 `integrity_check` is the stronger superset. The command's JSON result lists
 the logical database size, current WAL size, required safety headroom, and
 available space checked before the snapshot begins. The exclusive service lock
 also permits the next run to remove incomplete partials left by an interrupted
-earlier run. The backup container's 1 MiB/s read and write cgroup limits—not
-SQLite page batching—keep this work subordinate to the live services.
+earlier run. SQLite page batching and the backup container's 8 MiB/s read and
+write cgroup limits keep this work subordinate to the live services.
 The result also includes `io_operations`, `io_operation_counts`, and the three
 whole-file operations in `full_file_passes`; every listed new-backup operation
 should have a count of one.
@@ -407,16 +407,14 @@ node verify-sqlite-snapshot.js \
 On the small instance, the backup process runs at idle disk priority and the
 lowest CPU priority inside its container. Because the verified
 Lightsail root partition `/dev/nvme0n1p1` uses the `none` scheduler and therefore
-does not honor `ionice`, Compose also applies cgroup-v2 ceilings of 1 MB/s for
+does not honor `ionice`, Compose also applies cgroup-v2 ceilings of 8 MB/s for
 both reads and writes to its parent block device, `/dev/nvme0n1`, on the backup
 container only. The parent is required because this host's cgroup v2 controller
 rejects limits on the partition itself. SQLite copies 64 pages per step by
 default so foreground collection, email ingestion, and dashboard reads can run
-between short backup bursts. The 1 MB/s ceiling was validated on the production
-instance while a full backup was running: dashboard and map reads remained
-sub-second. Set `SQLITE_BACKUP_PAGE_RATE` in `.env` only after measuring
-production I/O latency; a larger value creates larger bursts but cannot exceed
-the container bandwidth ceiling.
+between short backup bursts. Set `BACKUP_PAGE_RATE` in `.env` only after
+measuring production I/O latency; a larger value creates larger bursts but
+cannot exceed the container bandwidth ceiling.
 
 Before moving this deployment to a different instance or disk layout, verify the
 root filesystem device with `findmnt -no SOURCE,MAJ:MIN /`, find its parent with

@@ -55,10 +55,10 @@ npm run desktop:package
 - `npm run db:verify` — verify the SQLite archive without changing it
 - `npm run db:finalize` — create a verified migration-ready SQLite backup
 - `npm run db:backup` — create a non-mutating verified routine SQLite backup
-  with one stable `VACUUM INTO` snapshot, one integrity pass, one hash pass,
+  with SQLite's cooperative online-backup API, one integrity pass, one hash pass,
   a logical-size/WAL-aware free-space preflight, and manifest-only nightly
-  retention checks for unchanged older backups. Production I/O is limited by
-  the backup container's device bandwidth cgroup.
+  retention checks for unchanged older backups. Small page batches and the
+  backup container's device bandwidth cgroup preserve live dashboard access.
 - `npm run db:verify-snapshot` — verify a transferred snapshot and its manifest
 - `npm run cloud:migrate` — apply the PostgreSQL/PostGIS cloud schema
 - `npm run cloud:import` — import the finalized SQLite archive

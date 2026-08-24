@@ -186,6 +186,8 @@ services:
       - /backups
       - --retain
       - ${BACKUP_RETENTION_COUNT:-3}
+      - --page-rate
+      - ${BACKUP_PAGE_RATE:-64}
       # `flock` above makes it safe for the routine to remove every abandoned
       # partial from an interrupted earlier run before taking a new snapshot.
       - --exclusive
@@ -205,10 +207,10 @@ services:
     blkio_config:
       device_read_bps:
         - path: /dev/nvme0n1
-          rate: 1mb
+          rate: 8mb
       device_write_bps:
         - path: /dev/nvme0n1
-          rate: 1mb
+          rate: 8mb
     network_mode: none
     logging: *default-logging
 
