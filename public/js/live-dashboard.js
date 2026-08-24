@@ -3953,13 +3953,10 @@
     try {
       const requestedFeedKey = currentFeedQueryKey();
       const dataFilters = activeDataFilters();
-      // Keep the first paint on primary-key/index reads only. Matching totals
-      // arrive on the next refresh after useful request cards are already on
-      // screen, avoiding a whole-archive count on initial navigation.
+      // Keep live refreshes on primary-key/index reads only. Matching totals
+      // belong to the heavier analytics paths, not the request stream.
       const firstDashboardPayload = !dashboardPayloadLoaded;
-      const includeTotals = firstDashboardPayload
-        ? 0
-        : Object.keys(dataFilters).length === 0 ? 1 : 0;
+      const includeTotals = 0;
       const queryChanged = requestedFeedKey !== feedQueryKey;
       if (queryChanged) resetFeedPagination();
       const restartFeedHead = feedHeadRestartRequired;
@@ -3971,9 +3968,7 @@
       // filtered head response as authoritative; older pages remain available
       // immediately through normal pagination.
       const resetUncountedFilteredFeed = includeTotals === 0;
-      const preserveFeedDepth = includeTotals === 1
-        && !queryChanged && !restartFeedHead
-        && records.length > requestLimit;
+      const preserveFeedDepth = false;
       const data = await fetchJson(scopedUrl('/api/live-dashboard', {
         limit: requestLimit,
         compact: 1,

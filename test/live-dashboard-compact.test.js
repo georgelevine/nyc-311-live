@@ -292,7 +292,7 @@ test('dashboard can skip an expensive first-page matching total without changing
   assert.equal(defaultResponse.status, 200);
   const defaultPayload = await defaultResponse.json();
   assert.deepEqual(defaultPayload.records.map(record => record.srnumber), ['311-28390000']);
-  assert.equal(defaultPayload.page.matching_total, 1);
+  assert.equal(Object.hasOwn(defaultPayload.page, 'matching_total'), false);
 
   const skippedResponse = await fetch(
     `${baseUrl}/api/live-dashboard?limit=1&compact=1&status=Closed&include_totals=0`
@@ -596,7 +596,6 @@ test('BID map and feed pagination traverse every record beyond their former caps
     let feedBeforeSuffix = null;
     let feedSnapshotAt = null;
     let feedPages = 0;
-    let feedMatchingTotal = null;
     do {
       const parameters = new URLSearchParams({
         compact: '1',
@@ -611,7 +610,9 @@ test('BID map and feed pagination traverse every record beyond their former caps
       const response = await fetch(`${baseUrl}/api/live-dashboard?${parameters}`);
       assert.equal(response.status, 200);
       const payload = await response.json();
-      if (feedPages === 0) feedMatchingTotal = payload.page.matching_total;
+      if (feedPages === 0) {
+        assert.equal(Object.hasOwn(payload.page, 'matching_total'), false);
+      }
       for (const record of payload.records) {
         assert.equal(feedSeen.has(record.srnumber), false, record.srnumber);
         feedSeen.add(record.srnumber);
@@ -624,7 +625,6 @@ test('BID map and feed pagination traverse every record beyond their former caps
     } while (feedBeforeSuffix != null);
 
     assert.equal(feedSeen.size, insertedCount);
-    assert.equal(feedMatchingTotal, insertedCount);
     assert.equal(feedPages, 3);
   } finally {
     writable.exec(`
@@ -650,7 +650,7 @@ test('dashboard keyset pagination is stable and filters its full totals', async 
   const first = await firstResponse.json();
   assert.deepEqual(first.records.map(record => record.srnumber), ['311-28390001']);
   assert.equal(first.page.has_more, true);
-  assert.equal(first.page.matching_total, 2);
+  assert.equal(Object.hasOwn(first.page, 'matching_total'), false);
   assert.match(first.page.snapshot_at, /^\d{4}-\d{2}-\d{2}T/);
 
   const secondResponse = await fetch(
@@ -684,7 +684,7 @@ test('broad search stays on lightweight request-card fields', async () => {
   assert.equal(response.status, 200);
   const payload = await response.json();
   assert.deepEqual(payload.records, []);
-  assert.equal(payload.page.matching_total, 0);
+  assert.equal(Object.hasOwn(payload.page, 'matching_total'), false);
 });
 
 test('dashboard rejects cursors without their original snapshot', async () => {
@@ -839,7 +839,7 @@ test('exact dashboard lookups remain available outside the 300-record page contr
   assert.deepEqual(payload.records.map(record => record.srnumber), ['311-28389999']);
   assert.equal(payload.page.limit, 1);
   assert.equal(payload.page.has_more, false);
-  assert.equal(payload.page.matching_total, 1);
+  assert.equal(Object.hasOwn(payload.page, 'matching_total'), false);
 });
 
 test('map fast paths force suffix-ordered indexes and avoid temporary sorting', () => {

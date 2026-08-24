@@ -2592,7 +2592,7 @@ app.get('/api/live-dashboard', (req, res) => {
           : null);
       return { ...record, ...assessRecordAvailability(record) };
     });
-    const matchingTotal = beforeSuffix == null && includeTotals
+    const matchingTotal = !compact && beforeSuffix == null && includeTotals
       ? Number(database.prepare(`
           SELECT COUNT(*) AS count
           FROM ${liveSource}

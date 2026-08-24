@@ -268,7 +268,7 @@ test('map startup is self-hosted, exhaustively paginated, and automatically reco
   );
   assert.match(
     dashboard,
-    /const includeTotals = firstDashboardPayload\s*\? 0\s*:\s*Object\.keys\(dataFilters\)\.length === 0 \? 1 : 0/
+    /const includeTotals = 0/
   );
   assert.match(
     dashboard,
@@ -296,7 +296,7 @@ test('map startup is self-hosted, exhaustively paginated, and automatically reco
   );
   assert.match(
     dashboard,
-    /const preserveFeedDepth = includeTotals === 1\s*&& !queryChanged && !restartFeedHead/
+    /const preserveFeedDepth = false/
   );
   assert.match(
     dashboard,

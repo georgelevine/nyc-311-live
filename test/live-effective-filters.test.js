@@ -284,7 +284,7 @@ test('map and dashboard broad search use detail-only problem and address fallbac
     assert.deepEqual(map.records.map(record => record.srnumber), [detailOnlySr], query);
     assert.equal(map.stats.total, 1, query);
     assert.deepEqual(dashboard.records.map(record => record.srnumber), [detailOnlySr], query);
-    assert.equal(dashboard.page.matching_total, 1, query);
+    assert.equal(Object.hasOwn(dashboard.page, 'matching_total'), false, query);
   }
 });
 
