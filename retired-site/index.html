@@ -1,0 +1,558 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#10243f" />
+    <meta
+      name="description"
+      content="NYC BID 311 was an independent civic-data project that mapped and monitored NYC311 activity within New York City Business Improvement Districts. The project was retired in August 2026."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="NYC BID 311 — Project Retired" />
+    <meta
+      property="og:description"
+      content="An independent experiment in making NYC311 activity more useful to New York City Business Improvement Districts."
+    />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="NYC BID 311 — Project Retired" />
+    <meta
+      name="twitter:description"
+      content="An independent experiment in making NYC311 activity more useful to New York City Business Improvement Districts."
+    />
+    <title>NYC BID 311 — Project Retired</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #10243f;
+        --ink-soft: #516276;
+        --blue: #1568dc;
+        --blue-dark: #0d4fae;
+        --yellow: #ffdf00;
+        --paper: #f5f7f9;
+        --white: #ffffff;
+        --line: #d9e1e8;
+        --green: #168667;
+        --shadow: 0 24px 70px rgba(16, 36, 63, 0.12);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        min-width: 320px;
+        background: var(--paper);
+      }
+
+      body {
+        min-height: 100vh;
+        margin: 0;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at 10% 0%, rgba(21, 104, 220, 0.12), transparent 34rem),
+          linear-gradient(180deg, #fbfcfd 0%, var(--paper) 100%);
+        font-family:
+          Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        font-size: 16px;
+        line-height: 1.55;
+      }
+
+      body::before {
+        position: fixed;
+        inset: 0;
+        z-index: -1;
+        background-image:
+          linear-gradient(118deg, transparent 0 47%, rgba(16, 36, 63, 0.035) 47% 48%, transparent 48% 100%),
+          linear-gradient(28deg, transparent 0 69%, rgba(16, 36, 63, 0.025) 69% 70%, transparent 70% 100%);
+        background-size: 190px 190px, 270px 270px;
+        content: "";
+        pointer-events: none;
+      }
+
+      a {
+        color: inherit;
+      }
+
+      .page {
+        width: min(1180px, calc(100% - 40px));
+        margin: 0 auto;
+        padding: 34px 0 40px;
+      }
+
+      .masthead {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+        margin-bottom: 52px;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 15px;
+      }
+
+      .brand-mark {
+        position: relative;
+        display: grid;
+        width: 64px;
+        height: 64px;
+        place-items: center;
+        overflow: hidden;
+        border-radius: 18px;
+        color: var(--white);
+        background: linear-gradient(145deg, #2479ec, var(--blue-dark));
+        box-shadow: 0 12px 28px rgba(21, 104, 220, 0.25);
+        font-size: 26px;
+        font-weight: 850;
+        letter-spacing: -0.05em;
+      }
+
+      .brand-mark::after {
+        position: absolute;
+        right: 0;
+        bottom: 0;
+        width: 22px;
+        height: 7px;
+        background: var(--yellow);
+        content: "";
+      }
+
+      .brand-copy {
+        display: grid;
+        gap: 1px;
+      }
+
+      .brand-name {
+        font-size: 21px;
+        font-weight: 850;
+        letter-spacing: -0.025em;
+      }
+
+      .brand-kicker,
+      .eyebrow,
+      .card-label,
+      .status-label {
+        color: #647589;
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: 0.14em;
+        line-height: 1.2;
+        text-transform: uppercase;
+      }
+
+      .retired-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 9px;
+        min-height: 38px;
+        padding: 8px 15px;
+        border: 1px solid #cad4de;
+        border-radius: 999px;
+        color: #415267;
+        background: rgba(255, 255, 255, 0.72);
+        font-size: 13px;
+        font-weight: 750;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+
+      .retired-pill::before {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: #8494a5;
+        box-shadow: 0 0 0 5px #e8edf1;
+        content: "";
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1.5fr) minmax(310px, 0.75fr);
+        gap: 44px;
+        align-items: end;
+        margin-bottom: 30px;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        margin: 0 0 20px;
+        color: var(--blue-dark);
+      }
+
+      .eyebrow::before {
+        width: 32px;
+        height: 5px;
+        border-radius: 4px;
+        background: var(--yellow);
+        content: "";
+      }
+
+      h1 {
+        max-width: 870px;
+        margin: 0;
+        font-size: clamp(48px, 7.4vw, 96px);
+        font-weight: 880;
+        letter-spacing: -0.067em;
+        line-height: 0.96;
+      }
+
+      .hero-intro {
+        margin: 0 0 4px;
+        color: var(--ink-soft);
+        font-size: clamp(19px, 2vw, 24px);
+        font-weight: 520;
+        letter-spacing: -0.015em;
+        line-height: 1.38;
+      }
+
+      .notice {
+        position: relative;
+        overflow: hidden;
+        margin-bottom: 24px;
+        padding: 34px 38px 36px;
+        border: 1px solid #cdd8e2;
+        border-radius: 28px;
+        background: rgba(255, 255, 255, 0.92);
+        box-shadow: var(--shadow);
+      }
+
+      .notice::before {
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: 8px;
+        background: var(--yellow);
+        content: "";
+      }
+
+      .notice strong {
+        display: block;
+        margin-bottom: 8px;
+        font-size: clamp(25px, 3vw, 35px);
+        letter-spacing: -0.035em;
+        line-height: 1.15;
+      }
+
+      .notice p {
+        max-width: 900px;
+        margin: 0;
+        color: #536478;
+        font-size: 18px;
+      }
+
+      .status-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 12px;
+        margin-bottom: 24px;
+      }
+
+      .status-item {
+        min-height: 118px;
+        padding: 22px 24px;
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        background: rgba(255, 255, 255, 0.7);
+      }
+
+      .status-label {
+        display: block;
+        margin-bottom: 9px;
+      }
+
+      .status-value {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        font-size: 19px;
+        font-weight: 800;
+        letter-spacing: -0.02em;
+      }
+
+      .status-value::before {
+        width: 10px;
+        height: 10px;
+        flex: 0 0 auto;
+        border-radius: 50%;
+        background: #8494a5;
+        content: "";
+      }
+
+      .status-item:last-child .status-value::before {
+        background: var(--green);
+      }
+
+      .content-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 24px;
+      }
+
+      .card {
+        min-height: 330px;
+        padding: 34px 36px;
+        border: 1px solid var(--line);
+        border-radius: 26px;
+        background: var(--white);
+      }
+
+      .card-label {
+        display: block;
+        margin-bottom: 18px;
+        color: var(--blue-dark);
+      }
+
+      h2 {
+        max-width: 470px;
+        margin: 0 0 20px;
+        font-size: clamp(28px, 3.4vw, 41px);
+        letter-spacing: -0.045em;
+        line-height: 1.08;
+      }
+
+      .card p {
+        margin: 0;
+        color: #536478;
+        font-size: 17px;
+      }
+
+      .capabilities {
+        display: grid;
+        gap: 11px;
+        margin: 26px 0 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .capabilities li {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        color: #31445a;
+        font-weight: 690;
+      }
+
+      .capabilities li::before {
+        width: 8px;
+        height: 8px;
+        flex: 0 0 auto;
+        border-radius: 2px;
+        background: var(--blue);
+        content: "";
+        transform: rotate(45deg);
+      }
+
+      .cost-card {
+        color: var(--white);
+        border-color: var(--ink);
+        background:
+          linear-gradient(145deg, rgba(255, 223, 0, 0.13), transparent 52%),
+          var(--ink);
+      }
+
+      .cost-card .card-label {
+        color: var(--yellow);
+      }
+
+      .cost-card p {
+        color: #d8e1ea;
+      }
+
+      .cost-card p + p {
+        margin-top: 16px;
+      }
+
+      footer {
+        display: flex;
+        justify-content: space-between;
+        gap: 24px;
+        margin-top: 28px;
+        padding: 24px 2px 0;
+        border-top: 1px solid var(--line);
+        color: #6a7a8d;
+        font-size: 14px;
+      }
+
+      footer p {
+        margin: 0;
+      }
+
+      footer strong {
+        color: #43566b;
+      }
+
+      @media (max-width: 820px) {
+        .page {
+          width: min(100% - 28px, 680px);
+          padding-top: 20px;
+        }
+
+        .masthead {
+          margin-bottom: 42px;
+        }
+
+        .brand-mark {
+          width: 54px;
+          height: 54px;
+          border-radius: 15px;
+          font-size: 23px;
+        }
+
+        .brand-name {
+          font-size: 18px;
+        }
+
+        .brand-kicker {
+          font-size: 10px;
+        }
+
+        .hero {
+          grid-template-columns: 1fr;
+          gap: 24px;
+          align-items: start;
+        }
+
+        .hero-intro {
+          max-width: 590px;
+        }
+
+        .status-grid,
+        .content-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .card {
+          min-height: 0;
+        }
+      }
+
+      @media (max-width: 520px) {
+        .page {
+          width: min(100% - 22px, 460px);
+          padding-bottom: 24px;
+        }
+
+        .masthead {
+          align-items: flex-start;
+        }
+
+        .retired-pill {
+          padding: 8px 11px;
+          font-size: 10px;
+        }
+
+        .notice,
+        .card {
+          padding: 27px 24px;
+          border-radius: 22px;
+        }
+
+        .notice p,
+        .card p {
+          font-size: 16px;
+        }
+
+        .status-item {
+          min-height: auto;
+          padding: 19px 21px;
+        }
+
+        footer {
+          display: grid;
+          gap: 8px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="page">
+      <header class="masthead">
+        <div class="brand" aria-label="NYC BID 311">
+          <div class="brand-mark" aria-hidden="true">311</div>
+          <div class="brand-copy">
+            <span class="brand-name">NYC BID 311</span>
+            <span class="brand-kicker">Independent civic data project</span>
+          </div>
+        </div>
+        <span class="retired-pill">Project retired</span>
+      </header>
+
+      <section class="hero" aria-labelledby="page-title">
+        <div>
+          <p class="eyebrow">Archived August 2026</p>
+          <h1 id="page-title">A live view of 311 activity inside NYC’s BIDs.</h1>
+        </div>
+        <p class="hero-intro">
+          NYC BID 311 was an independent experiment in making service-request
+          activity more useful to New York City’s Business Improvement Districts.
+        </p>
+      </section>
+
+      <section class="notice" aria-label="Project status">
+        <strong>The project is no longer operating.</strong>
+        <p>
+          Live collection, status monitoring, email subscriptions, and the public
+          dashboard have been shut down. This page remains as a record of the idea
+          and the work behind it.
+        </p>
+      </section>
+
+      <section class="status-grid" aria-label="Retirement status">
+        <div class="status-item">
+          <span class="status-label">Data collection</span>
+          <span class="status-value">Stopped</span>
+        </div>
+        <div class="status-item">
+          <span class="status-label">Public dashboard</span>
+          <span class="status-value">Retired</span>
+        </div>
+        <div class="status-item">
+          <span class="status-label">Historical work</span>
+          <span class="status-value">Preserved offline</span>
+        </div>
+      </section>
+
+      <section class="content-grid">
+        <article class="card">
+          <span class="card-label">What it was</span>
+          <h2>One system for understanding BID-level 311 activity.</h2>
+          <p>
+            The project combined live NYC311 requests with official BID boundaries
+            to create a district-focused view of conditions across the city.
+          </p>
+          <ul class="capabilities">
+            <li>Collected incoming service requests</li>
+            <li>Matched requests to BID boundaries</li>
+            <li>Tracked agency updates and closures</li>
+            <li>Built live maps and historical trends</li>
+          </ul>
+        </article>
+
+        <article class="card cost-card">
+          <span class="card-label">Why it ended</span>
+          <h2>A personal project could not sustainably carry service-level costs.</h2>
+          <p>
+            Reliable operation required always-on collection, email processing,
+            reconciliation, storage, backups, and ongoing maintenance. Those costs
+            became too high to justify for an independently funded personal project.
+          </p>
+          <p>
+            Without paying clients, sponsors, or an organization to support the
+            system, there was no viable path to continue maintaining the NYC BID 311
+            data service responsibly.
+          </p>
+        </article>
+      </section>
+
+      <footer>
+        <p><strong>NYC BID 311</strong> · 2026</p>
+        <p>Independent project · Not affiliated with NYC311 or the City of New York</p>
+      </footer>
+    </main>
+  </body>
+</html>
