@@ -287,6 +287,87 @@
         background: var(--green);
       }
 
+      .gallery {
+        margin: 68px 0 24px;
+      }
+
+      .gallery-heading {
+        display: flex;
+        align-items: end;
+        justify-content: space-between;
+        gap: 32px;
+        margin-bottom: 24px;
+      }
+
+      .gallery-heading h2 {
+        margin-bottom: 0;
+      }
+
+      .gallery-heading p {
+        max-width: 475px;
+        margin: 0 0 3px;
+        color: var(--ink-soft);
+        font-size: 16px;
+      }
+
+      .gallery-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 24px;
+      }
+
+      .gallery-card {
+        min-width: 0;
+        margin: 0;
+        overflow: hidden;
+        border: 1px solid var(--line);
+        border-radius: 26px;
+        background: var(--white);
+        box-shadow: 0 18px 42px rgba(16, 36, 63, 0.08);
+      }
+
+      .gallery-card a {
+        display: block;
+        overflow: hidden;
+        background: #e9eef3;
+      }
+
+      .gallery-card img {
+        display: block;
+        width: 100%;
+        height: auto;
+        aspect-ratio: 16 / 9;
+        object-fit: cover;
+        transition: transform 180ms ease;
+      }
+
+      .gallery-card a:focus-visible {
+        outline: 4px solid var(--yellow);
+        outline-offset: -4px;
+      }
+
+      .gallery-card a:hover img {
+        transform: scale(1.012);
+      }
+
+      .gallery-card figcaption {
+        padding: 22px 24px 25px;
+      }
+
+      .gallery-card strong {
+        display: block;
+        margin-bottom: 7px;
+        font-size: 19px;
+        letter-spacing: -0.02em;
+      }
+
+      .gallery-card span {
+        display: block;
+        color: var(--ink-soft);
+        font-size: 15px;
+        line-height: 1.5;
+      }
+
       .content-grid {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -422,8 +503,14 @@
         }
 
         .status-grid,
+        .gallery-grid,
         .content-grid {
           grid-template-columns: 1fr;
+        }
+
+        .gallery-heading {
+          display: grid;
+          gap: 12px;
         }
 
         .card {
@@ -460,6 +547,23 @@
         .status-item {
           min-height: auto;
           padding: 19px 21px;
+        }
+
+        .gallery {
+          margin-top: 52px;
+        }
+
+        .gallery-card {
+          border-radius: 22px;
+        }
+
+        .gallery-card figcaption {
+          padding: 19px 20px 22px;
+        }
+
+        .gallery-card img {
+          aspect-ratio: 4 / 3;
+          object-position: center top;
         }
 
         footer {
@@ -514,6 +618,69 @@
         <div class="status-item">
           <span class="status-label">Historical work</span>
           <span class="status-value">Preserved offline</span>
+        </div>
+      </section>
+
+      <section class="gallery" aria-labelledby="gallery-title">
+        <div class="gallery-heading">
+          <div>
+            <span class="card-label">From the archive</span>
+            <h2 id="gallery-title">The project in action.</h2>
+          </div>
+          <p>
+            Views from the final preserved system, captured on August 27, 2026.
+            Select either image to see the full-size screenshot.
+          </p>
+        </div>
+
+        <div class="gallery-grid">
+          <figure class="gallery-card">
+            <a
+              href="assets/live-bid-request.png"
+              target="_blank"
+              rel="noopener"
+              aria-label="Open the full-size live BID request screenshot"
+            >
+              <img
+                src="assets/live-bid-request.png"
+                alt="NYC BID 311 live dashboard showing Hudson Square requests, its BID boundary map, and a closed request with its agency response"
+                width="1280"
+                height="720"
+                loading="lazy"
+              />
+            </a>
+            <figcaption>
+              <strong>Live BID map and request history</strong>
+              <span>
+                A Hudson Square request shown inside its exact BID boundary, with
+                submitted details, agency response, and closure confirmation.
+              </span>
+            </figcaption>
+          </figure>
+
+          <figure class="gallery-card">
+            <a
+              href="assets/bid-metrics.png"
+              target="_blank"
+              rel="noopener"
+              aria-label="Open the full-size historical BID metrics screenshot"
+            >
+              <img
+                src="assets/bid-metrics.png"
+                alt="NYC BID 311 historical metrics page showing date filters, request volume, daily average, closure percentage, and monthly trends"
+                width="1280"
+                height="720"
+                loading="lazy"
+              />
+            </a>
+            <figcaption>
+              <strong>Historical BID metrics</strong>
+              <span>
+                Date and district filters summarized 139,566 archived requests,
+                including volume, daily averages, closure share, and monthly trends.
+              </span>
+            </figcaption>
+          </figure>
         </div>
       </section>
 
